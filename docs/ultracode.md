@@ -137,8 +137,9 @@ covered four tasks with three repetitions per arm:
 | Modeled credits | 39.7077685 | 33.53982 |
 | Modeled credits per approved run | 4.9634710625 | 3.7266466667 |
 
-Totals include failed runs and exclude research, controller and reviewer costs.
-Credits are modeled usage, not invoice charges. Both versions failed all three
+Totals include recorded runtime calls and failed runs. Separate study preparation,
+orchestration and external review costs are excluded. Credits are modeled usage,
+not invoice charges. Both versions failed all three
 D2 ingestion runs. The overall quality verdict remains `NO_GO`; independent
 confirmation remains unopened. These exploratory sample results do not establish
 AGI or general superiority. Retained evaluator-only changes do not alter the
