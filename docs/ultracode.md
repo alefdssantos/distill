@@ -122,3 +122,26 @@ Runner regression checks:
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest tools.task_cost_eval.test_compare_parallel
 ```
+
+## Exploratory measured candidate
+
+The restored product sources match candidate
+`ca31afd6fa1bacec8bcfaf06435d9cff2586d735`, measured against baseline
+`ac7d11b7a4a97c9a1ffadbe6c288ed9783259414`. The paired development study
+covered four tasks with three repetitions per arm:
+
+| Measure | Baseline | Candidate |
+| --- | --- | --- |
+| Approved runs | 8/12 | 9/12 |
+| Raw elapsed time (seconds) | 2297.742882 | 1618.027047 |
+| Modeled credits | 39.7077685 | 33.53982 |
+| Modeled credits per approved run | 4.9634710625 | 3.7266466667 |
+
+Totals include failed runs and exclude research, controller and reviewer costs.
+Credits are modeled usage, not invoice charges. Both versions failed all three
+D2 ingestion runs. The overall quality verdict remains `NO_GO`; independent
+confirmation remains unopened. These exploratory sample results do not establish
+AGI or general superiority. Retained evaluator-only changes do not alter the
+restored shipped runtime.
+
+Evidence: `development-quality-verdict.json` and `binary-provenance-ca31afd6.json`.
