@@ -1644,8 +1644,8 @@ fn verbatim_or_normalize_fork(
         verbatim_fork: false,
     }
 }
-/// `true` only when the fork actually summarized (ran `normalize_forked_context`).
-/// A verbatim mirror-fork inherits items as-is and never normalizes, so it reports `false` even though its source is `Forked`.
+/// A fork whose inherited prefix was summarized or made portable for another account.
+/// A verbatim mirror-fork inherits items as-is and reports `false`.
 fn fork_context_normalized(source: &InitialContextSource, verbatim_fork: bool) -> bool {
     matches!(source, InitialContextSource::Forked) && !verbatim_fork
 }
@@ -1697,6 +1697,112 @@ enum BootstrapInitialContext {
 /// Unresolved non-empty resume is aborted by the caller before this runs.
 #[tracing::instrument(skip_all)]
 async fn bootstrap_initial_context(
+    request: &SubagentRequest,
+    resume_source: Option<&ResumeSourceData>,
+    ctx: &SubagentSpawnContext,
+    sampling_config: &distill_sampler::SamplerConfig,
+    child_session_info: &SessionInfo,
+    child_session_dir: &std::path::Path,
+    effective_model_id: &str,
+    window: resume_window::ResumeWindowPolicy,
+) -> BootstrapInitialContext {
+    let loaded = load_initial_context(
+        request,
+        resume_source,
+        ctx,
+        child_session_info,
+        child_session_dir,
+        effective_model_id,
+        window,
+    )
+    .await;
+    let BootstrapInitialContext::Ready(mut initial) = loaded else {
+        return loaded;
+    };
+    let needs_portability = match &initial.source {
+        InitialContextSource::Resumed => resume_source.is_some_and(|source| {
+            crate::agent::account_routing::account_history_admission_needs_portability(
+                &SessionInfo {
+                    id: acp::SessionId::new(source.child_session_id.clone()),
+                    cwd: source.child_cwd.clone(),
+                },
+                sampling_config,
+            )
+        }),
+        InitialContextSource::Forked => {
+            // Parent config and history are separate actor reads; inherited opaque
+            // state has no proven authority, even for an unchanged account id.
+            let parent_account = match ctx.parent_chat_state.as_ref() {
+                Some(parent) => parent.get_sampling_config().await.is_some_and(|previous| {
+                    previous
+                        .extra_headers
+                        .contains_key(crate::agent::account_routing::ROUTE_HEADER)
+                }),
+                None => false,
+            };
+            parent_account
+                || sampling_config
+                    .extra_headers
+                    .contains_key(crate::agent::account_routing::ROUTE_HEADER)
+                || ctx.parent_session_info.as_ref().is_some_and(|source| {
+                    crate::agent::account_routing::account_history_admission_needs_portability(
+                        source,
+                        sampling_config,
+                    )
+                })
+        }
+        InitialContextSource::New => false,
+    };
+    let portable_prefix_len = initial.prefix_len.map(|length| {
+        initial
+            .conversation
+            .iter()
+            .take(length)
+            .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
+            .count()
+    });
+    if needs_portability {
+        let rewritten =
+            crate::agent::account_routing::make_account_history_portable(&mut initial.conversation);
+        if rewritten {
+            initial.prefix_len = portable_prefix_len;
+            initial.verbatim_fork = false;
+        }
+        // The source transcript stays untouched when copied; an in-place resume
+        // changes its history only after the selected route can be persisted.
+        if let Err(error) =
+            crate::agent::account_routing::save_session_config(child_session_info, sampling_config)
+        {
+            return BootstrapInitialContext::ResumeAbort(format!(
+                "Could not persist selected account route: {error}"
+            ));
+        }
+        use crate::session::storage::StorageAdapter as _;
+        if let Err(error) = crate::session::storage::JsonlStorageAdapter::with_root(
+            crate::util::distill_home::distill_home(),
+        )
+        .replace_chat_history(child_session_info, &initial.conversation)
+        .await
+        {
+            return BootstrapInitialContext::ResumeAbort(format!(
+                "Could not persist portable account history: {error}"
+            ));
+        }
+        if rewritten && initial.source == InitialContextSource::Forked {
+            stamp_live_fork_session_metadata(
+                child_session_info,
+                &ctx.parent_session_id,
+                request.parent_prompt_id.clone(),
+                effective_model_id,
+                initial.prefix_len,
+                "forked",
+            );
+        }
+    }
+    BootstrapInitialContext::Ready(initial)
+}
+
+async fn load_initial_context(
     request: &SubagentRequest,
     resume_source: Option<&ResumeSourceData>,
     ctx: &SubagentSpawnContext,

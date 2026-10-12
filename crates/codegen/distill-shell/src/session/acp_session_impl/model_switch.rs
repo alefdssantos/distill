@@ -19,10 +19,28 @@ impl SessionActor {
             auto_compact_threshold_percent,
             system_prompt_label,
         } = switch;
-        if let Some(current) = self.chat_state_handle.get_sampling_config().await
-            && let Some(id) = current.conversation_group_id
+        let previous_config = self.chat_state_handle.get_sampling_config().await;
+        let account_handoff = previous_config.as_ref().is_some_and(|previous| {
+            (previous
+                .extra_headers
+                .contains_key(crate::agent::account_routing::ROUTE_HEADER)
+                || sampling_config
+                    .extra_headers
+                    .contains_key(crate::agent::account_routing::ROUTE_HEADER))
+                && crate::agent::account_routing::account_history_needs_portability(
+                    previous,
+                    &sampling_config,
+                )
+        });
+        if account_handoff && self.state.lock().await.running_task.is_some() {
+            return Err(acp::Error::invalid_params()
+                .data("Cannot change the account or model while a turn is running"));
+        }
+        if let Some(id) = previous_config
+            .as_ref()
+            .and_then(|current| current.conversation_group_id.as_ref())
         {
-            sampling_config.conversation_group_id = Some(id);
+            sampling_config.conversation_group_id = Some(id.clone());
         }
         if model_selection_intent {
             sampling_config
@@ -36,11 +54,22 @@ impl SessionActor {
             ),
             None => None,
         };
+        let mut portable_history = None;
+        if account_handoff {
+            let mut history = self.chat_state_handle.get_conversation().await;
+            if crate::agent::account_routing::make_account_history_portable(&mut history) {
+                portable_history = Some(history);
+            }
+        }
         // All rejecting work precedes installation of the harness, prompt, and model.
         crate::agent::account_routing::save_session_config(&self.session_info, &sampling_config)
             .map_err(|_| {
                 acp::Error::internal_error().data("Could not persist selected account route")
             })?;
+        if let Some(history) = portable_history {
+            persist_chat_history_jsonl_sync(&self.session_info, &history);
+            self.chat_state_handle.replace_conversation(history);
+        }
         if let Some(new_agent) = rebuilt_agent {
             self.install_rebuilt_agent(new_agent).await;
         }

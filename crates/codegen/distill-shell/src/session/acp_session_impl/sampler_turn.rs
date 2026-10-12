@@ -3,6 +3,7 @@
 //! It also covers sampling-failure recovery and per-response usage recording.
 
 use super::*;
+use crate::agent::account_routing::{account_history_needs_portability, make_account_history_portable};
 use distill_login::backend::{ActiveAuthBackend, AuthBackend};
 use distill_telemetry::region;
 use distill_telemetry::region::Parent;
@@ -81,45 +82,6 @@ fn sampler_route_backend_key(config: &SamplingConfig) -> &'static str {
         distill_sampling_types::ApiBackend::Responses => "responses",
         distill_sampling_types::ApiBackend::Messages => "messages",
     }
-}
-
-fn account_history_needs_portability(
-    previous: &distill_sampling_types::SamplingConfig,
-    next: &SamplingConfig,
-) -> bool {
-    previous.model != next.model
-        || previous.base_url != next.base_url
-        || previous.api_backend != next.api_backend
-        || crate::agent::account_routing::AccountRoute::read(&previous.extra_headers)
-            .ok()
-            .flatten()
-            .map(|route| route.account_id)
-            != crate::agent::account_routing::AccountRoute::read(&next.extra_headers)
-                .ok()
-                .flatten()
-                .map(|route| route.account_id)
-}
-
-/// Remove model-minted reasoning and retain backend tool context as text.
-fn make_account_history_portable(items: &mut Vec<ConversationItem>) -> bool {
-    if !items.iter().any(|item| {
-        matches!(
-            item,
-            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
-        )
-    }) {
-        return false;
-    }
-    *items = distill_chat_state::compaction_utils::strip_reasoning_blocks(std::mem::take(items))
-        .into_iter()
-        .map(|item| match item {
-            ConversationItem::BackendToolCall(call) => {
-                ConversationItem::assistant(call.text_summary())
-            }
-            other => other,
-        })
-        .collect();
-    true
 }
 
 /// A request to a Messages (`/messages`) endpoint, the backend whose cache usage the prefix trace reads.

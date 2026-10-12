@@ -4612,8 +4612,21 @@ impl MvpAgent {
             session_meta,
             requested.as_deref() == Some("auto"),
         );
+        let portable_history = !chat_history.is_empty()
+            && crate::agent::account_routing::account_history_admission_needs_portability(
+                &session_info,
+                &sampling_config,
+            )
+            && crate::agent::account_routing::make_account_history_portable(&mut chat_history);
         crate::agent::account_routing::save_session_config(&session_info, &sampling_config)
             .map_err(|_| acp::Error::internal_error().data("Could not persist selected account route"))?;
+        if portable_history {
+            use crate::session::storage::StorageAdapter as _;
+            crate::session::storage::JsonlStorageAdapter::with_root(crate::util::distill_home::distill_home())
+                .replace_chat_history(&session_info, &chat_history)
+                .await
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+        }
         let session_model_id = crate::agent::account_routing::AccountRoute::read(&sampling_config.extra_headers)
             .ok().flatten().map(|route| acp::ModelId::new(route.main_model))
             .unwrap_or(session_model_id);

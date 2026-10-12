@@ -8,6 +8,7 @@ use crate::accounts::{
 use anyhow::{Result, anyhow, ensure};
 use chrono::{Duration, Utc};
 use distill_sampler::SamplerConfig;
+use distill_sampling_types::ConversationItem;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +50,45 @@ impl AccountRoute {
             &self.main_model
         }
     }
+}
+
+pub(crate) fn account_history_needs_portability(
+    previous: &distill_sampling_types::SamplingConfig,
+    next: &SamplerConfig,
+) -> bool {
+    previous.model != next.model
+        || previous.base_url != next.base_url
+        || previous.api_backend != next.api_backend
+        || crate::agent::account_routing::AccountRoute::read(&previous.extra_headers)
+            .ok()
+            .flatten()
+            .map(|route| route.account_id)
+            != crate::agent::account_routing::AccountRoute::read(&next.extra_headers)
+                .ok()
+                .flatten()
+                .map(|route| route.account_id)
+}
+
+/// Remove model-minted reasoning and retain backend tool context as text.
+pub(crate) fn make_account_history_portable(items: &mut Vec<ConversationItem>) -> bool {
+    if !items.iter().any(|item| {
+        matches!(
+            item,
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+        )
+    }) {
+        return false;
+    }
+    *items = distill_chat_state::compaction_utils::strip_reasoning_blocks(std::mem::take(items))
+        .into_iter()
+        .map(|item| match item {
+            ConversationItem::BackendToolCall(call) => {
+                ConversationItem::assistant(call.text_summary())
+            }
+            other => other,
+        })
+        .collect();
+    true
 }
 
 pub(crate) fn provider_for_url(url: &str) -> Option<Provider> {
@@ -303,10 +343,7 @@ pub(crate) fn save_session_config(
     Ok(())
 }
 
-pub(crate) async fn load_session_config(
-    info: &crate::session::info::Info,
-    models: &IndexMap<String, ModelEntry>,
-) -> Result<Option<SamplerConfig>> {
+fn read_session_route(info: &crate::session::info::Info) -> Result<Option<PersistedAccountRoute>> {
     let dir = crate::session::persistence::ensure_owner_only_session_dir(info)?;
     let bytes = match std::fs::read(dir.join("account-route.json")) {
         Ok(bytes) => bytes,
@@ -323,6 +360,27 @@ pub(crate) async fn load_session_config(
             .all(|name| is_identity_anchor(name)),
         "Invalid persisted identity anchor"
     );
+    Ok(Some(saved))
+}
+
+/// Disk history and route metadata are separate writes. Account admissions cannot
+/// prove that opaque records came from the saved route, even if its id matches.
+/// Reading this authority never authenticates or refreshes the source account.
+pub(crate) fn account_history_admission_needs_portability(
+    source: &crate::session::info::Info,
+    next: &SamplerConfig,
+) -> bool {
+    next.extra_headers.contains_key(ROUTE_HEADER)
+        || !read_session_route(source).is_ok_and(|route| route.is_none())
+}
+
+pub(crate) async fn load_session_config(
+    info: &crate::session::info::Info,
+    models: &IndexMap<String, ModelEntry>,
+) -> Result<Option<SamplerConfig>> {
+    let Some(saved) = read_session_route(info)? else {
+        return Ok(None);
+    };
     let store = AccountStore::default();
     let previous = SamplerConfig {
         reasoning_effort: saved.reasoning_effort,

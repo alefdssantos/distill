@@ -1248,6 +1248,7 @@ pub(crate) async fn run_shell_child(
         &request,
         resume_source.as_ref(),
         &ctx,
+        &effective_sampling_config,
         &child_session_info,
         &child_session_dir,
         effective_model_id.0.as_ref(),

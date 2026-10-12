@@ -623,6 +623,223 @@ fn account_routing_named_only_session_admission_auto_and_cold_route_restore() {
                 assert_eq!(sampling.model, previous_sampling.model);
                 assert_eq!(sampling.extra_headers, previous_sampling.extra_headers);
                 assert_eq!(std::fs::read(&route_path).unwrap(), previous_route);
+
+                // Same-model account handoffs must normalize both live and durable history.
+                {
+                    use crate::session::storage::StorageAdapter as _;
+                    use base64::Engine as _;
+                    use distill_sampling_types::{ContentPart, ConversationItem, ToolCall, rs};
+                    let handle = agent.resident_handle(&sid).unwrap();
+                    fixture.quota("one", Some(10.0));
+                    let mut png = Vec::new();
+                    image::ImageBuffer::from_pixel(32, 32, image::Rgba([10u8, 20, 30, 255]))
+                        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                        .unwrap();
+                    let image_url = format!(
+                        "data:image/png;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(png)
+                    );
+                    // Wait behind Initialize before snapshotting or replacing startup history.
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    handle
+                        .cmd_tx
+                        .send(crate::session::SessionCommand::GetCurrentModel { responds_to: tx })
+                        .unwrap();
+                    assert_eq!(rx.await.unwrap().id, "gpt-6-luna");
+                    let mut history = handle.chat_state_handle.get_conversation().await;
+                    let ordinary = vec![
+                        ConversationItem::user("account handoff user"),
+                        ConversationItem::assistant_tool_calls(vec![ToolCall {
+                            id: "account_handoff_call".into(),
+                            name: "read_file".into(),
+                            arguments: "{}".into(),
+                        }]),
+                        ConversationItem::tool_result_with_images(
+                            "account_handoff_call",
+                            "account handoff result",
+                            vec![ContentPart::Image {
+                                url: image_url.into(),
+                            }],
+                        ),
+                        ConversationItem::agent_message("account handoff task"),
+                    ];
+                    history.push(ConversationItem::Reasoning(rs::ReasoningItem {
+                        id: "old-account-reason".into(),
+                        summary: vec![],
+                        content: None,
+                        encrypted_content: Some("old-account-secret".into()),
+                        status: None,
+                    }));
+                    history.push(ConversationItem::BackendToolCall(
+                        distill_sampling_types::BackendToolCallItem {
+                            kind: distill_sampling_types::BackendToolKind::WebSearch(
+                                rs::WebSearchToolCall {
+                                    id: "old-account-backend".into(),
+                                    status: rs::WebSearchToolCallStatus::Completed,
+                                    action: rs::WebSearchToolCallAction::Search(
+                                        rs::WebSearchActionSearch {
+                                            query: "handoff search context".into(),
+                                            sources: None,
+                                        },
+                                    ),
+                                },
+                            ),
+                        },
+                    ));
+                    history.extend(ordinary.clone());
+                    let assert_portable = |items: &[ConversationItem]| {
+                        assert!(!items.iter().any(|item| matches!(
+                            item,
+                            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+                        )));
+                        assert!(
+                            items
+                                .iter()
+                                .any(|item| item.text_content().contains("handoff search context"))
+                        );
+                        assert!(
+                            items
+                                .windows(ordinary.len())
+                                .any(|items| serde_json::to_value(items).unwrap()
+                                    == serde_json::to_value(&ordinary).unwrap()),
+                            "human, tool pair, image and raw agent provenance are unchanged"
+                        );
+                    };
+                    handle
+                        .chat_state_handle
+                        .replace_conversation(history.clone());
+                    // The chat actor must enqueue its rewrite before the storage flush.
+                    assert_eq!(
+                        handle.chat_state_handle.get_conversation_len().await,
+                        history.len()
+                    );
+                    drain_persistence(&agent, &sid).await;
+                    let dir = crate::session::persistence::session_dir(&handle.info);
+                    let history_path = dir.join("chat_history.jsonl");
+                    let route_path = dir.join("account-route.json");
+                    let before_history = std::fs::read(&history_path).unwrap();
+                    let backup = route_path.with_extension("handoff-backup");
+                    fixture.quota("two", Some(90.0)); // two and three both use Luna.
+                    std::fs::rename(&route_path, &backup).unwrap();
+                    std::fs::create_dir(&route_path).unwrap();
+                    let rejected = Box::pin(agent.set_model_gated(
+                        acp::SetSessionModelRequest::new(sid.clone(), acp::ModelId::new("auto")),
+                    ))
+                    .await;
+                    std::fs::remove_dir(&route_path).unwrap();
+                    std::fs::rename(&backup, &route_path).unwrap();
+                    assert!(rejected.is_err());
+                    assert_eq!(
+                        serde_json::to_value(handle.chat_state_handle.get_conversation().await)
+                            .unwrap(),
+                        serde_json::to_value(&history).unwrap()
+                    );
+                    drain_persistence(&agent, &sid).await;
+                    assert_eq!(std::fs::read(&history_path).unwrap(), before_history);
+                    Box::pin(agent.set_model_gated(acp::SetSessionModelRequest::new(
+                        sid.clone(),
+                        acp::ModelId::new("auto"),
+                    )))
+                    .await
+                    .expect("explicit Auto changes account on the same model");
+                    let switched = agent.resident_handle(&sid).unwrap();
+                    let sampling = switched
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap();
+                    assert_eq!(sampling.model, "gpt-6-luna");
+                    assert_eq!(
+                        AccountRoute::read(&sampling.extra_headers)
+                            .unwrap()
+                            .unwrap()
+                            .account_id,
+                        "two"
+                    );
+                    assert_portable(&switched.chat_state_handle.get_conversation().await);
+                    drain_persistence(&agent, &sid).await;
+                    let storage = crate::session::storage::JsonlStorageAdapter::with_root(
+                        crate::util::distill_home::distill_home(),
+                    );
+                    assert_portable(&storage.load_chat_history_from_dir(&dir).unwrap());
+
+                    // Cold load sees A's transcript while Auto now selects B, with no model change.
+                    switched
+                        .chat_state_handle
+                        .replace_conversation(history.clone());
+                    assert_eq!(
+                        switched.chat_state_handle.get_conversation_len().await,
+                        history.len()
+                    );
+                    drain_persistence(&agent, &sid).await;
+                    fixture.quota("three", Some(95.0));
+                    agent.remove_session(&sid);
+                    Box::pin(
+                        agent.load_session_inner(
+                            acp::LoadSessionRequest::new(sid.clone(), cwd.path().to_path_buf())
+                                .meta(serde_json::json!({"modelId":"auto"}).as_object().cloned()),
+                        ),
+                    )
+                    .await
+                    .expect("cold Auto normalizes the prior account transcript");
+                    let loaded = agent.resident_handle(&sid).unwrap();
+                    let sampling = loaded
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap();
+                    assert_eq!(sampling.model, "gpt-6-luna");
+                    assert_eq!(
+                        AccountRoute::read(&sampling.extra_headers)
+                            .unwrap()
+                            .unwrap()
+                            .account_id,
+                        "three"
+                    );
+                    assert_portable(&loaded.chat_state_handle.get_conversation().await);
+                    drain_persistence(&agent, &sid).await;
+                    assert_portable(&storage.load_chat_history_from_dir(&dir).unwrap());
+
+                    // Simulate route B already written while A's old history survived a restart.
+                    agent.remove_session(&sid);
+                    storage
+                        .replace_chat_history(&handle.info, &history)
+                        .await
+                        .unwrap();
+                    Box::pin(agent.load_session_inner(acp::LoadSessionRequest::new(
+                        sid.clone(),
+                        cwd.path().to_path_buf(),
+                    )))
+                    .await
+                    .expect("matching saved account cannot authenticate opaque disk history");
+                    let loaded = agent.resident_handle(&sid).unwrap();
+                    assert_portable(&loaded.chat_state_handle.get_conversation().await);
+                    let request = loaded
+                        .chat_state_handle
+                        .build_request(
+                            vec![],
+                            None,
+                            false,
+                            None,
+                            sid.0.to_string(),
+                            "handoff-proof".into(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_string(&request.items)
+                            .unwrap()
+                            .matches(
+                                distill_chat_state::compaction_utils::AGENT_MESSAGE_MODEL_LABEL
+                            )
+                            .count(),
+                        1
+                    );
+                    drain_persistence(&agent, &sid).await;
+                    assert_portable(&storage.load_chat_history_from_dir(&dir).unwrap());
+                    fixture.quota("two", Some(30.0));
+                    fixture.quota("three", Some(80.0));
+                }
                 let path = fixture.store.credential_path("three").unwrap();
                 std::fs::remove_file(path).unwrap();
                 assert!(
@@ -632,6 +849,216 @@ fn account_routing_named_only_session_admission_auto_and_cold_route_restore() {
                     "cold restore never adopts another account after logout"
                 );
                 agent.remove_session(&sid);
+            });
+        },
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn account_routing_active_turn_rejects_account_handoff_until_response_is_recorded() {
+    crate::agent::account_routing::tests::isolated(
+        "agent::mvp_agent::tests::account_routing_tests::account_routing_active_turn_rejects_account_handoff_until_response_is_recorded",
+        || {
+            run_local_for_bridge_test(|| async {
+                tokio::time::timeout(std::time::Duration::from_secs(45), async {
+                    use agent_client_protocol::Agent as _;
+                    use distill_sampling_types::ConversationItem;
+                    use distill_test_support::{
+                        InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer,
+                        MockModelEntry, ScriptedResponse,
+                        sse::responses_api_script_exact,
+                    };
+                    use serde_json::json;
+                    use std::sync::atomic::Ordering;
+
+                    let server = MockInferenceServer::start_with_models(vec![
+                        MockModelEntry::new("gpt-6-luna").with_api_backend("responses"),
+                    ])
+                    .await
+                    .unwrap();
+                    let fixture = NamedAccounts::new(&server.url());
+                    fixture.routing(crate::accounts::AutoStrategy::HighestRemaining, true);
+                    fixture.quota("one", Some(10.0));
+                    fixture.quota("two", Some(30.0));
+                    fixture.quota("three", Some(80.0));
+                    let mut routing = fixture.store.load_routing().unwrap();
+                    routing.options.iter_mut().find(|option| option.id == "two").unwrap()
+                        .worker_model = Some("gpt-6-luna".into());
+                    fixture.store.save_routing(&routing).unwrap();
+
+                    let auth_home = tempfile::tempdir().unwrap();
+                    let auth = std::sync::Arc::new(distill_login::AuthManager::new(
+                        auth_home.path(), distill_login::GrokComConfig::default(),
+                    ));
+                    let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                    tokio::task::spawn_local(async move {
+                        while let Some(message) = gateway_rx.recv().await {
+                            if let distill_acp_lib::AcpClientMessage::SessionNotification(args) = message {
+                                let _ = args.response_tx.send(Ok(()));
+                            }
+                        }
+                    });
+                    let agent = std::rc::Rc::new(MvpAgent::new(
+                        GatewaySender::new(gateway_tx), &config::Config::default(), auth, None, None,
+                    ).unwrap());
+                    // initialize_request is set below without the public initialize lifecycle.
+                    // A real prompt still needs the coordinator to answer its completion drain.
+                    agent.start_subagent_coordinator();
+                    for (id, model) in &fixture.models {
+                        let mut model = model.clone();
+                        model.info.supports_reasoning_effort = true;
+                        model.info.reasoning_effort = Some(ReasoningEffort::High);
+                        agent.models_manager.insert_test_entry(id, model);
+                    }
+                    agent.initialize_request.set(
+                        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+                            acp::ClientCapabilities::new()
+                                .fs(acp::FileSystemCapabilities::new()).terminal(false),
+                        ),
+                    ).unwrap();
+                    let cwd = tempfile::tempdir().unwrap();
+                    let sid = agent.new_session_inner(
+                        acp::NewSessionRequest::new(cwd.path().to_path_buf())
+                            .meta(json!({"modelId":"auto","workerModelId":"gpt-6.1-sol"}).as_object().cloned()),
+                    ).await.unwrap().session_id;
+                    let handle = agent.resident_handle(&sid).unwrap();
+
+                    let mut events = responses_api_script_exact("retained account A answer", "gpt-6-luna");
+                    assert_eq!(events.pop().unwrap().data, "[DONE]");
+                    let mut terminal = events.pop().unwrap();
+                    let mut completed: serde_json::Value = serde_json::from_str(&terminal.data).unwrap();
+                    let output = completed["response"]["output"].as_array_mut().unwrap();
+                    output.insert(0, json!({
+                        "type":"web_search_call", "id":"active-a-backend", "status":"completed",
+                        "action":{"type":"search", "query":"retained account A search"},
+                    }));
+                    output.insert(0, json!({
+                        "type":"reasoning", "id":"active-a-reason", "summary":[],
+                        "encrypted_content":"active-a-secret", "status":"completed",
+                    }));
+                    terminal.data = completed.to_string();
+                    // Block response.completed itself; no response items arrive before release.
+                    let matcher = InferenceRequestMatcher::foreground(InferenceEndpoint::Responses);
+                    let mut held = server.expect_response_blocked(
+                        "account A response", matcher,
+                        ScriptedResponse::sse(vec![events.remove(0), terminal]),
+                    );
+                    let first_prompt = tokio::task::spawn_local({
+                        let agent = agent.clone();
+                        let sid = sid.clone();
+                        async move {
+                            agent.prompt(acp::PromptRequest::new(sid, vec![
+                                acp::ContentBlock::Text(acp::TextContent::new("retained human question")),
+                            ]).meta(json!({"verbatim":true}).as_object().cloned())).await
+                        }
+                    });
+                    held.wait_blocked().await;
+                    assert!(!first_prompt.is_finished());
+                    let first_request = server.requests().into_iter()
+                        .find(|request| request.path == "/v1/responses" && request.conversation.is_some())
+                        .unwrap();
+                    assert_eq!(first_request.authorization.as_deref(), Some("Bearer three-token"));
+
+                    // An effort-only change keeps the same authority and remains allowed.
+                    Box::pin(agent.set_model_gated(
+                        acp::SetSessionModelRequest::new(sid.clone(), acp::ModelId::new("gpt-6-luna"))
+                            .meta(json!({"reasoningEffort":"low"}).as_object().cloned()),
+                    )).await.expect("same-account effort changes remain available during a turn");
+                    let current = agent.resident_handle(&sid).unwrap();
+                    let before_config = current.chat_state_handle.get_sampling_config().await.unwrap();
+                    assert_eq!(before_config.reasoning_effort, Some(ReasoningEffort::Low));
+                    assert_eq!(AccountRoute::read(&before_config.extra_headers).unwrap().unwrap().account_id, "three");
+                    let before_worker = current.worker_override.read().clone();
+                    assert_eq!(before_worker.as_ref().unwrap().model_id.as_deref(), Some("gpt-6.1-sol"));
+                    assert!(!current.jev_effort_auto.load(Ordering::Relaxed));
+                    let before_default_effort_auto = agent.models_manager.current_effort_auto();
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    current.cmd_tx.send(crate::session::SessionCommand::GetActiveAgent { responds_to: tx }).unwrap();
+                    let before_harness = rx.await.unwrap();
+                    let before_history = current.chat_state_handle.get_conversation().await;
+                    assert!(!before_history.iter().any(|item| matches!(
+                        item, ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+                    )));
+                    drain_persistence(&agent, &sid).await;
+                    let dir = crate::session::persistence::session_dir(&current.info);
+                    let before_files = ["account-route.json", "chat_history.jsonl", "system_prompt.txt", "prompt_context.json"]
+                        .map(|name| (name, std::fs::read(dir.join(name)).unwrap()));
+                    fixture.quota("two", Some(90.0));
+                    let auto_request = || acp::SetSessionModelRequest::new(sid.clone(), acp::ModelId::new("auto"))
+                        .meta(json!({"reasoningEffortAuto":true}).as_object().cloned());
+                    let rejected = Box::pin(agent.set_model_gated(auto_request())).await
+                        .expect_err("account handoff must wait for the active response");
+                    assert_eq!(rejected.data, Some(json!("Cannot change the account or model while a turn is running")));
+                    let unchanged = agent.resident_handle(&sid).unwrap();
+                    assert_eq!(unchanged.model_id, current.model_id);
+                    assert_eq!(unchanged.agent_name, current.agent_name);
+                    assert_eq!(*unchanged.worker_override.read(), before_worker);
+                    assert!(!unchanged.jev_effort_auto.load(Ordering::Relaxed));
+                    assert_eq!(agent.models_manager.current_effort_auto(), before_default_effort_auto);
+                    assert_eq!(
+                        serde_json::to_value(unchanged.chat_state_handle.get_sampling_config().await.unwrap()).unwrap(),
+                        serde_json::to_value(&before_config).unwrap(),
+                    );
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    unchanged.cmd_tx.send(crate::session::SessionCommand::GetActiveAgent { responds_to: tx }).unwrap();
+                    assert_eq!(rx.await.unwrap(), before_harness);
+                    assert!(
+                        serde_json::to_value(unchanged.chat_state_handle.get_conversation().await).unwrap()
+                            == serde_json::to_value(&before_history).unwrap(),
+                        "rejected handoff changed live history",
+                    );
+                    drain_persistence(&agent, &sid).await;
+                    for (name, bytes) in before_files {
+                        assert!(std::fs::read(dir.join(name)).unwrap() == bytes, "{name} changed after rejection");
+                    }
+                    assert!(!first_prompt.is_finished());
+                    held.release();
+                    assert_eq!(first_prompt.await.unwrap().unwrap().stop_reason, acp::StopReason::EndTurn);
+                    held.assert_satisfied();
+                    let after_response = handle.chat_state_handle.get_conversation().await;
+                    assert!(after_response.iter().any(|item| matches!(
+                        item, ConversationItem::Reasoning(reason) if reason.encrypted_content.as_deref() == Some("active-a-secret")
+                    )), "the late response must actually append account A's opaque reasoning");
+                    assert!(after_response.iter().any(|item| matches!(
+                        item, ConversationItem::BackendToolCall(call) if call.id() == "active-a-backend"
+                    )), "the late response must actually append account A's backend handle");
+
+                    Box::pin(agent.set_model_gated(auto_request())).await
+                        .expect("the same account handoff succeeds after the turn finishes");
+                    let switched = agent.resident_handle(&sid).unwrap();
+                    let config = switched.chat_state_handle.get_sampling_config().await.unwrap();
+                    assert_eq!(config.model, "gpt-6-luna");
+                    assert_eq!(AccountRoute::read(&config.extra_headers).unwrap().unwrap().account_id, "two");
+                    assert!(switched.jev_effort_auto.load(Ordering::Relaxed));
+                    assert_eq!(switched.worker_override.read().as_ref().unwrap().model_id.as_deref(), Some("gpt-6-luna"));
+                    assert!(!switched.chat_state_handle.get_conversation().await.iter().any(|item| matches!(
+                        item, ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+                    )));
+                    let second = server.expect_response(
+                        "account B response", matcher,
+                        ScriptedResponse::sse(responses_api_script_exact("account B done", "gpt-6-luna")),
+                    );
+                    let result = agent.prompt(acp::PromptRequest::new(sid.clone(), vec![
+                        acp::ContentBlock::Text(acp::TextContent::new("continue with retained context")),
+                    ]).meta(json!({"verbatim":true}).as_object().cloned())).await.unwrap();
+                    assert_eq!(result.stop_reason, acp::StopReason::EndTurn);
+                    second.assert_satisfied();
+                    let requests: Vec<_> = server.requests().into_iter()
+                        .filter(|request| request.path == "/v1/responses" && request.conversation.is_some())
+                        .collect();
+                    assert_eq!(requests.len(), 2);
+                    assert_eq!(requests[1].authorization.as_deref(), Some("Bearer two-token"));
+                    assert_eq!(requests[1].header("chatgpt-account-id"), Some("wire-two"));
+                    let wire = requests[1].body.as_ref().unwrap().to_string();
+                    for opaque in ["active-a-secret", "active-a-reason", "active-a-backend"] {
+                        assert!(!wire.contains(opaque), "account A opaque state replayed: {opaque}");
+                    }
+                    for ordinary in ["retained human question", "retained account A answer", "retained account A search"] {
+                        assert!(wire.contains(ordinary), "lost ordinary context: {ordinary}");
+                    }
+                    agent.remove_session(&sid);
+                }).await.expect("delayed-response account handoff finishes within the fixture deadline");
             });
         },
     );
