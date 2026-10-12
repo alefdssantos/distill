@@ -3912,3 +3912,67 @@ async fn ultracode_descendant_role_pin_beats_inherited_model_and_effort_defaults
     assert_eq!(unconfigured.reasoning_effort.as_deref(), Some("high"));
     assert!(request.runtime_overrides.model.is_none());
 }
+
+#[test]
+#[serial_test::serial]
+fn account_routing_subagent_uses_parent_selected_pair_and_explicit_pin_authority() {
+    crate::agent::account_routing::tests::isolated("agent::subagent::tests::rest::account_routing_subagent_uses_parent_selected_pair_and_explicit_pin_authority", || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+    use crate::agent::account_routing::{self, AccountRoute, tests::NamedAccounts};
+    let fixture = NamedAccounts::new("http://127.0.0.1:1/v1");
+    let mut routes = account_routing::routes_for_turn(&fixture.store, &fixture.models, &fixture.base(), true).await.unwrap();
+    let mut route = routes.pop().unwrap();
+    route.failed_options = vec!["one".into(), "two".into()];
+    let selected = account_routing::config_for_route(&fixture.store, &fixture.models, &fixture.base(), &route).await.unwrap();
+    let mut ctx = ctx_with_parent_chat_state("gpt-6-luna", "gpt-6-luna", "gpt-6.1-sol", fixture.models.clone());
+    ctx.sampling_config = selected.clone();
+    let persisted = serde_json::from_value(serde_json::to_value(&selected).unwrap()).unwrap();
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(persisted);
+    let (worker, mid, unavailable) = resolve_effective_model_config(None, "general-purpose", &ModelOverride::Inherit, Some("gpt-6.1-sol"), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "gpt-6.1-sol");
+    assert!(unavailable.is_none());
+    let selected = AccountRoute::read(&worker.extra_headers).unwrap().unwrap();
+    assert_eq!(selected.account_id, "three");
+    assert!(selected.worker);
+    assert_eq!(selected.failed_options, ["one", "two"]);
+    assert_eq!(worker.bearer_resolver.unwrap().current_bearer().as_deref(), Some("three-token"));
+    let (pinned, mid, _) = resolve_effective_model_config(Some("gpt-6-luna"), "general-purpose", &ModelOverride::Inherit, Some("gpt-6.1-sol"), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "gpt-6-luna");
+    assert!(pinned.extra_headers.contains_key(account_routing::PIN_HEADER), "explicit caller model keeps authority");
+
+    let mut chosen_entry = fixture.models["gpt-6-luna"].clone();
+    chosen_entry.info.model = "chosen-worker".into();
+    ctx.available_models.insert("chosen-worker".into(), chosen_entry);
+    let meta = serde_json::json!({"workerModelId":"chosen-worker"}).as_object().cloned();
+    ctx.parent_worker = crate::extensions::session_worker_model::worker_from_meta(meta.as_ref()).unwrap();
+    let mut parent = ctx.parent_chat_state.as_ref().unwrap().get_sampling_config().await.unwrap();
+    crate::extensions::session_worker_model::pin_from_meta(&mut parent.extra_headers, meta.as_ref(), false);
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(parent);
+    let mut request = bootstrap_test_request(false);
+    request.subagent_type = "general-purpose".into();
+    request.runtime_overrides.model_override_provenance = ModelOverrideProvenance::Tool;
+    let chosen = delegated_worker_model(&request, false, ctx.parent_worker.as_ref());
+    assert_eq!(chosen.as_deref(), Some("chosen-worker"));
+    let (worker, mid, unavailable) = resolve_effective_model_config(None, "general-purpose", &ModelOverride::Inherit, chosen.as_deref(), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "chosen-worker", "explicit worker beats the saved Auto pair");
+    assert!(unavailable.is_none());
+    assert!(worker.extra_headers.contains_key(account_routing::PIN_HEADER));
+    let admitted = account_routing::select_startup_config(&worker, &ctx.available_models, true).await.unwrap();
+    assert_eq!(admitted.model, "chosen-worker", "the child's first round keeps the chosen worker");
+
+    let meta = serde_json::json!({"workerModelId":""}).as_object().cloned();
+    ctx.parent_worker = crate::extensions::session_worker_model::worker_from_meta(meta.as_ref()).unwrap();
+    let mut parent = ctx.parent_chat_state.as_ref().unwrap().get_sampling_config().await.unwrap();
+    crate::extensions::session_worker_model::pin_from_meta(&mut parent.extra_headers, meta.as_ref(), false);
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(parent);
+    let disabled = delegated_worker_model(&request, true, ctx.parent_worker.as_ref());
+    assert!(disabled.is_none());
+    let (inherited, mid, unavailable) = resolve_effective_model_config(None, "general-purpose", &ModelOverride::Inherit, disabled.as_deref(), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "gpt-6-luna", "disabling the worker makes the child use Main");
+    assert!(unavailable.is_none());
+    assert!(AccountRoute::read(&inherited.extra_headers).unwrap().unwrap().pinned);
+
+        });
+    });
+}

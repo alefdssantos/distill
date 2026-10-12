@@ -328,9 +328,24 @@ fn is_tool_change_rejection(error: &SamplingError) -> bool {
 /// cause. A resend that failed latches nothing, and the next request tries the option again.
 fn latch_messages_refusals(first: MessagesCacheOptions, accepted: MessagesCacheOptions) {
     for (was_on, is_on, refused, option) in [
-        (first.extended_ttl, accepted.extended_ttl, &EXTENDED_CACHE_TTL_REFUSED, "the one-hour cache lifetime"),
-        (first.system_messages, accepted.system_messages, &SYSTEM_MESSAGES_REFUSED, "system-role messages"),
-        (first.deferred_tools, accepted.deferred_tools, &DEFERRED_TOOLS_REFUSED, "deferred tools"),
+        (
+            first.extended_ttl,
+            accepted.extended_ttl,
+            &EXTENDED_CACHE_TTL_REFUSED,
+            "the one-hour cache lifetime",
+        ),
+        (
+            first.system_messages,
+            accepted.system_messages,
+            &SYSTEM_MESSAGES_REFUSED,
+            "system-role messages",
+        ),
+        (
+            first.deferred_tools,
+            accepted.deferred_tools,
+            &DEFERRED_TOOLS_REFUSED,
+            "deferred tools",
+        ),
     ] {
         if was_on && !is_on && !refused.swap(true, Ordering::Relaxed) {
             tracing::warn!(option, "messages API refused an option and took the request without it; it stays off for this process");
@@ -441,9 +456,9 @@ fn apply_openrouter_variant(model: &mut String, base_url: &str, variant: Option<
 fn is_openrouter_base_url(base_url: &str) -> bool {
     reqwest::Url::parse(base_url).is_ok_and(|url| {
         url.scheme() == "https"
-            && url.host_str().is_some_and(|host| {
-                host == "openrouter.ai" || host.ends_with(".openrouter.ai")
-            })
+            && url
+                .host_str()
+                .is_some_and(|host| host == "openrouter.ai" || host.ends_with(".openrouter.ai"))
     })
 }
 
@@ -1032,6 +1047,22 @@ impl SamplingClient {
         // Apply all extra headers verbatim
         // This is the single injection point for proxy-auth headers and any other URL- or environment-specific headers the session decides to set
         for (key, value) in &config.extra_headers {
+            // Serialized shell routing and identity anchors are local metadata.
+            let lower = key.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "x-distill-account-route"
+                    | "x-distill-model-pin"
+                    | "x-distill-worker-pin"
+                    | "x-distill-account-unavailable"
+                    | "x-distill-credential-authority"
+            ) || lower.starts_with("x-distill-codex-")
+                || lower.starts_with("x-distill-claude-")
+                || lower.starts_with("x-distill-grok-")
+                || lower.starts_with("x-distill-openrouter-")
+            {
+                continue;
+            }
             let header_name = HeaderName::try_from(key.as_str())
                 .map_err(|_| SamplingError::InvalidConfiguration("Invalid extra header name"))?;
             let header_value = HeaderValue::from_str(value)
@@ -2318,7 +2349,11 @@ impl SamplingClient {
         self.default_headers
             .get("anthropic-beta")
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.split(',').any(|flag| flag.trim() == CLAUDE_OAUTH_BETA))
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|flag| flag.trim() == CLAUDE_OAUTH_BETA)
+            })
     }
 
     /// Create a message using the Anthropic Messages API (non-streaming).
@@ -3262,7 +3297,9 @@ mod tests {
     #[test]
     fn rejected_length_response_retains_paid_metadata_for_billing() {
         let response = ConversationResponse {
-            items: vec![distill_sampling_types::ConversationItem::assistant("partial")],
+            items: vec![distill_sampling_types::ConversationItem::assistant(
+                "partial",
+            )],
             stop_reason: Some(distill_sampling_types::StopReason::Length),
             usage: Some(distill_sampling_types::TokenUsage {
                 prompt_tokens: 11,
@@ -3279,8 +3316,10 @@ mod tests {
             stop_sequence: None,
         };
 
-        let (result, rejected) =
-            apply_length_policy_with_rejection(distill_sampling_types::LengthPolicy::Fail, response);
+        let (result, rejected) = apply_length_policy_with_rejection(
+            distill_sampling_types::LengthPolicy::Fail,
+            response,
+        );
 
         assert!(matches!(
             result,
@@ -5546,10 +5585,21 @@ mod cache_ttl_tests {
     fn the_cache_lifetime_follows_the_provider_and_the_accepted_hour() {
         let minutes = |m: u64| Some(Duration::from_secs(m * 60));
         let direct = "https://api.anthropic.com/v1";
-        assert_eq!(cache_lifetime_for(direct, &ApiBackend::Messages, "claude", true), minutes(60));
-        assert_eq!(cache_lifetime_for(direct, &ApiBackend::Messages, "claude", false), minutes(5));
         assert_eq!(
-            cache_lifetime_for("https://gateway.test/v1", &ApiBackend::Messages, "claude", true),
+            cache_lifetime_for(direct, &ApiBackend::Messages, "claude", true),
+            minutes(60)
+        );
+        assert_eq!(
+            cache_lifetime_for(direct, &ApiBackend::Messages, "claude", false),
+            minutes(5)
+        );
+        assert_eq!(
+            cache_lifetime_for(
+                "https://gateway.test/v1",
+                &ApiBackend::Messages,
+                "claude",
+                true
+            ),
             minutes(5),
             "a gateway never gets the hour"
         );

@@ -178,6 +178,7 @@ pub struct SettingsModalState {
 
     /// List viewport; mouse hit-test rects below are populated by render.
     pub list_area: Rect,
+    pub accounts_entry_rect: Rect,
     /// Click-hit rect per row, parallel to `rows`.
     pub row_rects: Vec<Rect>,
     /// Click-hit rect for the value column on each row.
@@ -256,6 +257,7 @@ impl SettingsModalState {
             },
             filtered_cache,
             list_area: Rect::default(),
+            accounts_entry_rect: Rect::default(),
             row_rects: Vec::new(),
             value_hit_rects: Vec::new(),
             editor_adornment_rects: (Rect::default(), Rect::default()),
@@ -530,6 +532,7 @@ impl SettingsModalState {
     /// Does not clear `hover_row`; that's cleared on mode transitions instead to avoid per-frame flicker.
     pub(crate) fn reset_hit_rects(&mut self) {
         self.list_area = Rect::default();
+        self.accounts_entry_rect = Rect::default();
         self.row_rects.clear();
         self.value_hit_rects.clear();
         self.editor_adornment_rects = (Rect::default(), Rect::default());

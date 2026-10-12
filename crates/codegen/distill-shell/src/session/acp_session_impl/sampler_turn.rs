@@ -67,10 +67,12 @@ fn sampler_attribution_endpoint_for(
     Some(url.to_string())
 }
 
-fn sampler_route_attribution_endpoint(
-    config: &distill_sampler::SamplerConfig,
-) -> Option<String> {
-    sampler_attribution_endpoint_for(&config.base_url, config.api_backend.clone(), &config.query_params)
+fn sampler_route_attribution_endpoint(config: &distill_sampler::SamplerConfig) -> Option<String> {
+    sampler_attribution_endpoint_for(
+        &config.base_url,
+        config.api_backend.clone(),
+        &config.query_params,
+    )
 }
 
 fn sampler_route_backend_key(config: &SamplingConfig) -> &'static str {
@@ -549,9 +551,7 @@ impl SessionActor {
             .await;
         let defs = defs
             .into_iter()
-            .map(|definition| {
-                compact_skill_tool_definition(definition, skill_tool_name.as_deref())
-            })
+            .map(|definition| compact_skill_tool_definition(definition, skill_tool_name.as_deref()))
             .collect();
 
         let plan_active = self.plan_mode.lock().is_active();
@@ -789,6 +789,9 @@ impl SessionActor {
                 reasoning_summary: None,
                 stream_tool_calls: None,
             });
+        let selected_account = cfg
+            .extra_headers
+            .contains_key(crate::agent::account_routing::ROUTE_HEADER);
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
         // Gate on the stable session classifier, not `creds.auth_type`; see `crate::agent::auth_method::session_token_auth_gate`
@@ -797,7 +800,7 @@ impl SessionActor {
         let auth_method = self.auth_method_id.load();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
-        let use_bearer_resolver = gate.active();
+        let use_bearer_resolver = gate.active() && !selected_account;
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
         // Refresh the session token before the sampler reads it; gated to sessions that use it.
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
@@ -812,6 +815,8 @@ impl SessionActor {
                 .as_ref()
                 .filter(|_| ActiveAuthBackend::default().is_xai_authority())
                 .and_then(|am| am.current_wire_valid().map(|a| a.key))
+        } else if selected_account {
+            None
         } else {
             creds.api_key
         };
@@ -858,7 +863,8 @@ impl SessionActor {
                 self.auth_manager.as_ref().map(|am| {
                     distill_login::credential_provider::WireValidBearerResolver::shared(am.clone())
                 })
-            } else if api_key.is_none()
+            } else if !selected_account
+                && api_key.is_none()
                 && !cfg.base_url.is_empty()
                 && crate::codex_auth::is_trusted_inference_base_url(&cfg.base_url)
             {
@@ -870,7 +876,8 @@ impl SessionActor {
                 Some(std::sync::Arc::new(
                     crate::codex_auth::CodexBearerResolver::from_headers(&extra_headers),
                 ))
-            } else if api_key.is_none()
+            } else if !selected_account
+                && api_key.is_none()
                 && crate::claude_auth::is_claude_backend(&cfg.base_url)
                 && crate::claude_auth::is_logged_in()
             {
@@ -882,7 +889,7 @@ impl SessionActor {
             } else {
                 None
             };
-        SamplingConfig {
+        let mut restored = SamplingConfig {
             api_key,
             base_url: cfg.base_url,
             mtls_cert_dir: cfg.mtls_cert_dir,
@@ -935,7 +942,18 @@ impl SessionActor {
                 crate::jev::main_variant()
             },
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+        };
+        if selected_account
+            && crate::agent::account_routing::restore_credentials(
+                &crate::accounts::AccountStore::default(),
+                &mut restored,
+            )
+            .await
+            .is_err()
+        {
+            crate::agent::account_routing::block_credentials(&mut restored);
         }
+        restored
     }
 
     /// Install the auto-mode permission classifier with a live LLM side-query.
@@ -1222,6 +1240,22 @@ impl SessionActor {
         self.signals_handle().clear_active_dispatch();
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
+        // Only the root starts a new operation; descendants inherit its selected pair and failed options.
+        if !self.startup_hints.is_subagent
+            && let Ok(Some(mut route)) =
+                crate::agent::account_routing::AccountRoute::read(&sampler_config.extra_headers)
+        {
+            let operation = format!(
+                "{}:{}",
+                self.session_info.id.0,
+                self.chat_state_handle.get_prompt_index().await
+            );
+            if route.operation_id.as_deref() != Some(&operation) {
+                route.failed_options.clear();
+                route.operation_id = Some(operation);
+            }
+            let _ = route.write(&mut sampler_config);
+        }
         crate::jev::begin_model_round();
         let (session_id, turn_id, round_id) = crate::jev::telemetry_context();
         tracing::info!(target: "jev.decision", event_kind = "llm_round_start",
@@ -1252,6 +1286,66 @@ impl SessionActor {
             || self.tool_context.sampler_retry_only_before_output
         {
             sampler_config.doom_loop_recovery = None;
+        }
+        // Account Auto has model authority; Jev still chooses effort on an explicit model.
+        let store = crate::accounts::AccountStore::default();
+        let models = self.models_manager.models();
+        let auto_allowed = (!self.startup_hints.is_subagent || !self.model_routing_locked.get())
+            && !sampler_config
+                .extra_headers
+                .contains_key("x-distill-account-unavailable");
+        if !sampler_config
+            .extra_headers
+            .contains_key("x-distill-account-unavailable")
+        {
+            match crate::agent::account_routing::routes_for_turn(
+                &store,
+                &models,
+                &sampler_config,
+                auto_allowed,
+            )
+            .await
+            {
+                Ok(routes) if !routes.is_empty() => {
+                    match crate::agent::account_routing::config_for_route(
+                        &store,
+                        &models,
+                        &sampler_config,
+                        &routes[0],
+                    )
+                    .await
+                    {
+                        Ok(config) => {
+                            sampler_config = config;
+                            if self.persist_account_config(&sampler_config).await.is_err() {
+                                crate::agent::account_routing::block_credentials(
+                                    &mut sampler_config,
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            crate::agent::account_routing::block_credentials(&mut sampler_config)
+                        }
+                    }
+                }
+                Ok(_)
+                    if store.load_routing().is_ok_and(|routing| routing.enabled)
+                        && auto_allowed
+                        && !sampler_config
+                            .extra_headers
+                            .contains_key(crate::agent::account_routing::PIN_HEADER)
+                        && !crate::agent::account_routing::AccountRoute::read(
+                            &sampler_config.extra_headers,
+                        )
+                        .ok()
+                        .flatten()
+                        .is_some_and(|route| route.pinned) =>
+                {
+                    crate::agent::account_routing::block_credentials(&mut sampler_config);
+                }
+                Ok(_) => {}
+                Err(_) => crate::agent::account_routing::block_credentials(&mut sampler_config),
+            }
         }
         // Route consumption happens when the request is sent, so publish the
         // final model after every tier/floor/override has run. A model route
@@ -1565,11 +1659,7 @@ impl SessionActor {
         // The remaining mid-salvage kinds (rate limit) take their terminal arms below
         if !mid_salvage_continuation
             && self
-                .should_compact_on_error_for_route(
-                    &error,
-                    route_config,
-                    requested_output_tokens,
-                )
+                .should_compact_on_error_for_route(&error, route_config, requested_output_tokens)
                 .await
         {
             let cw = compaction::error_context_window(&error, route_config)
@@ -2141,8 +2231,7 @@ impl SessionActor {
         let message = format!(
             "The selected model route cannot fit this request ({} input + {} reserved output + {} framing margin exceeds {}-token effective window for model '{}'{}).",
             trigger_info.tokens_used,
-            reserved_output
-                .map_or_else(|| "unknown".to_owned(), |tokens| tokens.to_string()),
+            reserved_output.map_or_else(|| "unknown".to_owned(), |tokens| tokens.to_string()),
             compaction::REQUEST_CONTEXT_SAFETY_MARGIN_TOKENS,
             trigger_info.context_window,
             model,
@@ -2201,6 +2290,14 @@ impl SessionActor {
         } else {
             None
         };
+        if route_config.as_ref().is_some_and(|config| {
+            config
+                .extra_headers
+                .contains_key("x-distill-account-unavailable")
+        }) {
+            return Err(acp::Error::internal_error()
+                .data("Selected account is unavailable or its identity changed"));
+        }
         // A round the decision layer moved (e.g. to the local model) must name
         // that model in the request: the chat state built it with the session's.
         let mut routed_local = false;
@@ -2221,6 +2318,21 @@ impl SessionActor {
         {
             return Ok(SamplerTurnOutcome::CompactAndResubmit);
         }
+        if let Some(config) = route_config.as_ref()
+            && crate::agent::account_routing::AccountRoute::read(&config.extra_headers)
+                .ok()
+                .flatten()
+                .is_some_and(|route| route.option_id.is_some() && !route.pinned)
+        {
+            return self
+                .run_account_fallback(
+                    request,
+                    config.clone(),
+                    caller_output_tokens,
+                    mid_salvage_continuation,
+                )
+                .await;
+        }
         if !budget.can_wait() {
             if routed_local {
                 // Main sessions normally do not own a 429 wait budget, but a
@@ -2236,9 +2348,7 @@ impl SessionActor {
                     .await
                 {
                     Ok(outcome) => Ok(outcome),
-                    Err(info)
-                        if local_route_falls_back(&info, self.startup_hints.cheap_agent) =>
-                    {
+                    Err(info) if local_route_falls_back(&info, self.startup_hints.cheap_agent) => {
                         route_config = Some(self.undo_local_route(&mut request, &info).await);
                         self.bound_request_output_to_route(
                             &mut request,
@@ -2295,9 +2405,9 @@ impl SessionActor {
                 };
             }
             // Nothing will send this request a second time, so move it into the sampler instead of deep-cloning the whole message history on every main-session turn
-            let route_output_tokens = route_config.as_ref().and_then(|config| {
-                compaction::configured_output_token_budget(&request, config)
-            });
+            let route_output_tokens = route_config
+                .as_ref()
+                .and_then(|config| compaction::configured_output_token_budget(&request, config));
             return match self
                 .submit_turn_request_with_route(request, route_config.as_ref())
                 .await
@@ -2320,9 +2430,9 @@ impl SessionActor {
         }
 
         loop {
-            let route_output_tokens = route_config.as_ref().and_then(|config| {
-                compaction::configured_output_token_budget(&request, config)
-            });
+            let route_output_tokens = route_config
+                .as_ref()
+                .and_then(|config| compaction::configured_output_token_budget(&request, config));
             match self
                 .submit_turn_request_with_route(request.clone(), route_config.as_ref())
                 .await
@@ -2406,6 +2516,138 @@ impl SessionActor {
         }
     }
 
+    /// Persist only route metadata/model parameters; credentials are resolved from its account.
+    async fn persist_account_config(&self, config: &SamplingConfig) -> anyhow::Result<()> {
+        crate::agent::account_routing::save_session_config(&self.session_info, config)?;
+        let state = distill_sampling_types::SamplingConfig {
+            base_url: config.base_url.clone(),
+            mtls_cert_dir: config.mtls_cert_dir.clone(),
+            model: config.model.clone(),
+            max_completion_tokens: config.max_completion_tokens,
+            temperature: config.temperature,
+            top_p: config.top_p,
+            max_retries: config.max_retries,
+            rate_limit_retry_threshold: config.rate_limit_retry_threshold,
+            api_backend: config.api_backend.clone(),
+            extra_headers: config.extra_headers.clone(),
+            conversation_group_id: config.conversation_group_id.clone(),
+            query_params: config.query_params.clone(),
+            env_http_headers: config.env_http_headers.clone(),
+            context_window: std::num::NonZeroU64::new(config.context_window)
+                .expect("catalog context window"),
+            reasoning_effort: config.reasoning_effort,
+            reasoning_shape: config.reasoning_shape,
+            reasoning_summary: config.reasoning_summary,
+            stream_tool_calls: Some(config.stream_tool_calls),
+        };
+        self.chat_state_handle.update_sampling_config(state);
+        self.supports_backend_search
+            .set(config.supports_backend_search);
+        self.compactions_remaining.set(config.compactions_remaining);
+        self.compaction_at_tokens.set(config.compaction_at_tokens);
+        self.invalidate_model_auth_memo();
+        Ok(())
+    }
+
+    async fn run_account_fallback(
+        self: &Arc<Self>,
+        mut request: ConversationRequest,
+        initial: SamplingConfig,
+        caller_output_tokens: Option<u32>,
+        mid_salvage_continuation: bool,
+    ) -> Result<SamplerTurnOutcome, acp::Error> {
+        use crate::agent::account_routing;
+        let store = crate::accounts::AccountStore::default();
+        let models = self.models_manager.models();
+        let routes = account_routing::routes_for_turn(&store, &models, &initial, true)
+            .await
+            .map_err(|_| {
+                acp::Error::internal_error().data("Account routing configuration is invalid")
+            })?;
+        let mut attempted = std::collections::HashSet::new();
+        let mut failed_options = account_routing::AccountRoute::read(&initial.extra_headers)
+            .ok()
+            .flatten()
+            .map_or_else(Vec::new, |route| route.failed_options);
+        for mut route in routes {
+            route.failed_options = failed_options.clone();
+            if !attempted.insert((route.account_id.clone(), route.model().to_owned())) {
+                continue;
+            }
+            let config = account_routing::config_for_route(&store, &models, &initial, &route)
+                .await
+                .map_err(|_| {
+                    acp::Error::internal_error().data("Selected account authentication failed")
+                })?;
+            self.persist_account_config(&config).await.map_err(|_| {
+                acp::Error::internal_error().data("Could not persist selected account route")
+            })?;
+            self.sampler_handle.update_config(config.clone());
+            request.model = Some(config.model.clone());
+            request.reasoning_effort = config.reasoning_effort;
+            self.bound_request_output_to_route(&mut request, caller_output_tokens, Some(&config))
+                .await;
+            self.signals_handle().set_active_dispatch(
+                config.model.clone(),
+                config.reasoning_effort.map(|effort| effort.to_string()),
+                Some(config.context_window),
+            );
+            self.jev_ledger
+                .borrow_mut()
+                .set_pending_route_with_locality(config.model.clone(), false);
+            self.jev_ledger
+                .borrow_mut()
+                .set_pending_request_effort(config.reasoning_effort);
+            self.note_round_for_turn_report(&config);
+            self.emit_status_snapshot_detached();
+            if self
+                .preflight_route_context(&request, Some(&config), mid_salvage_continuation)
+                .await?
+            {
+                return Ok(SamplerTurnOutcome::CompactAndResubmit);
+            }
+            match self
+                .submit_turn_request_with_route(request.clone(), Some(&config))
+                .await
+            {
+                Ok(outcome) => return Ok(outcome),
+                Err(info)
+                    if account_routing::quota_fallback_eligible(
+                        &info,
+                        store
+                            .get(&route.account_id)
+                            .map_err(|_| acp::Error::internal_error())?
+                            .provider,
+                    ) =>
+                {
+                    if let Some(id) = route.option_id.as_ref() {
+                        failed_options.push(id.clone());
+                    }
+                    route.failed_options = failed_options.clone();
+                    let mut rejected = config.clone();
+                    route
+                        .write(&mut rejected)
+                        .map_err(|_| acp::Error::internal_error())?;
+                    self.persist_account_config(&rejected)
+                        .await
+                        .map_err(|_| acp::Error::internal_error())?;
+                    self.turn_phases.record_sampling_retries(1);
+                }
+                Err(info) => {
+                    return Err(acp::Error::internal_error().data(
+                        crate::sampling::error::terminal_error_data(
+                            info.message,
+                            info.status_code,
+                            info.kind,
+                        ),
+                    ));
+                }
+            }
+        }
+        Err(acp::Error::internal_error()
+            .data("All account routing options are exhausted or unavailable"))
+    }
+
     async fn submit_turn_request(
         self: &Arc<Self>,
         request: ConversationRequest,
@@ -2432,7 +2674,11 @@ impl SessionActor {
         request.long_cache_ttl = super::prompt_cache::long_wait_likely(&request.items);
         // The endpoint this request goes to, for the cache lifetime it gets (see below).
         let cache_route = match route_config {
-            Some(config) => Some((config.base_url.clone(), config.api_backend.clone(), config.model.clone())),
+            Some(config) => Some((
+                config.base_url.clone(),
+                config.api_backend.clone(),
+                config.model.clone(),
+            )),
             None => self
                 .chat_state_handle
                 .get_sampling_config()
@@ -2496,8 +2742,12 @@ impl SessionActor {
                 let mut cache_lifetime = None;
                 if let Some((base_url, api_backend, model)) = &cache_route {
                     let model = actual_model.as_deref().unwrap_or(model);
-                    cache_lifetime =
-                        distill_sampler::prompt_cache_lifetime(base_url, api_backend, model, long_cache_ttl);
+                    cache_lifetime = distill_sampler::prompt_cache_lifetime(
+                        base_url,
+                        api_backend,
+                        model,
+                        long_cache_ttl,
+                    );
                     self.chat_state_handle.record_cache_lifetime(cache_lifetime);
                 }
                 if let (Some(mut sent), Some(usage)) = (sent_prefix, response.usage.as_ref()) {
@@ -2633,7 +2883,10 @@ impl SessionActor {
                 } else {
                     StreamDrainOutcome::Revoked
                 };
-                let final_info = error_after_stream_drain(outcome, original);
+                let mut final_info = error_after_stream_drain(outcome, original);
+                if collected.output_observed {
+                    final_info.should_retry = Some(false);
+                }
                 self.remember_observed_route_context_cap(
                     &final_info,
                     route_config,
@@ -2670,8 +2923,14 @@ impl SessionActor {
         } else {
             None
         };
-        let (configured_model, api_backend, reasoning_shape, configured_effort, max_output_tokens,
-            endpoint) = match route_config {
+        let (
+            configured_model,
+            api_backend,
+            reasoning_shape,
+            configured_effort,
+            max_output_tokens,
+            endpoint,
+        ) = match route_config {
             Some(config) => (
                 config.model.clone(),
                 config.api_backend.clone(),
@@ -2683,7 +2942,9 @@ impl SessionActor {
             None => {
                 let config = parent_config.as_ref();
                 (
-                    config.map(|config| config.model.clone()).unwrap_or_default(),
+                    config
+                        .map(|config| config.model.clone())
+                        .unwrap_or_default(),
                     config
                         .map(|config| config.api_backend.clone())
                         .unwrap_or_default(),
@@ -2703,9 +2964,7 @@ impl SessionActor {
             .map(str::to_owned)
             .or_else(|| (!configured_model.is_empty()).then_some(configured_model))
             .unwrap_or_else(|| "<unknown>".to_owned());
-        let configured_effort = request
-            .reasoning_effort
-            .or(configured_effort);
+        let configured_effort = request.reasoning_effort.or(configured_effort);
         let requested_effort = configured_effort.map(|effort| effort.to_string());
         let applied_effort = distill_sampling_types::transmitted_reasoning_effort(
             api_backend,

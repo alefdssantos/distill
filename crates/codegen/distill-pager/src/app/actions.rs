@@ -622,6 +622,8 @@ pub enum Action {
     /// Open the settings modal (F2, `/settings`, command palette).
     /// If already open, closes it instead of stacking.
     OpenSettings,
+    OpenAccounts,
+    AccountsRequest(crate::views::accounts_modal::AccountsRequest),
     /// Open settings on a registry key: its chooser, or the browse row when the setting is locked.
     OpenSettingsFocus {
         key: &'static str,
@@ -1467,10 +1469,20 @@ pub enum AfterSessionDelete {
     /// Unused optimistic home husk: remove on-disk data without a toast or view change.
     UnusedHusk,
 }
+#[derive(Debug)]
+pub struct AccountsTask {
+    pub agent_id: AgentId,
+    pub instance: u64,
+    pub seq: u64,
+    pub request: crate::views::accounts_modal::AccountsRequest,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
 /// Async side effect produced by [`super::dispatch::dispatch`].
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
+    Accounts(AccountsTask),
     LoginProvider {
         provider: LoginProvider,
         attempt_id: u64,
@@ -2519,6 +2531,16 @@ pub enum WorkspaceWriteCompletion {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    AccountsLoginFeedback {
+        agent_id: AgentId, instance: u64, seq: u64,
+        feedback: Option<distill_shell::accounts::AccountLoginFeedback>,
+    },
+    AccountsFinished {
+        agent_id: AgentId,
+        instance: u64,
+        seq: u64,
+        result: Result<crate::views::accounts_modal::AccountsData, String>,
+    },
     ProviderLoginFinished {
         provider: LoginProvider,
         attempt_id: u64,

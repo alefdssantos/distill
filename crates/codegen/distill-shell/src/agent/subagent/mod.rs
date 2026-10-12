@@ -669,7 +669,11 @@ pub(super) fn worker_review_byte_limit(
         && !request.run_in_background
         && request.surface_completion
         && request.runtime_overrides.output_schema.is_none())
-    .then_some(if parent_non_interactive { 24_000 } else { 8_000 })
+    .then_some(if parent_non_interactive {
+        24_000
+    } else {
+        8_000
+    })
 }
 
 /// Paths `git status` reports as changed or untracked under `cwd`, relative to it.
@@ -809,8 +813,7 @@ pub(super) async fn worker_repository_review(
                 "DISTILL_REVIEW_PATHSPECS".to_owned(),
                 file.path().to_string_lossy().into_owned(),
             );
-            const GIT: &str =
-                "git --no-optional-locks --literal-pathspecs -c core.fsmonitor=false";
+            const GIT: &str = "git --no-optional-locks --literal-pathspecs -c core.fsmonitor=false";
             terminal
                 .run(crate::terminal::TerminalRunRequest {
                     tool_call_id: acp::ToolCallId::new(format!(
@@ -908,24 +911,29 @@ pub(super) fn with_worker_fallback_warning(output: &str, worker: &str, model: &s
 /// The latest tool batch and its recorded results, rather than the child's claim.
 pub(super) fn worker_execution_evidence(conversation: &[ConversationItem]) -> String {
     let mut evidence = String::new();
-    if let Some((index, assistant)) = conversation
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, item)| match item {
-            ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty() => {
-                Some((index, assistant))
-            }
-            _ => None,
-        })
-    {
-        for call in &assistant.tool_calls {
-            let result = conversation[index + 1..].iter().find_map(|item| match item {
-                ConversationItem::ToolResult(result) if result.tool_call_id == call.id.as_ref() => {
-                    Some(result.content.as_ref())
+    if let Some((index, assistant)) =
+        conversation
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| match item {
+                ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty() => {
+                    Some((index, assistant))
                 }
                 _ => None,
-            });
+            })
+    {
+        for call in &assistant.tool_calls {
+            let result = conversation[index + 1..]
+                .iter()
+                .find_map(|item| match item {
+                    ConversationItem::ToolResult(result)
+                        if result.tool_call_id == call.id.as_ref() =>
+                    {
+                        Some(result.content.as_ref())
+                    }
+                    _ => None,
+                });
             evidence.push_str(&format!(
                 "tool={} arguments={}\nrecorded_result={}\n",
                 call.name,
@@ -944,7 +952,9 @@ pub(super) fn worker_execution_evidence(conversation: &[ConversationItem]) -> St
         }
         evidence.truncate(end);
     }
-    format!("<worker_execution_evidence>\nHarness-captured last tool batch. Assess what its commands/results prove; this is not a test verdict. truncated={truncated}\n{evidence}\n</worker_execution_evidence>")
+    format!(
+        "<worker_execution_evidence>\nHarness-captured last tool batch. Assess what its commands/results prove; this is not a test verdict. truncated={truncated}\n{evidence}\n</worker_execution_evidence>"
+    )
 }
 /// The worker's effort for a delegated child that runs on the worker model:
 /// `Some(None)` is auto (Jev picks it per call), `Some(Some(level))` pins the
@@ -989,18 +999,20 @@ pub(crate) fn delegated_worker_model(
     _resuming: bool,
     session_worker: Option<&crate::session::handle::SessionWorker>,
 ) -> Option<String> {
-    if request.fork_context
-        || request.runtime_overrides.model.is_some()
-        || request.runtime_overrides.model_override_provenance != ModelOverrideProvenance::Tool
-        || (matches!(request.subagent_type.as_str(), "plan" | "code-reviewer")
-            && !request.jev_worker_ok)
-    {
+    if !delegated_worker_eligible(request) {
         return None;
     }
     match session_worker {
         Some(worker) => worker.model_id.clone(),
         None => crate::jev::worker_model(),
     }
+}
+pub(crate) fn delegated_worker_eligible(request: &SubagentRequest) -> bool {
+    !request.fork_context
+        && request.runtime_overrides.model.is_none()
+        && request.runtime_overrides.model_override_provenance == ModelOverrideProvenance::Tool
+        && (!matches!(request.subagent_type.as_str(), "plan" | "code-reviewer")
+            || request.jev_worker_ok)
 }
 /// E6: whether a child may run its rounds on the utility model. Only a fresh
 /// `explore` child (read-only) that the parent model spawned with no model of
@@ -1039,7 +1051,9 @@ fn cheap_agent_tripped(parent_session_id: &str) -> bool {
 }
 /// Keeps `parent_session_id`'s later children off the utility model.
 pub(crate) fn trip_cheap_agent(parent_session_id: &str) {
-    cheap_agent_trips().lock().insert(parent_session_id.to_owned());
+    cheap_agent_trips()
+        .lock()
+        .insert(parent_session_id.to_owned());
 }
 /// Inherited pins are defaults: explicit descendant runtime, role/persona,
 /// definition and per-type config choices have already had their turn.
@@ -1078,7 +1092,12 @@ async fn resolve_subagent_sampling_config(
     let (parent_config, parent_mid) = read_parent_sampling_config(ctx).await;
     let try_pin = |model_id: &str, source: &'static str, unknown_msg: &'static str| {
         match resolve_model_override_to_config(model_id, ctx) {
-            Some((config, canonical_id)) => {
+            Some((mut config, canonical_id)) => {
+                if source != "worker_model" {
+                    config
+                        .extra_headers
+                        .insert(crate::agent::account_routing::PIN_HEADER.into(), "1".into());
+                }
                 log_subagent_model_resolution(
                     agent_name,
                     source,
@@ -1112,6 +1131,32 @@ async fn resolve_subagent_sampling_config(
     {
         return (config, id, None);
     }
+    if worker_model.is_some()
+        && !parent_config
+            .extra_headers
+            .contains_key("x-distill-worker-pin")
+        && let Ok(Some(mut route)) =
+            crate::agent::account_routing::AccountRoute::read(&parent_config.extra_headers)
+        && route.option_id.is_some()
+        && !route.pinned
+    {
+        route.worker = true;
+        let config = crate::agent::account_routing::config_for_route(
+            &crate::accounts::AccountStore::default(),
+            &ctx.available_models,
+            &parent_config,
+            &route,
+        )
+        .await;
+        match config {
+            Ok(config) => return (config, acp::ModelId::new(route.worker_model), None),
+            Err(_) => {
+                let mut config = parent_config.clone();
+                crate::agent::account_routing::block_credentials(&mut config);
+                return (config, parent_mid, None);
+            }
+        }
+    }
     let mut unavailable_worker = None;
     if let Some(worker) = worker_model {
         match try_pin(
@@ -1131,6 +1176,13 @@ async fn resolve_subagent_sampling_config(
         &parent_mid,
         &parent_config,
     );
+    let mut parent_config = parent_config;
+    if let Ok(Some(mut route)) =
+        crate::agent::account_routing::AccountRoute::read(&parent_config.extra_headers)
+    {
+        route.pinned = true;
+        let _ = route.write(&mut parent_config);
+    }
     (parent_config, parent_mid, unavailable_worker)
 }
 /// Resolve a subagent's effective sampling config and model id, honoring the model-resolution precedence.
@@ -1256,7 +1308,7 @@ async fn read_parent_sampling_config(
                 &cfg.api_backend,
                 &cfg.base_url,
             );
-            let inherited = distill_sampler::SamplerConfig {
+            let mut inherited = distill_sampler::SamplerConfig {
                 api_key: creds.api_key,
                 base_url: cfg.base_url,
                 mtls_cert_dir: cfg.mtls_cert_dir,
@@ -1305,6 +1357,20 @@ async fn read_parent_sampling_config(
                 openrouter_variant: ctx.sampling_config.openrouter_variant.clone(),
                 header_injector: ctx.sampling_config.header_injector.clone(),
             };
+            if inherited
+                .extra_headers
+                .contains_key(crate::agent::account_routing::ROUTE_HEADER)
+            {
+                if crate::agent::account_routing::restore_credentials(
+                    &crate::accounts::AccountStore::default(),
+                    &mut inherited,
+                )
+                .await
+                .is_err()
+                {
+                    crate::agent::account_routing::block_credentials(&mut inherited);
+                }
+            }
             let model_id = ctx.model_id.clone();
             let global_model_id = ctx.models_manager.current_model_id();
             distill_telemetry::unified_log::debug(
@@ -1407,6 +1473,9 @@ fn resolve_model_override_to_config(
         ctx.sampling_config.deployment_id.clone(),
         ctx.sampling_config.user_id.clone(),
     );
+    config
+        .extra_headers
+        .insert(crate::agent::account_routing::PIN_HEADER.into(), "1".into());
     config.openrouter_variant = crate::jev::worker_variant();
     if config.bearer_resolver.is_none()
         && !ctx.would_strip_fallback_key(config.api_key.as_deref())

@@ -3,8 +3,8 @@ use distill_sampling_types::{SearchDateBound, ToolOverrides, WebSearchOptions, X
 
 use super::{
     CLASSIFIER_REQUEST_TOKEN_RESERVE, LengthSalvageAction, LengthSalvageStreak,
-    MAX_OUTPUT_TOKEN_LIMIT_RETRIES, classifier_request_fits_context,
-    compact_skill_tool_definition, resolve_configured_cutoff,
+    MAX_OUTPUT_TOKEN_LIMIT_RETRIES, classifier_request_fits_context, compact_skill_tool_definition,
+    resolve_configured_cutoff,
 };
 
 #[test]
@@ -29,11 +29,8 @@ fn claude_requests_never_carry_the_grok_session_token() {
     // A catalog model has no key of its own (`NotByok`), which is exactly the
     // case that used to select the Grok session bearer for api.anthropic.com.
     for byok in [ModelByok::NotByok, ModelByok::Unknown] {
-        let gate = super::SessionTokenAuthGate::new(
-            Some(&method),
-            byok,
-            "https://api.anthropic.com/v1",
-        );
+        let gate =
+            super::SessionTokenAuthGate::new(Some(&method), byok, "https://api.anthropic.com/v1");
         assert!(!gate.active(), "{byok:?} must not use the Grok session");
     }
 }
@@ -103,16 +100,15 @@ fn classifier_request_bound_enforces_its_reserve_with_saturating_arithmetic() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn route_capacity_parser_and_admission_preserve_parent_window() {
-    use super::super::support::create_test_actor;
     use super::super::compaction::{
-        configured_output_token_budget, error_context_window,
-        explicit_provider_context_window,
+        configured_output_token_budget, error_context_window, explicit_provider_context_window,
     };
     use super::super::compaction_config::{
         SUPPRESS_AUTH, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
     };
+    use super::super::support::create_test_actor;
+    use distill_sampler::{SamplerConfig, SamplingErrorInfo, SamplingErrorKind};
     use distill_sampling_types::ConversationRequest;
-    use distill_sampler::{SamplingErrorInfo, SamplingErrorKind, SamplerConfig};
     use std::num::NonZeroU64;
     use std::sync::Arc;
     use tokio::task::LocalSet;
@@ -453,11 +449,11 @@ async fn later_rounds_of_a_turn_keep_its_effort_on_an_effort_keyed_cache() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn route_preflight_keeps_mid_salvage_terminal_without_rewrite_or_usage() {
-    use super::super::support::create_test_actor;
     use super::super::TurnParkState;
+    use super::super::support::create_test_actor;
     use distill_sampling_types::{ConversationItem, ConversationRequest};
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use tokio::task::LocalSet;
 
     LocalSet::new()
@@ -467,7 +463,8 @@ async fn route_preflight_keeps_mid_salvage_terminal_without_rewrite_or_usage() {
 
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut actor = create_test_actor(95_000, 100_000, 85, gateway_tx, persistence_tx).await;
+            let mut actor =
+                create_test_actor(95_000, 100_000, 85, gateway_tx, persistence_tx).await;
             actor.chat_state_handle.replace_conversation(vec![
                 ConversationItem::system("source context"),
                 ConversationItem::user("continue the unfinished work"),
@@ -475,10 +472,9 @@ async fn route_preflight_keeps_mid_salvage_terminal_without_rewrite_or_usage() {
             ]);
             actor.chat_state_handle.record_token_usage(95_000);
             let actor = Arc::new(actor);
-            let before_conversation = serde_json::to_value(
-                actor.chat_state_handle.get_conversation().await,
-            )
-            .expect("serializable conversation");
+            let before_conversation =
+                serde_json::to_value(actor.chat_state_handle.get_conversation().await)
+                    .expect("serializable conversation");
             let before_usage = actor
                 .chat_state_handle
                 .try_get_session_usage()
@@ -539,11 +535,11 @@ async fn route_preflight_keeps_mid_salvage_terminal_without_rewrite_or_usage() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn route_preflight_keeps_budgeted_children_local_without_compaction_or_usage() {
-    use super::super::support::{create_test_actor, transient_state};
     use super::super::TurnParkState;
+    use super::super::support::{create_test_actor, transient_state};
     use distill_sampling_types::ConversationRequest;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use tokio::task::LocalSet;
 
     LocalSet::new()
@@ -556,9 +552,8 @@ async fn route_preflight_keeps_budgeted_children_local_without_compaction_or_usa
                 let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
                 let mut actor =
                     create_test_actor(95_000, 100_000, 85, gateway_tx, persistence_tx).await;
-                let output_budget = task_output_budget.then(|| {
-                    crate::tools::tool_context::TaskOutputTokenBudget::limited(1_000)
-                });
+                let output_budget = task_output_budget
+                    .then(|| crate::tools::tool_context::TaskOutputTokenBudget::limited(1_000));
                 actor.tool_context.task_output_token_budget = output_budget.clone();
                 actor.tool_context.sampler_retry_only_before_output = retry_only_before_output;
                 let actor = Arc::new(actor);
@@ -613,10 +608,12 @@ async fn route_preflight_keeps_budgeted_children_local_without_compaction_or_usa
 
 #[test]
 fn learned_route_cap_bounds_catalogue_output_on_the_real_builder_path() {
-    use super::super::support::{create_test_actor, drain_gateway, drain_persistence, transient_state};
+    use super::super::support::{
+        create_test_actor, drain_gateway, drain_persistence, transient_state,
+    };
     use super::super::{SamplerTurnOutcome, TurnParkState};
-    use distill_sampling_types::{ApiBackend, ConversationItem};
     use distill_sampler::{RetryPolicy, SamplerActor, SamplerConfig, SamplingErrorInfo};
+    use distill_sampling_types::{ApiBackend, ConversationItem};
     use distill_test_support::sse::responses_api_script_exact;
     use distill_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
     use std::num::NonZeroU64;
@@ -830,7 +827,10 @@ fn learned_route_cap_bounds_catalogue_output_on_the_real_builder_path() {
                     Some("test")
                 );
                 assert_eq!(
-                    actor.compaction.count.load(std::sync::atomic::Ordering::Relaxed),
+                    actor
+                        .compaction
+                        .count
+                        .load(std::sync::atomic::Ordering::Relaxed),
                     0,
                     "the low-input learned-cap request must not pay for compaction"
                 );
@@ -858,8 +858,8 @@ fn deepinfra_overflow_compacts_rebuilds_once_and_allows_later_growth() {
         create_test_actor, drain_gateway, drain_persistence, transient_state,
     };
     use super::super::{SamplerTurnOutcome, TurnParkState};
-    use distill_sampling_types::{ApiBackend, ConversationItem};
     use distill_sampler::{RetryPolicy, SamplerActor, SamplerConfig};
+    use distill_sampling_types::{ApiBackend, ConversationItem};
     use distill_test_support::sse::responses_api_script_exact;
     use distill_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
     use std::sync::Arc;
@@ -1583,8 +1583,8 @@ async fn output_reservation_overflow_lowers_learned_cap_without_compacting() {
     use super::{sampler_route_attribution_endpoint, sampler_route_backend_key};
     use distill_sampler::{SamplerConfig, SamplingErrorInfo, SamplingErrorKind};
     use distill_sampling_types::ConversationRequest;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use tokio::task::LocalSet;
 
     LocalSet::new()
@@ -1685,15 +1685,159 @@ fn a_utility_child_falls_back_on_any_failure_other_routes_only_on_rejection() {
     let timed_out = error(SamplingErrorKind::IdleTimeout, None);
     let rate_limited = error(SamplingErrorKind::RateLimited, Some(429));
     for failure in [&rejected, &overloaded, &timed_out, &rate_limited] {
-        assert!(super::local_route_falls_back(failure, true), "{:?}", failure.kind);
+        assert!(
+            super::local_route_falls_back(failure, true),
+            "{:?}",
+            failure.kind
+        );
     }
     assert!(super::local_route_falls_back(&rejected, false));
     for failure in [&overloaded, &timed_out, &rate_limited] {
-        assert!(!super::local_route_falls_back(failure, false), "{:?}", failure.kind);
+        assert!(
+            !super::local_route_falls_back(failure, false),
+            "{:?}",
+            failure.kind
+        );
     }
     // The user cancelled or rewound that round: resending it on the child's
     // own model would spend a call nobody wants and may land on the restored turn.
     let revoked = super::revoked_sampling_info();
     assert!(!super::local_route_falls_back(&revoked, true));
     assert!(!super::local_route_falls_back(&revoked, false));
+}
+
+#[test]
+#[serial_test::serial]
+fn account_routing_real_turn_fallback_preserves_selected_pair_for_worker() {
+    crate::agent::account_routing::tests::isolated(
+        "session::acp_session::sampler_turn::tests::account_routing_real_turn_fallback_preserves_selected_pair_for_worker",
+        || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            tokio::task::LocalSet::new().block_on(&runtime, async {
+    use super::super::support::{
+        create_test_actor, drain_gateway, drain_persistence, transient_state,
+    };
+    use super::super::{SamplerTurnOutcome, TurnParkState};
+    use crate::agent::account_routing::{AccountRoute, tests::NamedAccounts};
+    use distill_sampler::{RetryPolicy, SamplerActor};
+    use distill_test_support::{
+        MockInferenceServer, MockModelEntry, ScriptedResponse, sse::responses_api_script_exact,
+    };
+    use std::sync::Arc;
+    tokio::task::LocalSet::new().run_until(async {
+        let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("gpt-6.1-sol").with_api_backend("responses")]).await.unwrap();
+        let fixture = NamedAccounts::new(&server.url());
+        for _ in 0..2 { server.enqueue_response("/v1/responses", ScriptedResponse::json(429, serde_json::json!({"error":{"message":"rate limit", "code":"rate_limit_exceeded"}}))); }
+        server.enqueue_response("/v1/responses", ScriptedResponse::sse(responses_api_script_exact("main success", "gpt-6-luna")));
+        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sampler = SamplerActor::spawn(fixture.base(), RetryPolicy::default(), events);
+        let (gateway, rx) = tokio::sync::mpsc::unbounded_channel(); drain_gateway(rx);
+        let (persistence, rx) = tokio::sync::mpsc::unbounded_channel(); drain_persistence(rx);
+        let mut actor = create_test_actor(0, 262_144, 85, gateway, persistence).await;
+        actor.sampler_handle = sampler;
+        for (id, model) in &fixture.models { actor.models_manager.insert_test_entry(id, model.clone()); }
+        actor.chat_state_handle.replace_conversation(vec![distill_sampling_types::ConversationItem::system("system"), distill_sampling_types::ConversationItem::user("answer")]);
+        let actor = Arc::new(actor);
+        let drainer = actor.clone();
+        tokio::task::spawn_local(async move { while let Some(event) = event_rx.recv().await { drainer.handle_sampling_event(event).await; }});
+        let request = actor.chat_state_handle.build_request(vec![], None, false, None, actor.session_id_string(), "account-main".into()).await.unwrap();
+        let mut budget = actor.rate_limit_wait_budget(None);
+        let result = actor.run_turn_via_sampler(request, &mut budget, transient_state(0, false), false, TurnParkState::Fresh).await;
+        assert!(matches!(result, Ok(SamplerTurnOutcome::Response(..))), "selected account request must complete");
+        let requests: Vec<_> = server.requests().into_iter().filter(|request| request.path == "/v1/responses").collect();
+        assert_eq!(requests.len(), 3, "each eligible account tried once");
+        for (request, id) in requests.iter().zip(["one", "two", "three"]) {
+            assert_eq!(request.authorization.as_deref(), Some(format!("Bearer {id}-token").as_str()));
+            assert_eq!(request.header("chatgpt-account-id"), Some(format!("wire-{id}").as_str()));
+            assert_eq!(request.header("x-api-key"), None);
+            assert_eq!(request.header("x-distill-account-route"), None);
+            assert_eq!(request.header("x-distill-codex-account-anchor"), None);
+        }
+        assert_eq!(requests[0].body.as_ref().unwrap()["model"], "gpt-6.1-sol");
+        assert_eq!(requests[2].body.as_ref().unwrap()["model"], "gpt-6-luna");
+        let mut selected = actor.reconstruct_full_config().await;
+        let mut route = AccountRoute::read(&selected.extra_headers).unwrap().unwrap();
+        assert_eq!(route.account_id, "three");
+        assert_eq!(route.failed_options, ["one", "two"]);
+        assert_eq!(selected.bearer_resolver.as_ref().unwrap().current_bearer().as_deref(), Some("three-token"));
+        route.worker = true; route.write(&mut selected).unwrap();
+        let worker = crate::agent::account_routing::config_for_route(&fixture.store, &fixture.models, &selected, &route).await.unwrap();
+        server.enqueue_response("/v1/responses", ScriptedResponse::sse(responses_api_script_exact("worker success", "gpt-6.1-sol")));
+        // The same production turn pipeline now drives a delegated worker on the inherited pair.
+        actor.persist_account_config(&worker).await.unwrap();
+        // Root-only failure reset keys to the same prompt index here; the route retains the parent operation.
+        let request = actor.chat_state_handle.build_request(vec![], None, false, None, actor.session_id_string(), "account-worker".into()).await.unwrap();
+        let result = actor.run_turn_via_sampler(request, &mut budget, transient_state(0, false), false, TurnParkState::Fresh).await;
+        assert!(matches!(result, Ok(SamplerTurnOutcome::Response(..))), "selected account request must complete");
+        let worker = server.requests().into_iter().filter(|request| request.path == "/v1/responses").last().unwrap();
+        assert_eq!(worker.authorization.as_deref(), Some("Bearer three-token"));
+        assert_eq!(worker.header("chatgpt-account-id"), Some("wire-three"));
+        assert_eq!(worker.body.unwrap()["model"], "gpt-6.1-sol");
+    }).await;
+
+        });
+        },
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn account_routing_real_turn_exhausted_auth_and_partial_output_fail_closed() {
+    crate::agent::account_routing::tests::isolated(
+        "session::acp_session::sampler_turn::tests::account_routing_real_turn_exhausted_auth_and_partial_output_fail_closed",
+        || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            tokio::task::LocalSet::new().block_on(&runtime, async {
+    use super::super::TurnParkState;
+    use super::super::support::{
+        create_test_actor, drain_gateway, drain_persistence, transient_state,
+    };
+    use crate::agent::account_routing::tests::NamedAccounts;
+    use distill_sampler::{RetryPolicy, SamplerActor};
+    use distill_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent};
+    use std::sync::Arc;
+    tokio::task::LocalSet::new().run_until(async {
+        let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("gpt-6.1-sol").with_api_backend("responses")]).await.unwrap();
+        let fixture = NamedAccounts::new(&server.url());
+        let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sampler = SamplerActor::spawn(fixture.base(), RetryPolicy::default(), events);
+        let (gateway, rx) = tokio::sync::mpsc::unbounded_channel(); drain_gateway(rx);
+        let (persistence, rx) = tokio::sync::mpsc::unbounded_channel(); drain_persistence(rx);
+        let mut actor = create_test_actor(0, 262_144, 85, gateway, persistence).await;
+        actor.sampler_handle = sampler;
+        for (id, model) in &fixture.models { actor.models_manager.insert_test_entry(id, model.clone()); }
+        actor.chat_state_handle.replace_conversation(vec![distill_sampling_types::ConversationItem::system("system"), distill_sampling_types::ConversationItem::user("answer")]);
+        let actor = Arc::new(actor);
+        let drainer = actor.clone();
+        tokio::task::spawn_local(async move { while let Some(event) = event_rx.recv().await { drainer.handle_sampling_event(event).await; }});
+        let mut budget = actor.rate_limit_wait_budget(None);
+        for _ in 0..3 { server.enqueue_response("/v1/responses", ScriptedResponse::json(429, serde_json::json!({"error":{"message":"rate limit"}}))); }
+        let request = actor.chat_state_handle.build_request(vec![], None, false, None, actor.session_id_string(), "account-exhausted".into()).await.unwrap();
+        let err = actor.run_turn_via_sampler(request, &mut budget, transient_state(0, false), false, TurnParkState::Fresh).await.err().unwrap();
+        assert!(format!("{err:?}").contains("All account routing options"));
+        assert_eq!(server.requests().into_iter().filter(|r| r.path == "/v1/responses").count(), 3);
+        actor.chat_state_handle.increment_prompt_index();
+        server.enqueue_response("/v1/responses", ScriptedResponse::json(401, serde_json::json!({"error":{"message":"unauthorized"}})));
+        let request = actor.chat_state_handle.build_request(vec![], None, false, None, actor.session_id_string(), "account-auth".into()).await.unwrap();
+        assert!(actor.run_turn_via_sampler(request, &mut budget, transient_state(0, false), false, TurnParkState::Fresh).await.is_err());
+        assert_eq!(server.requests().into_iter().filter(|r| r.path == "/v1/responses").count(), 4, "401 never switches account or retries");
+        actor.chat_state_handle.increment_prompt_index();
+        server.enqueue_response("/v1/responses", ScriptedResponse::sse(vec![
+            SseEvent::with_event("response.output_text.delta", serde_json::json!({"type":"response.output_text.delta", "delta":"accepted partial", "output_index":0,"content_index":0}).to_string()),
+            SseEvent::with_event("error", serde_json::json!({"type":"error","code":"rate_limit_exceeded","message":"limit after output"}).to_string()),
+        ]));
+        let request = actor.chat_state_handle.build_request(vec![], None, false, None, actor.session_id_string(), "account-partial".into()).await.unwrap();
+        assert!(actor.run_turn_via_sampler(request, &mut budget, transient_state(0, false), false, TurnParkState::Fresh).await.is_err());
+        assert_eq!(server.requests().into_iter().filter(|r| r.path == "/v1/responses").count(), 5, "partial stream is never replayed");
+    }).await;
+
+        });
+        },
+    );
 }

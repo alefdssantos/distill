@@ -53,8 +53,24 @@ struct Catalog {
 static CATALOG: LazyLock<RwLock<Option<Catalog>>> = LazyLock::new(|| RwLock::new(None));
 static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn catalog_credential_paths() -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let store = crate::accounts::AccountStore::default();
+    Ok(store
+        .list()?
+        .into_iter()
+        .filter(|account| account.provider == crate::accounts::Provider::Claude)
+        .filter_map(|account| store.credential_path(&account.id).ok())
+        .collect())
+}
+
 pub(crate) fn cached_models() -> IndexMap<String, ModelEntry> {
-    cached_models_for(claude_auth::load_credentials().ok().flatten())
+    for path in catalog_credential_paths().unwrap_or_default() {
+        let models = cached_models_for(claude_auth::load_credentials_at(&path).ok().flatten());
+        if !models.is_empty() {
+            return models;
+        }
+    }
+    IndexMap::new()
 }
 
 fn cached_models_for(
@@ -71,35 +87,71 @@ fn cached_models_for(
         .unwrap_or_default()
 }
 
-/// Refreshes the cache for the signed-in account. A failed fetch still
-/// publishes the built-in list before returning the error, so the caller can
-/// log it while the picker keeps working.
+/// Refreshes the cache from a usable signed-in account. If every catalog fetch
+/// fails, preserve the existing built-in fallback for a still-connected account.
 pub(crate) async fn refresh() -> anyhow::Result<()> {
+    refresh_from(MODELS_BASE_URL).await
+}
+
+async fn refresh_from(base_url: &str) -> anyhow::Result<()> {
     let _refresh = REFRESH.lock().await;
-    let Some(credentials) = claude_auth::fresh_credentials().await? else {
-        *CATALOG.write() = None;
-        return Ok(());
-    };
-    let identity = credentials.identity();
-    if CATALOG.read().as_ref().is_some_and(|catalog| {
-        catalog.identity == identity && catalog.fetched_at.elapsed() < CATALOG_TTL
-    }) {
-        return Ok(());
+    let mut last_error = None;
+    let mut fallback = None;
+    for path in catalog_credential_paths()? {
+        let credentials = match claude_auth::fresh_credentials_at(&path).await {
+            Ok(Some(credentials)) => credentials,
+            Ok(None) => continue,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        let identity = credentials.identity();
+        if CATALOG.read().as_ref().is_some_and(|catalog| {
+            catalog.identity == identity && catalog.fetched_at.elapsed() < CATALOG_TTL
+        }) {
+            return Ok(());
+        }
+        let models = match fetch_models(base_url, &credentials.access_token).await {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_) => fallback_models(),
+            Err(error) => {
+                last_error = Some(error);
+                fallback.get_or_insert((path, identity));
+                continue;
+            }
+        };
+        // A login/logout during discovery must not publish another account's models.
+        if claude_auth::load_credentials_at(&path)
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.identity() == identity)
+        {
+            *CATALOG.write() = Some(Catalog {
+                identity,
+                fetched_at: Instant::now(),
+                models,
+            });
+            return Ok(());
+        }
     }
-    let (models, outcome) = match fetch_models(MODELS_BASE_URL, &credentials.access_token).await {
-        Ok(models) if !models.is_empty() => (models, Ok(())),
-        Ok(_) => (fallback_models(), Ok(())),
-        Err(error) => (fallback_models(), Err(error)),
-    };
-    // A login/logout that completed during the request must not publish another account's models.
-    if claude_auth::load_credentials()?.is_some_and(|current| current.identity() == identity) {
+    if let Some((path, identity)) = fallback
+        && claude_auth::load_credentials_at(&path)
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.identity() == identity)
+    {
         *CATALOG.write() = Some(Catalog {
             identity,
             fetched_at: Instant::now(),
-            models,
+            models: fallback_models(),
         });
     }
-    outcome
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    *CATALOG.write() = None;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -166,7 +218,10 @@ impl WireCapabilities {
             .and_then(|thinking| thinking.types.as_ref())
             .and_then(|types| types.adaptive)
             .is_some_and(|flag| flag.supported);
-        let Some(effort) = self.effort.as_ref().filter(|effort| effort.supported && adaptive)
+        let Some(effort) = self
+            .effort
+            .as_ref()
+            .filter(|effort| effort.supported && adaptive)
         else {
             return Vec::new();
         };
@@ -335,6 +390,64 @@ mod tests {
         (format!("http://{address}"), server)
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn account_catalog_skips_unusable_accounts_and_keeps_selected_identity() {
+        crate::agent::account_routing::tests::isolated(
+            "claude_models::tests::account_catalog_skips_unusable_accounts_and_keeps_selected_identity",
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let home = tempfile::tempdir().unwrap();
+                        let _distill =
+                            distill_test_support::EnvGuard::set("DISTILL_HOME", home.path());
+                        let _grok = distill_test_support::EnvGuard::set("GROK_HOME", home.path());
+                        let store = crate::accounts::AccountStore::new(home.path().to_owned());
+                        for id in ["broken", "expired", "healthy"] {
+                            store
+                                .add(id, crate::accounts::Provider::Claude, id)
+                                .unwrap();
+                            let path = store.credential_path(id).unwrap();
+                            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                            if id == "broken" {
+                                std::fs::write(path, "unreadable JSON").unwrap();
+                                continue;
+                            }
+                            let credentials = claude_auth::ClaudeAuthStore {
+                                access_token: "token".into(),
+                                refresh_token: String::new(),
+                                expires_at: chrono::Utc::now()
+                                    + chrono::Duration::hours(if id == "expired" { -1 } else { 1 }),
+                                scopes: vec![],
+                                account_uuid: Some(id.into()),
+                                email: None,
+                                organization_uuid: None,
+                            };
+                            std::fs::write(path, serde_json::to_vec(&credentials).unwrap())
+                                .unwrap();
+                        }
+                        let (url, server) = spawn_models_mock(
+                            axum::http::StatusCode::OK,
+                            serde_json::json!({"data": [{"id": "healthy"}]}),
+                        )
+                        .await;
+
+                        refresh_from(&url).await.unwrap();
+                        assert!(cached_models().contains_key("claude/healthy"));
+                        store.logout("healthy", None).await.unwrap();
+                        assert!(
+                            cached_models().is_empty(),
+                            "cache must remain bound to its live account"
+                        );
+                        server.abort();
+                    });
+            },
+        );
+    }
+
     #[tokio::test]
     async fn account_catalog_keeps_reported_limits_and_routes_through_the_messages_api() {
         let (url, server) = spawn_models_mock(
@@ -377,7 +490,12 @@ mod tests {
     }
 
     fn effort_ids(entry: &ModelEntry) -> Vec<String> {
-        entry.info.reasoning_efforts.iter().map(|o| o.id.clone()).collect()
+        entry
+            .info
+            .reasoning_efforts
+            .iter()
+            .map(|o| o.id.clone())
+            .collect()
     }
 
     #[test]
@@ -386,9 +504,7 @@ mod tests {
         // lacks is a 400 (`xhigh` on Sonnet 4.6), and adaptive thinking, which
         // the request builder adds with any effort, is a 400 on Opus 4.5 and Haiku 4.5.
         let all = ["low", "medium", "high", "xhigh", "max"];
-        let wire = |id: &str, capabilities: serde_json::Value| {
-            serde_json::json!({"id": id, "display_name": id, "capabilities": capabilities})
-        };
+        let wire = |id: &str, capabilities: serde_json::Value| serde_json::json!({"id": id, "display_name": id, "capabilities": capabilities});
         let response: ModelsResponse = serde_json::from_value(serde_json::json!({"data": [
             wire("sonnet-new", caps(&all, true)),
             wire("sonnet-4-6", caps(&["low", "medium", "high", "max"], true)),
@@ -406,11 +522,23 @@ mod tests {
         // The API's own default, so an unspecified effort behaves as it would without Distill.
         assert_eq!(new.info.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(
-            new.info.reasoning_efforts.iter().filter(|o| o.default).map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            new.info
+                .reasoning_efforts
+                .iter()
+                .filter(|o| o.default)
+                .map(|o| o.id.as_str())
+                .collect::<Vec<_>>(),
             ["high"]
         );
-        assert_eq!(effort_ids(&models["claude/sonnet-4-6"]), ["low", "medium", "high", "max"]);
-        for none in ["claude/opus-4-5", "claude/haiku-4-5", "claude/no-capabilities"] {
+        assert_eq!(
+            effort_ids(&models["claude/sonnet-4-6"]),
+            ["low", "medium", "high", "max"]
+        );
+        for none in [
+            "claude/opus-4-5",
+            "claude/haiku-4-5",
+            "claude/no-capabilities",
+        ] {
             let info = &models[none].info;
             assert!(info.reasoning_efforts.is_empty(), "{none}");
             assert!(!info.supports_reasoning_effort, "{none}");
@@ -425,7 +553,10 @@ mod tests {
         ]}))
         .unwrap();
         let models = convert_models(response);
-        assert_eq!(models["claude/m"].info.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(
+            models["claude/m"].info.reasoning_effort,
+            Some(ReasoningEffort::Medium)
+        );
     }
 
     #[test]

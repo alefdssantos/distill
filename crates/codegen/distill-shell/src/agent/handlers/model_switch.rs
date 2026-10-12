@@ -69,7 +69,7 @@ pub(crate) async fn apply(
         == Some(false);
     let acp::SetSessionModelRequest {
         session_id,
-        model_id,
+        mut model_id,
         ..
     } = args;
     let handle = agent
@@ -78,6 +78,32 @@ pub(crate) async fn apply(
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
     let handle = agent.resident_handle(&session_id).unwrap_or(handle);
+    let requested_auto = model_id.0.as_ref() == "auto";
+    let mut auto_worker = None;
+    let auto_config = if requested_auto {
+        let base = agent.sampling_config.borrow().clone();
+        let selected = crate::agent::account_routing::explicit_auto_config(
+            &base,
+            &agent.models_manager.models(),
+        )
+        .await
+        .map_err(|_| {
+            acp::Error::invalid_params()
+                .data("Auto requires enabled options with an available account")
+        })?;
+        let route = crate::agent::account_routing::AccountRoute::read(&selected.extra_headers)
+            .ok()
+            .flatten()
+            .ok_or_else(|| acp::Error::invalid_params())?;
+        model_id = acp::ModelId::new(route.main_model);
+        auto_worker = Some(crate::session::handle::SessionWorker {
+            model_id: Some(route.worker_model),
+            effort: None,
+        });
+        Some(selected)
+    } else {
+        None
+    };
     let model = agent.resolve_model_id(&model_id)?;
     let use_concise = model.info().use_concise;
     let session_default = handle
@@ -211,8 +237,33 @@ pub(crate) async fn apply(
             .jev_effort_auto
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
-    let mut model_sampling =
-        agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
+    let keep_route = previous_model_id == model_id.0
+        && (wants_auto_effort || explicit_effort.is_some() || auto_off_requested);
+    let mut model_sampling = match auto_config {
+        Some(config) => config,
+        None if keep_route => crate::agent::account_routing::load_session_config(
+            &handle.info,
+            &agent.models_manager.models(),
+        )
+        .await
+        .map_err(|_| acp::Error::auth_required())?
+        .unwrap_or_else(|| {
+            agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone())
+        }),
+        None => {
+            let prepared =
+                agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
+            crate::agent::account_routing::select_startup_config(
+                &prepared,
+                &agent.models_manager.models(),
+                true,
+            )
+            .await
+            .map_err(|_| {
+                acp::Error::auth_required().data("Selected model has no available account")
+            })?
+        }
+    };
     agent.models_manager.apply_supported_effort(
         &mut model_sampling,
         effective_effort,
@@ -286,8 +337,9 @@ pub(crate) async fn apply(
         false
     };
     let model_unchanged = previous_model_id == model_id.0;
-    let model_selection_intent = !(model_unchanged
-        && (wants_auto_effort || explicit_effort.is_some() || auto_off_requested));
+    let model_selection_intent = !requested_auto
+        && !(model_unchanged
+            && (wants_auto_effort || explicit_effort.is_some() || auto_off_requested));
     let (tx, rx) = oneshot::channel();
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
         switch: SessionModelSwitch {
@@ -305,7 +357,12 @@ pub(crate) async fn apply(
     });
     let updated_model = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))?;
+        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
+    if let Some(worker) = auto_worker {
+        *handle.worker_override.write() = Some(worker);
+        // Main's actor command completed; refresh its prompt with the committed Worker.
+        let _ = handle.cmd_tx.send(SessionCommand::RefreshWorkerPrompt);
+    }
     agent.with_resident_mut(&session_id, |handle| {
         handle.model_id = model_id.clone();
         handle.reasoning_effort = applied_effort;
@@ -344,13 +401,13 @@ pub(crate) async fn apply(
     agent.sync_process_static_api_key(Some(model_id.0.as_ref()));
     Ok(acp::SetSessionModelResponse::new().meta(
         serde_json::json!({
-            "model": updated_model,
+            "model": Result::<_, acp::Error>::Ok(updated_model),
             "contextWindow": handle
                 .chat_state_handle
                 .get_sampling_config()
                 .await
                 .map(|cfg| cfg.context_window.get()),
-            "canonicalModelId": model_id.0.as_ref(),
+            "canonicalModelId": if requested_auto { "auto" } else { model_id.0.as_ref() },
             "reasoningEffort": applied_effort.map(|eff| eff.to_string()),
             "reasoningEffortAuto": handle
                 .jev_effort_auto
@@ -419,8 +476,8 @@ pub(crate) async fn apply_reasoning_effort(
             "reasoningEffort": effort.to_string(),
             "reasoningEffortAuto": false,
         })
-            .as_object()
-            .cloned(),
+        .as_object()
+        .cloned(),
     ))
 }
 fn notify_model_changed(

@@ -37,7 +37,7 @@ struct Credentials {
 /// `limit` and `limit_remaining` are nullable for keys without a configured
 /// spend cap. A null cap is intentionally kept as `None`; it does not mean
 /// that the account has an unlimited balance.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct OpenRouterUsage {
     #[serde(default)]
     pub label: Option<String>,
@@ -69,11 +69,11 @@ pub fn api_key() -> io::Result<Option<String>> {
     {
         return Ok(Some(key));
     }
-    load_key_at(&auth_file_path())
+    api_key_at(&auth_file_path())
 }
 
 pub fn is_logged_in() -> bool {
-    load_key_at(&auth_file_path()).ok().flatten().is_some()
+    api_key_at(&auth_file_path()).ok().flatten().is_some()
 }
 
 /// Fetch usage for the resolved OpenRouter API key. This is deliberately a
@@ -83,8 +83,18 @@ pub async fn fetch_usage() -> Result<OpenRouterUsage> {
     let Some(key) = api_key()? else {
         bail!("Not connected; set OPENROUTER_API_KEY or run `distill login --openrouter`");
     };
+    fetch_usage_with_key(&key, USAGE_ENDPOINT).await
+}
+
+pub async fn fetch_usage_at(path: &Path) -> Result<OpenRouterUsage> {
+    let key =
+        api_key_at(path)?.ok_or_else(|| anyhow::anyhow!("OpenRouter account is disconnected"))?;
+    fetch_usage_with_key(&key, USAGE_ENDPOINT).await
+}
+
+async fn fetch_usage_with_key(key: &str, endpoint: &str) -> Result<OpenRouterUsage> {
     let response = crate::http::shared_client()
-        .get(USAGE_ENDPOINT)
+        .get(endpoint)
         .bearer_auth(key)
         .timeout(USAGE_REQUEST_TIMEOUT)
         .send()
@@ -106,19 +116,23 @@ pub async fn fetch_usage() -> Result<OpenRouterUsage> {
 
 /// Disconnect the browser account; explicit environment keys remain configured.
 pub fn logout() -> io::Result<()> {
-    match std::fs::remove_file(auth_file_path()) {
+    logout_at(&auth_file_path())
+}
+
+pub fn logout_at(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
 }
 
-fn load_key_at(path: &Path) -> io::Result<Option<String>> {
+pub fn api_key_at(path: &Path) -> io::Result<Option<String>> {
+    crate::util::secure_file::ensure_owner_only_permissions(path)?;
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    crate::util::secure_file::ensure_owner_only_permissions(path)?;
     let credentials: Credentials = serde_json::from_slice(&bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -217,6 +231,30 @@ async fn exchange_code(endpoint: &str, code: &str, verifier: &str, path: &Path) 
 /// A random callback path binds the response to this attempt; PKCE binds the code exchange.
 /// The server future is owned by this login, so completion/cancellation closes the listener.
 pub async fn run_tui_login(browser_fallback: oneshot::Sender<String>) -> Result<()> {
+    run_login_at(&auth_file_path(), browser_fallback, None).await
+}
+
+pub async fn run_cli_login_at(path: &Path) -> Result<()> {
+    let (tx, rx) = oneshot::channel();
+    let announce = tokio::spawn(async move {
+        if let Ok(url) = rx.await {
+            eprintln!("Open this URL to sign in: {url}");
+        }
+    });
+    let result = run_login_at(path, tx, None).await;
+    announce.abort();
+    result
+}
+
+pub async fn run_tui_login_at(path: &Path, url_feedback: oneshot::Sender<String>) -> Result<()> {
+    let (fallback, _rx) = oneshot::channel();
+    run_login_at(path, fallback, Some(url_feedback)).await
+}
+async fn run_login_at(
+    path: &Path,
+    browser_fallback: oneshot::Sender<String>,
+    url_feedback: Option<oneshot::Sender<String>>,
+) -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let mut random = [0u8; 32];
     rand::rng().fill_bytes(&mut random);
@@ -235,6 +273,9 @@ pub async fn run_tui_login(browser_fallback: oneshot::Sender<String>) -> Result<
     let app = Router::new()
         .route(&callback_path, get(callback))
         .with_state(Arc::new(Mutex::new(Some(sender))));
+    if let Some(tx) = url_feedback {
+        let _ = tx.send(url.clone());
+    }
     let open_url = url.clone();
     if !matches!(
         tokio::task::spawn_blocking(move || webbrowser::open(&open_url)).await,
@@ -256,9 +297,58 @@ pub async fn run_tui_login(browser_fallback: oneshot::Sender<String>) -> Result<
         "https://openrouter.ai/api/v1/auth/keys",
         &code,
         &verifier,
-        &auth_file_path(),
+        path,
     )
     .await
+}
+
+pub const OPENROUTER_KEY_ANCHOR_HEADER: &str = "x-distill-openrouter-key-anchor";
+const OPENROUTER_RESERVED_HEADERS: &[&str] = &[OPENROUTER_KEY_ANCHOR_HEADER];
+/// A selected key stays file-backed: logout/removal and replacement fail closed.
+#[derive(Debug)]
+struct OpenRouterBearerResolver {
+    path: PathBuf,
+    key_digest: [u8; 32],
+}
+impl distill_sampler::BearerResolver for OpenRouterBearerResolver {
+    fn reserved_headers(&self) -> &'static [&'static str] {
+        OPENROUTER_RESERVED_HEADERS
+    }
+    fn current_bearer(&self) -> Option<String> {
+        let key = api_key_at(&self.path).ok().flatten()?;
+        let digest: [u8; 32] = Sha256::digest(key.as_bytes()).into();
+        (digest == self.key_digest).then_some(key)
+    }
+}
+pub fn apply_openrouter_backend_at(
+    path: &Path,
+    cfg: &mut distill_sampler::SamplerConfig,
+) -> Result<()> {
+    anyhow::ensure!(
+        is_openrouter_url(&cfg.base_url),
+        "Untrusted OpenRouter endpoint"
+    );
+    let key =
+        api_key_at(path)?.ok_or_else(|| anyhow::anyhow!("OpenRouter account is disconnected"))?;
+    let key_digest = Sha256::digest(key.as_bytes());
+    let anchor = format!("{key_digest:x}");
+    anyhow::ensure!(
+        cfg.extra_headers.iter().all(|(name, value)| !name
+            .eq_ignore_ascii_case(OPENROUTER_KEY_ANCHOR_HEADER)
+            || value == &anchor),
+        "OpenRouter account key changed"
+    );
+    cfg.extra_headers
+        .retain(|name, _| !name.eq_ignore_ascii_case(OPENROUTER_KEY_ANCHOR_HEADER));
+    cfg.extra_headers
+        .insert(OPENROUTER_KEY_ANCHOR_HEADER.into(), anchor);
+    cfg.api_key = None;
+    cfg.auth_scheme = distill_sampler::config::AuthScheme::Bearer;
+    cfg.bearer_resolver = Some(Arc::new(OpenRouterBearerResolver {
+        path: path.to_owned(),
+        key_digest: key_digest.into(),
+    }));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -356,7 +446,7 @@ mod tests {
         assert!(!error.to_string().contains("private-response"));
         server.abort();
         assert_eq!(
-            load_key_at(&path).unwrap().as_deref(),
+            api_key_at(&path).unwrap().as_deref(),
             Some("test-openrouter-key")
         );
         assert_eq!(

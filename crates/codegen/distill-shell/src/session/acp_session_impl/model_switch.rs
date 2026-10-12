@@ -23,6 +23,15 @@ impl SessionActor {
         {
             sampling_config.conversation_group_id = Some(id);
         }
+        if model_selection_intent {
+            sampling_config
+                .extra_headers
+                .insert(crate::agent::account_routing::PIN_HEADER.into(), "1".into());
+        }
+        crate::agent::account_routing::save_session_config(&self.session_info, &sampling_config)
+            .map_err(|_| {
+                acp::Error::internal_error().data("Could not persist selected account route")
+            })?;
         let model_id = acp::ModelId::new(sampling_config.model.clone());
         let canonical_model_id = canonical_model_id.unwrap_or_else(|| model_id.clone());
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {

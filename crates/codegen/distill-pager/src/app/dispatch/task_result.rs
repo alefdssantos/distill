@@ -502,6 +502,32 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         crate::app::workspace_sync::request(app);
     }
     match result {
+        TaskResult::AccountsLoginFeedback {
+            agent_id,
+            instance,
+            seq,
+            feedback,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(crate::views::modal::ActiveModal::Accounts { state }) =
+                    agent.active_modal.as_mut()
+                && state.instance == instance
+                && state.request_seq == seq
+                && matches!(
+                    state.busy,
+                    Some(crate::views::accounts_modal::AccountsRequest::Login(_))
+                )
+            {
+                state.login_feedback = feedback;
+            }
+            vec![]
+        }
+        TaskResult::AccountsFinished {
+            agent_id,
+            instance,
+            seq,
+            result,
+        } => super::accounts::complete(app, agent_id, instance, seq, result),
         TaskResult::WithPinnedMemoryMode { .. } => {
             unreachable!("pinned memory mode wrapper is removed before task-result dispatch")
         }
@@ -1016,7 +1042,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             effort,
             result,
             prev_model_id,
-        } => handle_switch_model_complete(app, agent_id, model_id, effort, result, prev_model_id),
+        } => {
+            super::accounts::activation_finished(app, agent_id, &model_id, &result);
+            handle_switch_model_complete(app, agent_id, model_id, effort, result, prev_model_id)
+        },
         TaskResult::UltracodeSet { session_id, result } => {
             if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id.0) {
                 match result {

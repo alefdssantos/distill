@@ -51,23 +51,20 @@ impl MvpAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
-        let model = match self.resolve_model_id(&args.model_id) {
-            Ok(model) => model,
-            Err(_) => {
-                self.models_manager.wait_for_first_catalog().await;
-                self.resolve_model_id(&args.model_id)?
+        if args.model_id.0.as_ref() != "auto" {
+            let model = match self.resolve_model_id(&args.model_id) {
+                Ok(model) => model,
+                Err(_) => {
+                    self.models_manager.wait_for_first_catalog().await;
+                    self.resolve_model_id(&args.model_id)?
+                }
+            };
+            if !model.info.user_selectable {
+                return Err(acp::Error::invalid_params().data(
+                    crate::agent::remote_config::allowlist_denied_message(&self.cfg.borrow())
+                        .to_string(),
+                ));
             }
-        };
-        if !model.info.user_selectable {
-            return Err(
-                acp::Error::invalid_params()
-                    .data(
-                        crate::agent::remote_config::allowlist_denied_message(
-                                &self.cfg.borrow(),
-                            )
-                            .to_string(),
-                    ),
-            );
         }
         let session_id = args.session_id.clone();
         let switch_effort = match parse_reasoning_effort_meta(args.meta.as_ref()) {

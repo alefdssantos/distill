@@ -1,5 +1,6 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
 //! Each command lives in its own submodule. This module re-exports command structs and provides `builtin_commands()` for registry construction.
+pub mod accounts;
 pub mod always_approve;
 pub mod announcements;
 pub mod auto;
@@ -90,6 +91,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(tutorial::TutorialCommand),
         Arc::new(tutorial::OnboardingCommand),
         Arc::new(settings_cmd::SettingsCommand),
+        Arc::new(accounts::AccountsCommand),
         Arc::new(dashboard::DashboardCommand),
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(plugin::PluginsCommand),

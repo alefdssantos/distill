@@ -58,7 +58,8 @@ fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<P
         Some(Command::Dashboard) => return None,
         Some(Command::Login { .. }) => (Entrypoint::Cli, Interactivity::Interactive),
         Some(
-            Command::Inspect { .. }
+            Command::Accounts(_)
+            | Command::Inspect { .. }
             | Command::Doctor(_)
             | Command::Leader(_)
             | Command::Logout { .. }
@@ -98,7 +99,8 @@ fn command_needs_pre_sandbox_policy_heal(command: Option<&Command>) -> bool {
         | Some(Command::Models)
         | Some(Command::Worktree(_)) => true,
         Some(
-            Command::Inspect { .. }
+            Command::Accounts(_)
+            | Command::Inspect { .. }
             | Command::Doctor(_)
             | Command::Leader(_)
             | Command::Logout { .. }
@@ -2164,6 +2166,69 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
     let update_config = build_update_config();
     if let Some(command) = args.command.take() {
         match command {
+            Command::Accounts(account_args) => {
+                use distill_pager::app::cli::{AccountsCommand, AccountsRoutingCommand};
+                use distill_shell::accounts::{
+                    AccountStore, AutoRouting, GrokLoginConfig, Provider,
+                };
+                let store = AccountStore::default();
+                let grok_config = |id: &str| -> anyhow::Result<Option<GrokLoginConfig>> {
+                    if store.get(id)?.provider != Provider::Grok {
+                        return Ok(None);
+                    }
+                    let config = distill_shell::config::load_agent_config_disk_only()
+                        .map_err(|_| anyhow::anyhow!("Failed to load Grok login configuration"))?;
+                    Ok(Some(GrokLoginConfig::from_config(&config)))
+                };
+                let output = match account_args.command {
+                    AccountsCommand::List => {
+                        let mut accounts = Vec::new();
+                        for account in store.list()? {
+                            accounts.push(
+                                store.status(&account.id, grok_config(&account.id)?.as_ref())?,
+                            );
+                        }
+                        serde_json::to_value(accounts)?
+                    }
+                    AccountsCommand::Add {
+                        id,
+                        provider,
+                        label,
+                    } => serde_json::to_value(store.add(&id, provider, &label)?)?,
+                    AccountsCommand::Rename { id, label } => {
+                        serde_json::to_value(store.rename(&id, &label)?)?
+                    }
+                    AccountsCommand::Remove { id } => {
+                        store.remove(&id)?;
+                        serde_json::json!({"ok": true})
+                    }
+                    AccountsCommand::Login { id, device_code } => {
+                        store.login(&id, device_code, grok_config(&id)?).await?;
+                        serde_json::json!({"ok": true})
+                    }
+                    AccountsCommand::Logout { id } => {
+                        store.logout(&id, grok_config(&id)?).await?;
+                        serde_json::json!({"ok": true})
+                    }
+                    AccountsCommand::Usage { id } => {
+                        serde_json::to_value(store.refresh_usage(&id, grok_config(&id)?).await?)?
+                    }
+                    AccountsCommand::Routing {
+                        command: AccountsRoutingCommand::Get,
+                    } => serde_json::to_value(store.load_routing()?)?,
+                    AccountsCommand::Routing {
+                        command: AccountsRoutingCommand::Set { file },
+                    } => {
+                        let bytes = std::fs::read(file)?;
+                        let routing: AutoRouting = serde_json::from_slice(&bytes)
+                            .map_err(|_| anyhow::anyhow!("Invalid routing JSON"))?;
+                        store.save_routing(&routing)?;
+                        serde_json::to_value(routing)?
+                    }
+                };
+                println!("{}", serde_json::to_string(&output)?);
+                distill_shell::instrumentation::finalize_and_exit(0);
+            }
             Command::Version { json } => {
                 if json {
                     let payload = serde_json::json!({

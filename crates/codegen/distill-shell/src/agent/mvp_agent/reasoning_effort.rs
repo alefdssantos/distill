@@ -116,6 +116,17 @@ impl SessionMainMeta {
         }
     }
 
+    /// An explicit CLI model is the session choice when the ACP client omits one.
+    pub(crate) fn with_cli_model(mut self, model: Option<&str>) -> Self {
+        if self.model_id.is_none() {
+            self.model_id = model
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+        }
+        self
+    }
+
     /// An explicit level wins over auto; otherwise the client's flag, else `default`.
     pub(crate) fn effort_auto(&self, default: bool) -> bool {
         if self.effort.is_some() {

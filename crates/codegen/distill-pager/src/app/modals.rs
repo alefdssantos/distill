@@ -19,6 +19,38 @@ use crate::theme::Theme;
 use crate::views::modal::{self, ActiveModal};
 
 impl AgentView {
+    fn apply_accounts_outcome(
+        &mut self,
+        outcome: crate::views::accounts_modal::AccountsOutcome,
+    ) -> InputOutcome {
+        use crate::views::accounts_modal::AccountsOutcome;
+        match outcome {
+            AccountsOutcome::Changed => InputOutcome::Changed,
+            AccountsOutcome::Close => {
+                self.active_modal = None;
+                InputOutcome::Changed
+            }
+            AccountsOutcome::OpenUrl(url) => InputOutcome::Action(Action::OpenUrl(url)),
+            AccountsOutcome::CopyUrl(url) => {
+                let copied = crate::clipboard::SystemClipboard::try_set(&url).reported_success();
+                if let Some(ActiveModal::Accounts { state }) = self.active_modal.as_mut() {
+                    state.message = Some(
+                        if copied {
+                            "Sign-in link copied."
+                        } else {
+                            "Could not copy sign-in link; use Open browser."
+                        }
+                        .into(),
+                    );
+                }
+                InputOutcome::Changed
+            }
+            AccountsOutcome::Request(request) => {
+                InputOutcome::Action(Action::AccountsRequest(request))
+            }
+        }
+    }
+
     /// `suggest_args` falls back to model rows when the query is not in effort phase.
     /// Model-phase reasoning rows use a trailing space in `insert_text`; effort rows do not.
     /// Require a non-empty list with no trailing-space rows before treating the picker as effort phase.
@@ -460,6 +492,11 @@ impl AgentView {
             }
         }
 
+        if let ActiveModal::Accounts { state } = modal {
+            let outcome = state.handle_key(key);
+            return self.apply_accounts_outcome(outcome);
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let ActiveModal::Settings { state } = modal {
             // Sub-mode short-circuit: FilterFocused, PickingEnum, PickingGroup, and EditingValue handle their own Esc and keystrokes
@@ -549,6 +586,7 @@ impl AgentView {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Accounts { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
@@ -598,6 +636,10 @@ impl AgentView {
         }
         if let Some(ActiveModal::MemoryBrowser { state }) = self.active_modal.as_mut() {
             return crate::views::memory_modal::handle_memory_paste(state, text);
+        }
+        if let Some(ActiveModal::Accounts { state }) = self.active_modal.as_mut() {
+            state.paste(text);
+            return InputOutcome::Changed;
         }
         let settings_outcome = match self.active_modal.as_mut() {
             Some(ActiveModal::Settings { state }) => Some(
@@ -1642,6 +1684,11 @@ impl AgentView {
             }
         }
 
+        if let Some(ActiveModal::Accounts { state }) = self.active_modal.as_mut() {
+            let outcome = state.handle_mouse(mouse.kind, mouse.column, mouse.row);
+            return self.apply_accounts_outcome(outcome);
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let Some(ActiveModal::Settings { state }) = &mut self.active_modal {
             let outcome =
@@ -2474,6 +2521,10 @@ impl AgentView {
                         !searching,
                     );
                 }
+            } else if let modal::ActiveModal::Accounts { state } = active_modal {
+                crate::views::accounts_modal::render_accounts_modal(
+                    buf, area, state, compact, &theme,
+                );
             } else if let modal::ActiveModal::UsageInfo { state } = active_modal {
                 crate::views::usage_modal::render_usage_modal(
                     buf,

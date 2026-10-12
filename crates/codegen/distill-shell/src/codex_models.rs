@@ -25,16 +25,29 @@ struct Catalog {
 static CATALOG: LazyLock<RwLock<Option<Catalog>>> = LazyLock::new(|| RwLock::new(None));
 static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+fn catalog_credential_paths() -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let store = crate::accounts::AccountStore::default();
+    Ok(store
+        .list()?
+        .into_iter()
+        .filter(|account| account.provider == crate::accounts::Provider::Chatgpt)
+        .filter_map(|account| store.credential_path(&account.id).ok())
+        .collect())
+}
+
 pub(crate) fn cached_models() -> IndexMap<String, ModelEntry> {
-    let Some(credentials) = codex_auth::load_credentials().ok().flatten() else {
-        return IndexMap::new();
-    };
+    let paths = catalog_credential_paths().unwrap_or_default();
     CATALOG
         .read()
         .as_ref()
         .filter(|catalog| {
-            catalog.identity == credentials.identity()
-                && catalog.base_url == codex_auth::inference_base_url()
+            catalog.base_url == codex_auth::inference_base_url()
+                && paths.iter().any(|path| {
+                    codex_auth::load_credentials_at(path)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|credentials| catalog.identity == credentials.identity())
+                })
         })
         .map(|catalog| catalog.models.clone())
         .unwrap_or_default()
@@ -43,19 +56,59 @@ pub(crate) fn cached_models() -> IndexMap<String, ModelEntry> {
 /// Account-scoped, short-lived memory cache. Never writes into the Grok catalog.
 pub(crate) async fn refresh() -> anyhow::Result<()> {
     let _refresh = REFRESH.lock().await;
-    let Some(credentials) = codex_auth::fresh_credentials().await? else {
-        *CATALOG.write() = None;
-        return Ok(());
-    };
-    let identity = credentials.identity();
     let base_url = codex_auth::inference_base_url();
-    if CATALOG.read().as_ref().is_some_and(|catalog| {
-        catalog.identity == identity
-            && catalog.base_url == base_url
-            && catalog.fetched_at.elapsed() < Duration::from_secs(300)
-    }) {
-        return Ok(());
+    let mut last_error = None;
+    for path in catalog_credential_paths()? {
+        let credentials = match codex_auth::fresh_credentials_at(&path).await {
+            Ok(Some(credentials)) => credentials,
+            Ok(None) => continue,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        let identity = credentials.identity();
+        if CATALOG.read().as_ref().is_some_and(|catalog| {
+            catalog.identity == identity
+                && catalog.base_url == base_url
+                && catalog.fetched_at.elapsed() < Duration::from_secs(300)
+        }) {
+            return Ok(());
+        }
+        let models = match fetch_models(&base_url, &credentials).await {
+            Ok(models) => models,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        // A login/logout during discovery must not publish another account's models.
+        if codex_auth::load_credentials_at(&path)
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.identity() == identity)
+            && base_url == codex_auth::inference_base_url()
+        {
+            *CATALOG.write() = Some(Catalog {
+                identity,
+                base_url,
+                fetched_at: Instant::now(),
+                models,
+            });
+            return Ok(());
+        }
     }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    *CATALOG.write() = None;
+    Ok(())
+}
+
+async fn fetch_models(
+    base_url: &str,
+    credentials: &codex_auth::CodexCredentials,
+) -> anyhow::Result<IndexMap<String, ModelEntry>> {
     let version = codex_auth::codex_client_version();
     let mut request = reqwest::Client::new()
         .get(format!("{}/models", base_url.trim_end_matches('/')))
@@ -87,19 +140,7 @@ pub(crate) async fn refresh() -> anyhow::Result<()> {
         .json()
         .await
         .context("Invalid ChatGPT model catalog")?;
-    let models = convert_models(wire, &base_url);
-    // A login/logout that completed during the request must not publish another account's models.
-    if codex_auth::load_credentials()?.is_some_and(|current| current.identity() == identity)
-        && base_url == codex_auth::inference_base_url()
-    {
-        *CATALOG.write() = Some(Catalog {
-            identity,
-            base_url,
-            fetched_at: Instant::now(),
-            models,
-        });
-    }
-    Ok(())
+    Ok(convert_models(wire, base_url))
 }
 
 #[derive(Deserialize)]
@@ -216,6 +257,45 @@ fn convert_models(mut response: ModelsResponse, base_url: &str) -> IndexMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn account_catalog_skips_unusable_accounts_and_keeps_selected_identity() {
+        crate::agent::account_routing::tests::isolated(
+            "codex_models::tests::account_catalog_skips_unusable_accounts_and_keeps_selected_identity",
+            || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        use axum::{Json, Router, http::HeaderMap, routing::get};
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let url = format!("http://{}", listener.local_addr().unwrap());
+                        let server = tokio::spawn(async move {
+                            axum::serve(listener, Router::new().route("/models", get(|headers: HeaderMap| async move {
+                                assert_eq!(headers["authorization"], "Bearer three-token");
+                                assert_eq!(headers["chatgpt-account-id"], "wire-three");
+                                Json(serde_json::json!({"models": [{"slug": "healthy", "visibility": "list"}]}))
+                            }))).await.unwrap();
+                        });
+                        let fixture = crate::agent::account_routing::tests::NamedAccounts::new(&url);
+                        std::fs::write(fixture.store.credential_path("one").unwrap(), "unreadable JSON").unwrap();
+                        let expired_path = fixture.store.credential_path("two").unwrap();
+                        let mut expired: serde_json::Value = serde_json::from_slice(&std::fs::read(&expired_path).unwrap()).unwrap();
+                        expired["last_refresh"] = serde_json::Value::Null;
+                        expired["tokens"]["refresh_token"] = serde_json::json!("");
+                        std::fs::write(expired_path, serde_json::to_vec(&expired).unwrap()).unwrap();
+
+                        refresh().await.unwrap();
+                        assert!(cached_models().contains_key("chatgpt/healthy"));
+                        fixture.store.logout("three", None).await.unwrap();
+                        assert!(cached_models().is_empty(), "cache must remain bound to its live account");
+                        server.abort();
+                    });
+            },
+        );
+    }
 
     #[test]
     fn account_catalog_preserves_visibility_routing_and_per_model_efforts() {

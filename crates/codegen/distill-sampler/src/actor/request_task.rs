@@ -88,6 +88,10 @@ pub(crate) async fn run_request_task(
     codex_turn_affinity: CodexTurnAffinity,
 ) -> RequestId {
     let mut completion = CompletionState::new(completion);
+    let mut retry_policy = retry_policy;
+    if config.extra_headers.contains_key("x-distill-account-route") {
+        retry_policy.retry_only_before_output = true;
+    }
     let idle_timeout = Duration::from_secs(
         config
             .idle_timeout_secs
@@ -131,7 +135,7 @@ pub(crate) async fn run_request_task(
     let doom_policy = config.doom_loop_recovery;
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
     let mut doom_retry_count: u32 = 0;
-    let output_observed = Arc::new(AtomicBool::new(false));
+    let output_observed = Arc::clone(&completion.output_observed);
 
     loop {
         sampling_span.record(
@@ -1009,9 +1013,9 @@ fn send_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use distill_sampling_types::ApiErrorCode;
     use futures_util::stream;
     use reqwest::StatusCode;
-    use distill_sampling_types::ApiErrorCode;
 
     #[test]
     fn strip_reason_invalid_image_is_server_rejected_on_api_and_stream() {
@@ -1068,9 +1072,7 @@ mod tests {
         content: &str,
     ) -> ConversationResponse {
         ConversationResponse {
-            items: vec![distill_sampling_types::ConversationItem::assistant(
-                content,
-            )],
+            items: vec![distill_sampling_types::ConversationItem::assistant(content)],
             stop_reason,
             usage: None,
             cost_usd_ticks: None,

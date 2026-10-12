@@ -5336,7 +5336,7 @@ pub(crate) fn response_include_extensions(
         Vec::new()
     }
 }
-pub(crate) fn sampling_config_for_model(
+pub(crate) fn sampling_config_for_account(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
     alpha_test_key: Option<String>,
@@ -5350,6 +5350,22 @@ pub(crate) fn sampling_config_for_model(
     let temperature = info.temperature;
     let top_p = info.top_p;
     let mut extra_headers = info.extra_headers.clone();
+    if first_own_credential(model.api_key.as_deref(), model.env_key.as_ref()).is_some()
+        || model.auth_provider.is_some()
+        || info
+            .extra_headers
+            .keys()
+            .chain(info.env_http_headers.keys())
+            .any(|name| {
+                name.eq_ignore_ascii_case("authorization")
+                    || name.eq_ignore_ascii_case("x-api-key")
+            })
+    {
+        extra_headers.insert(
+            super::account_routing::CREDENTIAL_AUTHORITY_HEADER.into(),
+            "1".into(),
+        );
+    }
     inject_url_derived_headers(
         &mut extra_headers,
         alpha_test_key.as_deref(),
@@ -5403,6 +5419,24 @@ pub(crate) fn sampling_config_for_model(
         doom_loop_recovery: None,
         header_injector: None,
     };
+    config
+}
+pub(crate) fn sampling_config_for_model(
+    model: &ModelEntry,
+    credentials: ResolvedCredentials,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    deployment_id: Option<String>,
+    user_id: Option<String>,
+) -> SamplerConfig {
+    let mut config = sampling_config_for_account(
+        model,
+        credentials,
+        alpha_test_key,
+        client_version,
+        deployment_id,
+        user_id,
+    );
     // A model pointed at the ChatGPT Codex backend needs the CLI's sign-in as its
     // bearer and the workspace header; everything else is left alone.
     crate::codex_auth::apply_codex_backend(&mut config);
@@ -5543,6 +5577,9 @@ pub(crate) fn resolve_web_search_sampling_config(
     }
     resolved.map(crate::tools::config::web_search_sampling_config)
 }
+/// ACP model metadata identifying the account provider supported by its endpoint.
+pub const ACCOUNT_PROVIDER_META_KEY: &str = "accountProvider";
+
 pub(crate) fn to_acp_model_info(
     models: &IndexMap<String, ModelEntry>,
 ) -> IndexMap<acp::ModelId, acp::ModelInfo> {
@@ -5562,6 +5599,12 @@ pub(crate) fn to_acp_model_info(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
                 );
+                if let Some(provider) = super::account_routing::provider_for_url(&info.base_url) {
+                    map.insert(
+                        ACCOUNT_PROVIDER_META_KEY.to_string(),
+                        serde_json::json!(provider),
+                    );
+                }
                 if info.supports_reasoning_effort {
                     map.insert(
                         "supportsReasoningEffort".to_string(),

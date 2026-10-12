@@ -31,6 +31,7 @@ pub(crate) fn merge_signal_labels(
 }
 
 pub(crate) struct CompletionState {
+    pub(crate) output_observed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     tx: Option<oneshot::Sender<CollectedSamplingResult>>,
     doom_loop_signals: Vec<String>,
     doom_loop_recovery_attempts: Vec<DoomLoopRecoveryAttempt>,
@@ -39,6 +40,7 @@ pub(crate) struct CompletionState {
 impl CompletionState {
     pub(crate) fn new(tx: Option<oneshot::Sender<CollectedSamplingResult>>) -> Self {
         Self {
+            output_observed: Default::default(),
             tx,
             doom_loop_signals: Vec::new(),
             doom_loop_recovery_attempts: Vec::new(),
@@ -70,6 +72,9 @@ impl CompletionState {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(CollectedSamplingResult {
                 result,
+                output_observed: self
+                    .output_observed
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 terminal_event_queued,
                 doom_loop_signals: std::mem::take(&mut self.doom_loop_signals),
                 doom_loop_recovery_attempts: std::mem::take(&mut self.doom_loop_recovery_attempts),
