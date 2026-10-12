@@ -83,6 +83,45 @@ fn sampler_route_backend_key(config: &SamplingConfig) -> &'static str {
     }
 }
 
+fn account_history_needs_portability(
+    previous: &distill_sampling_types::SamplingConfig,
+    next: &SamplingConfig,
+) -> bool {
+    previous.model != next.model
+        || previous.base_url != next.base_url
+        || previous.api_backend != next.api_backend
+        || crate::agent::account_routing::AccountRoute::read(&previous.extra_headers)
+            .ok()
+            .flatten()
+            .map(|route| route.account_id)
+            != crate::agent::account_routing::AccountRoute::read(&next.extra_headers)
+                .ok()
+                .flatten()
+                .map(|route| route.account_id)
+}
+
+/// Remove model-minted reasoning and retain backend tool context as text.
+fn make_account_history_portable(items: &mut Vec<ConversationItem>) -> bool {
+    if !items.iter().any(|item| {
+        matches!(
+            item,
+            ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+        )
+    }) {
+        return false;
+    }
+    *items = distill_chat_state::compaction_utils::strip_reasoning_blocks(std::mem::take(items))
+        .into_iter()
+        .map(|item| match item {
+            ConversationItem::BackendToolCall(call) => {
+                ConversationItem::assistant(call.text_summary())
+            }
+            other => other,
+        })
+        .collect();
+    true
+}
+
 /// A request to a Messages (`/messages`) endpoint, the backend whose cache usage the prefix trace reads.
 fn is_messages_endpoint(endpoint: Option<&str>) -> bool {
     endpoint
@@ -2283,6 +2322,7 @@ impl SessionActor {
         park: TurnParkState,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         let caller_output_tokens = request.max_output_tokens;
+        let previous_config = self.chat_state_handle.get_sampling_config().await;
         // Per-turn auth refresh + sampler config push. Mirrors
         // `prepare_chat_completion(false)` from the legacy path.
         let mut route_config = if !park.is_parked() {
@@ -2297,6 +2337,15 @@ impl SessionActor {
         }) {
             return Err(acp::Error::internal_error()
                 .data("Selected account is unavailable or its identity changed"));
+        }
+        // The request was built before prepare selected this turn's account.
+        if let (Some(previous), Some(config)) = (previous_config.as_ref(), route_config.as_ref())
+            && config
+                .extra_headers
+                .contains_key(crate::agent::account_routing::ROUTE_HEADER)
+            && account_history_needs_portability(previous, config)
+        {
+            make_account_history_portable(&mut request.items);
         }
         // A round the decision layer moved (e.g. to the local model) must name
         // that model in the request: the chat state built it with the session's.
@@ -2518,7 +2567,21 @@ impl SessionActor {
 
     /// Persist only route metadata/model parameters; credentials are resolved from its account.
     async fn persist_account_config(&self, config: &SamplingConfig) -> anyhow::Result<()> {
+        let mut portable_history = None;
+        if let Some(previous) = self.chat_state_handle.get_sampling_config().await
+            && account_history_needs_portability(&previous, config)
+        {
+            let mut history = self.chat_state_handle.get_conversation().await;
+            if make_account_history_portable(&mut history) {
+                portable_history = Some(history);
+            }
+        }
         crate::agent::account_routing::save_session_config(&self.session_info, config)?;
+        // A rejected route must leave the live history untouched as well.
+        if let Some(history) = portable_history {
+            persist_chat_history_jsonl_sync(&self.session_info, &history);
+            self.chat_state_handle.replace_conversation(history);
+        }
         let state = distill_sampling_types::SamplingConfig {
             base_url: config.base_url.clone(),
             mtls_cert_dir: config.mtls_cert_dir.clone(),
@@ -2579,9 +2642,16 @@ impl SessionActor {
                 .map_err(|_| {
                     acp::Error::internal_error().data("Selected account authentication failed")
                 })?;
+            let previous = self.chat_state_handle.get_sampling_config().await;
             self.persist_account_config(&config).await.map_err(|_| {
                 acp::Error::internal_error().data("Could not persist selected account route")
             })?;
+            if previous
+                .as_ref()
+                .is_some_and(|previous| account_history_needs_portability(previous, &config))
+            {
+                make_account_history_portable(&mut request.items);
+            }
             self.sampler_handle.update_config(config.clone());
             request.model = Some(config.model.clone());
             request.reasoning_effort = config.reasoning_effort;

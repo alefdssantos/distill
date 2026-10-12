@@ -1491,6 +1491,7 @@ async fn model_switch_preserves_existing_conversation_group() {
             incoming.conversation_group_id = None;
             actor
                 .handle_set_session_model(crate::session::SessionModelSwitch {
+                    rebuild_definition: None,
                     sampling_config: incoming,
                     canonical_model_id: None,
                     model_selection_intent: true,
@@ -1566,6 +1567,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             };
             let _ = actor
                 .handle_set_session_model(crate::session::SessionModelSwitch {
+                    rebuild_definition: None,
                     sampling_config: cfg,
                     canonical_model_id: None,
                     model_selection_intent: true,
@@ -1657,6 +1659,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
             };
             let _ = actor
                 .handle_set_session_model(crate::session::SessionModelSwitch {
+                    rebuild_definition: None,
                     sampling_config: cfg,
                     canonical_model_id: None,
                     model_selection_intent: true,

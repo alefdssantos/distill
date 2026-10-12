@@ -311,6 +311,8 @@ impl From<SkillUpdateKind> for AdvertiseTrigger {
 }
 pub struct SessionModelSwitch {
     pub sampling_config: distill_sampler::SamplerConfig,
+    /// Prepare this zero-turn harness before persisting the route, then install it with the model.
+    pub rebuild_definition: Option<distill_agent::AgentDefinition>,
     /// Canonical catalogue identity selected by the caller. This stays
     /// separate from `sampling_config.model`, which is the provider wire name.
     pub canonical_model_id: Option<acp::ModelId>,
@@ -324,8 +326,8 @@ pub struct SessionModelSwitch {
     /// Set to `false` for forked sessions so mid-session model switches cannot contaminate the inherited prompt configuration.
     pub apply_prompt_override: bool,
     /// When `true`, suppress the system prompt rewrite even though `apply_prompt_override` may be `true`.
-    /// Set by the model-switch orchestrator immediately after a successful `RebuildAgentForDefinition`.
-    /// The rebuild handler already installed the fresh harness's prompt; the concise/default swap must not clobber it.
+    /// Set when this switch carries a rebuild definition or keeps the same model.
+    /// The fresh harness's prompt must not be clobbered by the concise/default swap.
     pub skip_prompt_rewrite: bool,
     /// Computed by `MvpAgent` against the new model id.
     /// Per-model remote settings and per-model user TOML overrides then target the right model after a `/model` switch.

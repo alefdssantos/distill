@@ -328,6 +328,227 @@ fn account_routing_named_only_session_admission_auto_and_cold_route_restore() {
                     "the logical acknowledgement never becomes a wire model"
                 );
 
+                // A zero-turn harness change must not commit before its route is durable.
+                {
+                    let current = agent.resident_handle(&sid).unwrap();
+                    assert_eq!(
+                        current.signals_handle.snapshot().await.unwrap().turn_count,
+                        0
+                    );
+                    assert!(
+                        current
+                            .gateway_enabled
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    );
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    current
+                        .cmd_tx
+                        .send(crate::session::SessionCommand::GetActiveAgent { responds_to: tx })
+                        .unwrap();
+                    let previous_harness = rx.await.unwrap();
+                    assert_ne!(previous_harness.as_deref(), Some("codex"));
+                    let previous_worker = current.worker_override.read().clone();
+                    let previous_sampling = current
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap();
+                    let previous_conversation = current.chat_state_handle.get_conversation().await;
+                    let previous_effort_auto = current
+                        .jev_effort_auto
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let previous_default_effort_auto = agent.models_manager.current_effort_auto();
+                    assert!(!previous_effort_auto);
+                    drain_persistence(&agent, &sid).await;
+                    let dir = crate::session::persistence::session_dir(&current.info);
+                    let previous_prompt_files = [
+                        "prompt_context.json",
+                        "system_prompt.txt",
+                        "chat_history.jsonl",
+                    ]
+                    .map(|name| {
+                        let path = dir.join(name);
+                        let bytes = std::fs::read(&path).unwrap();
+                        (path, bytes)
+                    });
+                    let route_path = dir.join("account-route.json");
+                    let previous_route = std::fs::read(&route_path).unwrap();
+                    fixture.quota("one", Some(90.0));
+                    let mut strict_model = fixture.models["gpt-6.1-sol"].clone();
+                    strict_model.info.agent_type = "codex".into();
+                    agent
+                        .models_manager
+                        .insert_test_entry("gpt-6.1-sol", strict_model);
+                    let backup = route_path.with_extension("backup");
+                    std::fs::rename(&route_path, &backup).unwrap();
+                    std::fs::create_dir(&route_path).unwrap();
+                    let rejected = Box::pin(
+                        agent.set_model_gated(
+                            acp::SetSessionModelRequest::new(
+                                sid.clone(),
+                                acp::ModelId::new("auto"),
+                            )
+                            .meta(
+                                serde_json::json!({"reasoningEffortAuto": true})
+                                    .as_object()
+                                    .cloned(),
+                            ),
+                        ),
+                    )
+                    .await;
+                    std::fs::remove_dir(&route_path).unwrap();
+                    std::fs::rename(&backup, &route_path).unwrap();
+                    let rejected =
+                        rejected.expect_err("a blocked route rejects the zero-turn harness switch");
+                    assert_eq!(
+                        rejected.data,
+                        Some(serde_json::json!(
+                            "Could not persist selected account route"
+                        ))
+                    );
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    current
+                        .cmd_tx
+                        .send(crate::session::SessionCommand::GetActiveAgent { responds_to: tx })
+                        .unwrap();
+                    assert_eq!(
+                        rx.await.unwrap(),
+                        previous_harness,
+                        "a rejected switch keeps the active harness"
+                    );
+                    let unchanged = agent.resident_handle(&sid).unwrap();
+                    assert_eq!(unchanged.model_id, current.model_id);
+                    assert_eq!(unchanged.agent_name, current.agent_name);
+                    assert_eq!(*unchanged.worker_override.read(), previous_worker);
+                    let sampling = unchanged
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap();
+                    assert_eq!(sampling.model, previous_sampling.model);
+                    assert_eq!(sampling.extra_headers, previous_sampling.extra_headers);
+                    assert_eq!(
+                        sampling.reasoning_effort,
+                        previous_sampling.reasoning_effort
+                    );
+                    assert_eq!(
+                        unchanged
+                            .jev_effort_auto
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        previous_effort_auto
+                    );
+                    assert_eq!(
+                        agent.models_manager.current_effort_auto(),
+                        previous_default_effort_auto
+                    );
+                    assert_eq!(
+                        serde_json::to_value(unchanged.chat_state_handle.get_conversation().await)
+                            .unwrap(),
+                        serde_json::to_value(&previous_conversation).unwrap()
+                    );
+                    drain_persistence(&agent, &sid).await;
+                    assert_eq!(std::fs::read(&route_path).unwrap(), previous_route);
+                    for (path, bytes) in previous_prompt_files {
+                        assert_eq!(
+                            std::fs::read(&path).unwrap(),
+                            bytes,
+                            "{} changed after rejection",
+                            path.display()
+                        );
+                    }
+
+                    let switched = Box::pin(
+                        agent.set_model_gated(
+                            acp::SetSessionModelRequest::new(
+                                sid.clone(),
+                                acp::ModelId::new("auto"),
+                            )
+                            .meta(
+                                serde_json::json!({"reasoningEffortAuto": true})
+                                    .as_object()
+                                    .cloned(),
+                            ),
+                        ),
+                    )
+                    .await
+                    .expect("the same zero-turn switch succeeds after removing the blocked route");
+                    assert_eq!(
+                        switched.meta.unwrap()["model"],
+                        serde_json::json!({"Ok": "gpt-6.1-sol"})
+                    );
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    current
+                        .cmd_tx
+                        .send(crate::session::SessionCommand::GetActiveAgent { responds_to: tx })
+                        .unwrap();
+                    assert_eq!(rx.await.unwrap().as_deref(), Some("codex"));
+                    let switched = agent.resident_handle(&sid).unwrap();
+                    assert_eq!(switched.model_id.0.as_ref(), "gpt-6.1-sol");
+                    assert_eq!(switched.agent_name, "codex");
+                    assert_eq!(
+                        switched
+                            .worker_override
+                            .read()
+                            .as_ref()
+                            .unwrap()
+                            .model_id
+                            .as_deref(),
+                        Some("gpt-6-luna")
+                    );
+                    assert!(
+                        switched
+                            .jev_effort_auto
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    );
+                    let sampling = switched
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap();
+                    let selected = AccountRoute::read(&sampling.extra_headers)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(selected.account_id, "one");
+                    assert_eq!(selected.main_model, "gpt-6.1-sol");
+                    assert_eq!(selected.worker_model, "gpt-6-luna");
+                    let conversation = switched.chat_state_handle.get_conversation().await;
+                    assert_ne!(
+                        distill_sampling_types::current_system_prompt(&conversation),
+                        distill_sampling_types::current_system_prompt(&previous_conversation)
+                    );
+                    let persisted = account_routing::load_session_config(
+                        &switched.info,
+                        &agent.models_manager.models(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(
+                        AccountRoute::read(&persisted.extra_headers)
+                            .unwrap()
+                            .unwrap()
+                            .account_id,
+                        "one"
+                    );
+
+                    fixture.quota("one", Some(10.0));
+                    Box::pin(
+                        agent.set_model_gated(
+                            acp::SetSessionModelRequest::new(
+                                sid.clone(),
+                                acp::ModelId::new("auto"),
+                            )
+                            .meta(
+                                serde_json::json!({"reasoningEffort": "low"})
+                                    .as_object()
+                                    .cloned(),
+                            ),
+                        ),
+                    )
+                    .await
+                    .expect("restore the original Auto pair for the remaining rejection checks");
+                }
+
                 let current = agent.resident_handle(&sid).unwrap();
                 let previous_worker = current.worker_override.read().clone();
                 let previous_sampling = current

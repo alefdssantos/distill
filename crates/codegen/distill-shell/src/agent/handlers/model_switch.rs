@@ -212,31 +212,6 @@ pub(crate) async fn apply(
             .await
             .and_then(|cfg| cfg.reasoning_effort),
     };
-    // Auto effort is a session mode, not a level: an explicit level in this
-    // request (or any later one) clears it, and asking for auto keeps whatever
-    // level the session already had as the fallback.
-    let share_defaults = shares_process_defaults(agent);
-    if wants_auto_effort && explicit_effort.is_none() {
-        if share_defaults {
-            agent.models_manager.set_current_effort_auto(true);
-        }
-        handle
-            .jev_effort_auto
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        tracing::info!(
-            session_id = %session_id.0,
-            model_id = %model_id.0,
-            fallback_effort = ?effective_effort,
-            "set_session_model: auto effort enabled; the decision layer picks the effort per model call"
-        );
-    } else if explicit_effort.is_some() || auto_off_requested {
-        if share_defaults {
-            agent.models_manager.set_current_effort_auto(false);
-        }
-        handle
-            .jev_effort_auto
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
     let keep_route = previous_model_id == model_id.0
         && (wants_auto_effort || explicit_effort.is_some() || auto_off_requested);
     let mut model_sampling = match auto_config {
@@ -298,44 +273,7 @@ pub(crate) async fn apply(
         );
         pending_rebuild_definition = None;
     }
-    let did_rebuild = if let Some(def) = pending_rebuild_definition {
-        let (rebuild_tx, rebuild_rx) = oneshot::channel();
-        let _ = handle
-            .cmd_tx
-            .send(SessionCommand::RebuildAgentForDefinition {
-                definition: def,
-                system_prompt_label: system_prompt_label.clone(),
-                responds_to: rebuild_tx,
-            });
-        let rebuild_result = rebuild_rx
-            .await
-            .map_err(|_| acp::Error::internal_error().data("rebuild_agent: actor closed"))?;
-        match rebuild_result {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::error!(
-                    session_id = %session_id.0,
-                    model_id = %model_id.0,
-                    error = ?e,
-                    "set_session_model: zero-turn harness rebuild failed; aborting model switch"
-                );
-                distill_telemetry::session_ctx::log_event(
-                    distill_telemetry::events::ModelSwitched {
-                        session_id: session_id.0.to_string(),
-                        previous_model_id: previous_model_id.to_string(),
-                        new_model_id: model_id.0.to_string(),
-                        success: false,
-                        error_code: Some(config::MODEL_SWITCH_REBUILD_FAILED.to_string()),
-                        required_agent_type: Some(required_agent_type.clone()),
-                        current_agent_type: None,
-                    },
-                );
-                return Err(e);
-            }
-        }
-    } else {
-        false
-    };
+    let did_rebuild = pending_rebuild_definition.is_some();
     let model_unchanged = previous_model_id == model_id.0;
     let model_selection_intent = !requested_auto
         && !(model_unchanged
@@ -344,6 +282,7 @@ pub(crate) async fn apply(
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
         switch: SessionModelSwitch {
             sampling_config: model_sampling,
+            rebuild_definition: pending_rebuild_definition,
             canonical_model_id: Some(model_id.clone()),
             model_selection_intent,
             use_concise,
@@ -358,6 +297,29 @@ pub(crate) async fn apply(
     let updated_model = rx
         .await
         .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
+    // Commit effort policy only after the actor has applied the model and harness.
+    let share_defaults = shares_process_defaults(agent);
+    if wants_auto_effort && explicit_effort.is_none() {
+        if share_defaults {
+            agent.models_manager.set_current_effort_auto(true);
+        }
+        handle
+            .jev_effort_auto
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            session_id = %session_id.0,
+            model_id = %model_id.0,
+            fallback_effort = ?effective_effort,
+            "set_session_model: auto effort enabled; the decision layer picks the effort per model call"
+        );
+    } else if explicit_effort.is_some() || auto_off_requested {
+        if share_defaults {
+            agent.models_manager.set_current_effort_auto(false);
+        }
+        handle
+            .jev_effort_auto
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if let Some(worker) = auto_worker {
         *handle.worker_override.write() = Some(worker);
         // Main's actor command completed; refresh its prompt with the committed Worker.
