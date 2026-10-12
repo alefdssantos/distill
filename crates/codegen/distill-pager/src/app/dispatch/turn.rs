@@ -57,6 +57,25 @@ pub(super) fn dispatch_cancel_turn(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let side_return = app.agents.get(&id).and_then(|agent| {
+        (agent.side_parent.is_some()
+            && agent.session.state.is_idle()
+            && agent.active_subagent.is_none()
+            && agent.running_wake_turn.is_none()
+            && agent.prompt.text().is_empty()
+            && agent.prompt.images.is_empty()
+            && agent.cancel_turn_view.is_none()
+            && agent.active_modal.is_none()
+            && agent.feedback_modal.is_none())
+            .then_some(agent.side_parent)
+            .flatten()
+    });
+    if let Some(parent_id) = side_return
+        && app.agents.contains_key(&parent_id)
+    {
+        super::ctx::switch_to_agent(app, parent_id, super::ctx::SwitchCause::Picker);
+        return vec![];
+    }
     // Overlay [stop] is the child's turn. Parent may be Idle (background Task) and the ask panel would render under the overlay, unreachable.
     if let Some(agent) = active_subagent_view_mut(app) {
         // No wire target: leave local state alone (do not flip to Cancelling).

@@ -1726,6 +1726,61 @@ fn dispatch_side_marks_side_chat_and_emits_side_kind() {
 }
 
 #[test]
+fn cancel_turn_returns_from_idle_side_without_closing_it() {
+    let mut app = fork_test_app();
+    dispatch(Action::Side { directive: None }, &mut app);
+    app.agents.get_mut(&AgentId(1)).unwrap().session.state = AgentState::Idle;
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+
+    assert!(effects.is_empty());
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+    assert!(app.agents.contains_key(&AgentId(1)));
+}
+
+#[test]
+fn cancel_turn_preserves_text_and_main_session_behavior() {
+    let mut app = fork_test_app();
+    dispatch(Action::Side { directive: None }, &mut app);
+    let side = app.agents.get_mut(&AgentId(1)).unwrap();
+    side.session.state = AgentState::Idle;
+    side.prompt.set_text("draft".into());
+
+    dispatch(Action::CancelTurn, &mut app);
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(1)));
+    assert_eq!(app.agents.get(&AgentId(1)).unwrap().prompt.text(), "draft");
+
+    app.active_view = ActiveView::Agent(AgentId(0));
+    dispatch(Action::CancelTurn, &mut app);
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+}
+
+#[test]
+fn cancel_turn_with_missing_side_parent_keeps_side_active() {
+    let mut app = fork_test_app();
+    dispatch(Action::Side { directive: None }, &mut app);
+    let side = app.agents.get_mut(&AgentId(1)).unwrap();
+    side.session.state = AgentState::Idle;
+    side.side_parent = Some(AgentId(99));
+
+    dispatch(Action::CancelTurn, &mut app);
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(1)));
+}
+
+#[test]
+fn cancel_turn_on_busy_side_cancels_instead_of_returning() {
+    let mut app = fork_test_app();
+    dispatch(Action::Side { directive: None }, &mut app);
+    let side = app.agents.get_mut(&AgentId(1)).unwrap();
+    side.session.state = AgentState::TurnRunning;
+
+    let effects = dispatch(Action::CancelTurn, &mut app);
+    assert_eq!(app.active_view, ActiveView::Agent(AgentId(1)));
+    assert!(effects.is_empty());
+    assert!(app.agents.get(&AgentId(1)).unwrap().session.state.is_cancelling());
+}
+
+#[test]
 fn dispatch_side_refused_inside_side_chat() {
     let mut app = fork_test_app();
     let first = dispatch(Action::Side { directive: None }, &mut app);

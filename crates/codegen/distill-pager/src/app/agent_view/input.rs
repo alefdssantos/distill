@@ -1236,6 +1236,17 @@ impl AgentView {
                 if self.any_cancel_pending() {
                     return InputOutcome::Action(Action::Quit);
                 }
+                if self.side_parent.is_some()
+                    && self.session.state.is_idle()
+                    && self.prompt.text().is_empty()
+                    && self.prompt.images.is_empty()
+                    && self.active_modal.is_none()
+                    && self.feedback_modal.is_none()
+                    && self.blocking_card().is_none()
+                    && self.plan_approval_view.is_none()
+                {
+                    return InputOutcome::Action(Action::CancelTurn);
+                }
                 if crate::app::minimal_mode_active()
                     && self.session.state.is_idle()
                     && self.prompt.text().is_empty()
@@ -2284,6 +2295,32 @@ mod mid_turn_esc_hint_tests {
         assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
         assert_eq!(None, agent.active_toast_message());
         assert_eq!(None, agent.cancel_trigger_hint);
+    }
+    fn press_ctrl_c(agent: &mut AgentView) -> InputOutcome {
+        agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &ActionRegistry::defaults(),
+        )
+    }
+    #[test]
+    fn ctrl_c_returns_from_idle_side_for_idle_or_running_parent() {
+        for parent_status in [
+            super::super::SideParentStatus::Idle,
+            super::super::SideParentStatus::Running,
+        ] {
+            let mut agent = make_agent();
+            agent.side_parent = Some(crate::app::agent::AgentId(0));
+            agent.side_parent_status = parent_status;
+            assert!(matches!(press_ctrl_c(&mut agent), InputOutcome::Action(Action::CancelTurn)));
+        }
+    }
+    #[test]
+    fn ctrl_c_preserves_main_and_busy_behavior() {
+        let mut main = make_agent();
+        assert!(matches!(press_ctrl_c(&mut main), InputOutcome::Unchanged));
+        let mut busy_side = running_agent(false);
+        busy_side.side_parent = Some(crate::app::agent::AgentId(0));
+        assert!(matches!(press_ctrl_c(&mut busy_side), InputOutcome::Action(Action::CancelTurn)));
     }
     /// Ctrl+C on an empty prompt is still the cancel gesture.
     #[test]

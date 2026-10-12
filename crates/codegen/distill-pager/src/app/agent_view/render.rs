@@ -1368,9 +1368,20 @@ impl AgentView {
                 super::SideParentStatus::Idle => "side - parent idle",
                 super::SideParentStatus::Gone => "side",
             };
+            let return_hint = self.side_parent_status != super::SideParentStatus::Gone
+                && self.session.state.is_idle()
+                && self.active_subagent.is_none()
+                && self.running_wake_turn.is_none()
+                && self.prompt.text().is_empty()
+                && self.prompt.images.is_empty();
+            let label = if return_hint {
+                format!("{label} · Ctrl+C to return")
+            } else {
+                label.to_string()
+            };
             status.push(
                 "side",
-                Line::from(Span::styled(label.to_string(), bg.fg(theme.gray))),
+                Line::from(Span::styled(label, bg.fg(theme.gray))),
             );
         }
         let hover_or = |hovered: bool, resting: Style| {
