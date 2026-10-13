@@ -8983,3 +8983,5 @@ async fn the_title_client_never_inherits_the_session_effort() {
     assert_eq!(plain_cfg.reasoning_effort, None);
     assert_eq!(plain_cfg.model, "plain-title");
 }
+
+mod account_routing_tests;

@@ -2517,6 +2517,22 @@ fn acp_model_meta_includes_agent_type_when_present() {
         meta.get("totalContextTokens"),
         Some(&serde_json::json!(256_000))
     );
+    assert!(meta.get(ACCOUNT_PROVIDER_META_KEY).is_none());
+    models.get_mut("test-model").unwrap().info.base_url =
+        "https://openrouter.ai/api/v1".into();
+    let provider_models = to_acp_model_info(&models);
+    assert_eq!(
+        provider_models
+            .values()
+            .next()
+            .unwrap()
+            .meta
+            .as_ref()
+            .unwrap()
+            .get(ACCOUNT_PROVIDER_META_KEY),
+        Some(&serde_json::json!("openrouter")),
+        "account provider follows the endpoint, not the model name"
+    );
 }
 #[test]
 fn acp_model_meta_always_includes_agent_type() {

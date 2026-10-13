@@ -33,6 +33,7 @@ async fn model_switch_relabels_live_agent_and_system_head() {
 
             actor
                 .handle_set_session_model(crate::session::SessionModelSwitch {
+                    rebuild_definition: None,
                     sampling_config: distill_sampler::SamplerConfig {
                         model: "gpt-6-astra".to_owned(),
                         context_window: 272_000,
@@ -91,6 +92,7 @@ async fn effort_only_model_switch_does_not_create_child_model_pin() {
 
             actor
                 .handle_set_session_model(crate::session::SessionModelSwitch {
+                    rebuild_definition: None,
                     sampling_config: distill_sampler::SamplerConfig {
                         model: "switch-target".to_owned(),
                         context_window: 256_000,

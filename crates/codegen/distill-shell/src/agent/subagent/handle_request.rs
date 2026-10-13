@@ -316,7 +316,10 @@ fn subagent_title(description: &str, subagent_type: &str) -> String {
 #[cfg(test)]
 #[test]
 fn a_subagent_is_titled_by_its_description_or_type() {
-    assert_eq!(subagent_title(" Audit recap path ", "explore"), "Audit recap path");
+    assert_eq!(
+        subagent_title(" Audit recap path ", "explore"),
+        "Audit recap path"
+    );
     assert_eq!(subagent_title("  ", "explore"), "explore");
 }
 
@@ -328,10 +331,9 @@ fn a_subagent_is_titled_by_its_description_or_type() {
 fn resumed_mcp_announcements(
     child_session_dir: &Path,
 ) -> Option<crate::session::announcement_state::AnnouncementState> {
-    let bytes = std::fs::read(
-        child_session_dir.join(crate::session::storage::ANNOUNCEMENT_STATE_FILE),
-    )
-    .ok()?;
+    let bytes =
+        std::fs::read(child_session_dir.join(crate::session::storage::ANNOUNCEMENT_STATE_FILE))
+            .ok()?;
     let mut state: crate::session::announcement_state::AnnouncementState =
         serde_json::from_slice(&bytes).ok()?;
     state.announced_skill_names.clear();
@@ -345,7 +347,9 @@ fn resumed_mcp_announcements(
 fn a_resumed_child_restores_only_its_mcp_announcements() {
     let dir = tempfile::tempdir().unwrap();
     assert!(resumed_mcp_announcements(dir.path()).is_none());
-    let file = dir.path().join(crate::session::storage::ANNOUNCEMENT_STATE_FILE);
+    let file = dir
+        .path()
+        .join(crate::session::storage::ANNOUNCEMENT_STATE_FILE);
     std::fs::write(&file, b"{not json").unwrap();
     assert!(resumed_mcp_announcements(dir.path()).is_none());
     std::fs::write(
@@ -1021,11 +1025,22 @@ pub(crate) async fn run_shell_child(
     if request.fork_context && !explicit_model_override {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
-    let worker_model = crate::agent::subagent::delegated_worker_model(
+    let mut worker_model = crate::agent::subagent::delegated_worker_model(
         &request,
         resume_source.is_some() || request.resume_from.is_some(),
         ctx.parent_worker.as_ref(),
     );
+    if crate::agent::subagent::delegated_worker_eligible(&request) {
+        let (parent, _) = read_parent_sampling_config(&ctx).await;
+        if !parent.extra_headers.contains_key("x-distill-worker-pin")
+            && let Ok(Some(route)) =
+                crate::agent::account_routing::AccountRoute::read(&parent.extra_headers)
+            && route.option_id.is_some()
+            && !route.pinned
+        {
+            worker_model = Some(route.worker_model);
+        }
+    }
     let (mut effective_sampling_config, mut effective_model_id, unavailable_worker) =
         resolve_effective_model_config(
             effective_runtime.model.as_deref(),
@@ -1233,6 +1248,7 @@ pub(crate) async fn run_shell_child(
         &request,
         resume_source.as_ref(),
         &ctx,
+        &effective_sampling_config,
         &child_session_info,
         &child_session_dir,
         effective_model_id.0.as_ref(),

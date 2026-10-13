@@ -109,6 +109,58 @@ pub struct ClaudeCredentials {
     pub email: Option<String>,
 }
 
+/// OAuth usage endpoint values are percentages (0..100), unlike stream unifiedWindows fractions.
+/// Only typed quota fields survive deserialization; provider payloads are never emitted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClaudeUsageWindow {
+    pub utilization: Option<f64>,
+    pub resets_at: Option<DateTime<Utc>>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClaudeUsageSnapshot {
+    pub five_hour: Option<ClaudeUsageWindow>,
+    pub seven_day: Option<ClaudeUsageWindow>,
+    pub seven_day_sonnet: Option<ClaudeUsageWindow>,
+    pub seven_day_opus: Option<ClaudeUsageWindow>,
+}
+impl ClaudeUsageSnapshot {
+    /// Global quota only. Model-specific windows remain in the snapshot for runtime eligibility.
+    pub fn remaining_percent(&self) -> Option<f64> {
+        [self.five_hour.as_ref(), self.seven_day.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|w| w.utilization)
+            .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+            .map(|v| 100.0 - v)
+            .reduce(f64::min)
+    }
+}
+pub async fn fetch_usage_at(path: &Path) -> Result<ClaudeUsageSnapshot> {
+    let credentials = fresh_credentials_at(path)
+        .await?
+        .ok_or_else(|| anyhow!("Claude account is disconnected"))?;
+    fetch_usage_with_credentials(&credentials, "https://api.anthropic.com/api/oauth/usage").await
+}
+async fn fetch_usage_with_credentials(
+    credentials: &ClaudeCredentials,
+    endpoint: &str,
+) -> Result<ClaudeUsageSnapshot> {
+    crate::http::shared_client()
+        .get(endpoint)
+        .bearer_auth(&credentials.access_token)
+        .header("anthropic-beta", CLAUDE_OAUTH_BETA)
+        .header("accept", "application/json")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| anyhow!("Claude quota request failed"))?
+        .error_for_status()
+        .map_err(|_| anyhow!("Claude quota unavailable"))?
+        .json()
+        .await
+        .map_err(|_| anyhow!("Invalid Claude quota response"))
+}
+
 /// The account a session started with. Refresh rotates the bearer, but requests
 /// fail closed if a re-login swapped the account underneath a running session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,7 +294,7 @@ fn credentials_from_store(store: &ClaudeAuthStore) -> Option<ClaudeCredentials> 
     })
 }
 
-fn load_credentials_at(path: &Path) -> io::Result<Option<ClaudeCredentials>> {
+pub fn load_credentials_at(path: &Path) -> io::Result<Option<ClaudeCredentials>> {
     Ok(load_store_at(path)?
         .as_ref()
         .and_then(credentials_from_store))
@@ -275,7 +327,7 @@ fn save_store_at(path: &Path, store: &ClaudeAuthStore) -> io::Result<()> {
     Ok(())
 }
 
-fn acquire_auth_lock(path: &Path) -> io::Result<File> {
+pub(crate) fn acquire_auth_lock(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -427,8 +479,12 @@ fn persist_login(path: &Path, response: TokenResponse) -> Result<ClaudeCredentia
 }
 
 pub async fn run_cli_login() -> Result<ClaudeAccountSummary> {
+    run_cli_login_at(&auth_file_path()).await
+}
+
+pub async fn run_cli_login_at(path: &Path) -> Result<ClaudeAccountSummary> {
     let credentials =
-        run_browser_login_at(&auth_file_path(), &ClaudeEndpoints::default(), true, None).await?;
+        run_browser_login_at(path, &ClaudeEndpoints::default(), true, None, None).await?;
     Ok(ClaudeAccountSummary::from(&credentials))
 }
 
@@ -443,9 +499,26 @@ pub async fn run_tui_login(
         &ClaudeEndpoints::default(),
         false,
         Some(browser_fallback),
+        None,
     )
     .await?;
     Ok(ClaudeAccountSummary::from(&credentials))
+}
+
+/// Silent account-local browser login; dropping the future closes its callback listener.
+pub async fn run_tui_login_at(
+    path: &Path,
+    url_feedback: tokio::sync::oneshot::Sender<String>,
+) -> Result<()> {
+    run_browser_login_at(
+        path,
+        &ClaudeEndpoints::default(),
+        false,
+        None,
+        Some(url_feedback),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn run_browser_login_at(
@@ -453,6 +526,7 @@ async fn run_browser_login_at(
     endpoints: &ClaudeEndpoints,
     announce: bool,
     browser_fallback: Option<tokio::sync::oneshot::Sender<String>>,
+    url_feedback: Option<tokio::sync::oneshot::Sender<String>>,
 ) -> Result<ClaudeCredentials> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -475,6 +549,9 @@ async fn run_browser_login_at(
         eprintln!("Signing in to Claude with your Pro/Max subscription...");
         eprintln!("Open this URL if your browser does not open automatically:");
         eprintln!("  {auth_url}");
+    }
+    if let Some(tx) = url_feedback {
+        let _ = tx.send(auth_url.clone());
     }
     let open_url = auth_url.clone();
     let browser_result = tokio::task::spawn_blocking(move || webbrowser::open(&open_url)).await;
@@ -510,6 +587,27 @@ fn access_token_is_fresh(store: &ClaudeAuthStore) -> bool {
 /// The current credential, refreshed first when it is close to expiry.
 pub async fn fresh_credentials() -> Result<Option<ClaudeCredentials>> {
     refresh_at(&auth_file_path(), &ClaudeEndpoints::default()).await
+}
+
+pub async fn fresh_credentials_at(path: &Path) -> Result<Option<ClaudeCredentials>> {
+    refresh_at(path, &ClaudeEndpoints::default()).await
+}
+
+#[cfg(test)]
+pub(crate) async fn refresh_for_account_test(path: &Path, token_url: String) -> Result<()> {
+    refresh_at(
+        path,
+        &ClaudeEndpoints {
+            token_url,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+pub fn run_cli_logout_at(path: &Path) -> Result<bool> {
+    logout_at(path)
 }
 
 async fn refresh_at(path: &Path, endpoints: &ClaudeEndpoints) -> Result<Option<ClaudeCredentials>> {
@@ -584,7 +682,7 @@ async fn refresh_at(path: &Path, endpoints: &ClaudeEndpoints) -> Result<Option<C
 /// Anthropic documents no revocation endpoint for these tokens, so signing out
 /// removes the local credential only.
 pub async fn run_cli_logout() -> Result<bool> {
-    logout_at(&auth_file_path())
+    tokio::task::spawn_blocking(|| logout_at(&auth_file_path())).await?
 }
 
 fn logout_at(path: &Path) -> Result<bool> {
@@ -655,12 +753,14 @@ fn identity_anchor(headers: &IndexMap<String, String>) -> Option<ClaudeAuthIdent
 /// a send and reads whatever this or another Distill process last stored.
 #[derive(Debug, Default)]
 pub struct ClaudeBearerResolver {
+    path: PathBuf,
     expected_identity: Option<ClaudeAuthIdentity>,
 }
 
 impl ClaudeBearerResolver {
     pub(crate) fn from_credentials(credentials: Option<&ClaudeCredentials>) -> Self {
         Self {
+            path: auth_file_path(),
             expected_identity: credentials.map(ClaudeCredentials::identity),
         }
     }
@@ -669,6 +769,7 @@ impl ClaudeBearerResolver {
     /// headers but cannot keep the resolver itself.
     pub(crate) fn from_headers(headers: &IndexMap<String, String>) -> Self {
         Self {
+            path: auth_file_path(),
             expected_identity: identity_anchor(headers),
         }
     }
@@ -692,7 +793,7 @@ impl distill_sampler::BearerResolver for ClaudeBearerResolver {
     }
 
     fn current_auth(&self) -> Option<distill_sampler::config::ResolvedBearerAuth> {
-        self.resolve_credentials(load_credentials().ok().flatten()?)
+        self.resolve_credentials(load_credentials_at(&self.path).ok().flatten()?)
     }
 
     fn reserved_headers(&self) -> &'static [&'static str] {
@@ -707,18 +808,28 @@ impl distill_sampler::BearerResolver for ClaudeBearerResolver {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         Box::pin(async {
-            if let Err(error) = fresh_credentials().await {
+            if let Err(error) = fresh_credentials_at(&self.path).await {
                 tracing::warn!(%error, "Could not refresh Claude credentials before inference");
             }
         })
     }
 }
 
+/// Restore a selected account resolver from the session's original identity anchor.
+pub fn claude_bearer_resolver_at(
+    path: &Path,
+    headers: &IndexMap<String, String>,
+) -> distill_sampler::config::SharedBearerResolver {
+    Arc::new(ClaudeBearerResolver {
+        path: path.to_owned(),
+        expected_identity: identity_anchor(headers),
+    })
+}
+
 /// Whether a base URL points at the Anthropic API.
 pub fn is_claude_backend(base_url: &str) -> bool {
-    url::Url::parse(base_url.trim()).is_ok_and(|url| {
-        url.scheme() == "https" && url.host_str() == Some(CLAUDE_INFERENCE_HOST)
-    })
+    url::Url::parse(base_url.trim())
+        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some(CLAUDE_INFERENCE_HOST))
 }
 
 /// `existing` with the flags the subscription bearer needs added, keeping any
@@ -776,6 +887,32 @@ fn apply_claude_credentials(
     let merged = merge_beta_header(cfg.extra_headers.get(&beta_key).map(String::as_str));
     cfg.extra_headers.insert(beta_key, merged);
     set_identity_anchor(&mut cfg.extra_headers, Some(&credentials));
+}
+
+pub async fn apply_claude_backend_at(
+    path: &Path,
+    cfg: &mut distill_sampler::SamplerConfig,
+) -> Result<()> {
+    anyhow::ensure!(
+        is_claude_backend(&cfg.base_url),
+        "Untrusted Claude endpoint"
+    );
+    let credentials = fresh_credentials_at(path)
+        .await?
+        .ok_or_else(|| anyhow!("Claude account is disconnected"))?;
+    if let Some(expected) = identity_anchor(&cfg.extra_headers) {
+        anyhow::ensure!(
+            expected == credentials.identity(),
+            "Claude account identity changed"
+        );
+    }
+    cfg.api_key = None;
+    apply_claude_credentials(cfg, Some(credentials.clone()));
+    cfg.bearer_resolver = Some(Arc::new(ClaudeBearerResolver {
+        path: path.to_owned(),
+        expected_identity: Some(credentials.identity()),
+    }));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -838,6 +975,50 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}/token"), server)
+    }
+
+    #[tokio::test]
+    async fn scoped_usage_preserves_percent_units_resets_and_drops_raw_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/oauth/usage", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/api/oauth/usage",
+            get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(headers.get("authorization").unwrap(), "Bearer access");
+                assert_eq!(headers.get("anthropic-beta").unwrap(), CLAUDE_OAUTH_BETA);
+                axum::Json(serde_json::json!({
+                    "five_hour": {"utilization": 0.31, "resets_at": "2099-08-21T22:00:00Z"},
+                    "seven_day": {"utilization": 57, "resets_at": "2099-08-26T11:00:00Z"},
+                    "seven_day_sonnet": {"utilization": 80, "resets_at": "2099-08-26T11:00:00Z"},
+                    "access_token": "raw-secret"
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let usage =
+            fetch_usage_with_credentials(&credentials_from_store(&store(3600)).unwrap(), &endpoint)
+                .await
+                .unwrap();
+        assert_eq!(usage.five_hour.as_ref().unwrap().utilization, Some(0.31));
+        assert_eq!(usage.remaining_percent(), Some(43.0));
+        assert!(usage.seven_day.as_ref().unwrap().resets_at.is_some());
+        assert_eq!(
+            usage.seven_day_sonnet.as_ref().unwrap().utilization,
+            Some(80.0)
+        );
+        assert!(
+            !serde_json::to_string(&usage)
+                .unwrap()
+                .contains("raw-secret")
+        );
+        let unknown: ClaudeUsageSnapshot = serde_json::from_value(
+            serde_json::json!({"five_hour": {"utilization": null, "resets_at": null}}),
+        )
+        .unwrap();
+        assert!(unknown.remaining_percent().is_none());
+        server.abort();
     }
 
     #[test]

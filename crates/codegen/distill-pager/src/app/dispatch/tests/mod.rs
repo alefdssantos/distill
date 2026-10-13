@@ -1,5 +1,6 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
 //! Tests for the dispatch module tree: shared fixtures and per-domain test modules.
+mod accounts;
 mod auth;
 mod billing;
 mod cta_e2e;

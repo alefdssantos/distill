@@ -1,3 +1,4 @@
+pub mod accounts_modal;
 pub mod agent;
 pub mod agent_status;
 pub mod agents_modal;

@@ -161,7 +161,8 @@ pub fn render_settings_modal(
         return true;
     }
 
-    let (inner_area, docs_footer_area) = match state.state.mode_kind() {
+    state.accounts_entry_rect = Rect::default();
+    let (mut inner_area, docs_footer_area) = match state.state.mode_kind() {
         SettingsModeKind::EditingString | SettingsModeKind::EditingInt => (content_area, None),
         // A consent chooser shows the disclosure and the choices only.
         _ if mode_is_consent_chooser(&state.state.mode) => (content_area, None),
@@ -196,6 +197,20 @@ pub fn render_settings_modal(
             state.picker_choice_rects.clear();
             state.editor_adornment_rects = (Rect::default(), Rect::default());
             state.settings_breadcrumb_rect = None;
+            if inner_area.height > 2 {
+                state.accounts_entry_rect =
+                    Rect::new(inner_area.x, inner_area.y, inner_area.width, 1);
+                use ratatui::widgets::Widget;
+                Line::from(Span::styled(
+                    "[a Accounts & Auto Routing ›]",
+                    Style::default()
+                        .fg(theme.fuzzy_accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .render(state.accounts_entry_rect, buf);
+                inner_area.y += 1;
+                inner_area.height -= 1;
+            }
             state.list_area = inner_area;
             render_row_list_with_search_bar(buf, inner_area, state, &theme);
         }

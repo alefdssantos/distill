@@ -341,6 +341,12 @@ fn blocking_acquire(lock_path: &Path) -> io::Result<File> {
     }
 }
 
+/// Wait for the same credential lock used by refresh before a scoped file replacement/removal.
+pub fn acquire_auth_file_lock(auth_json_path: &Path) -> io::Result<AuthFileLock> {
+    let file = blocking_acquire(&auth_json_path.with_file_name(LOCK_FILE_NAME))?;
+    Ok(lock_guard(file, Heartbeat::Skip))
+}
+
 /// Takes the flock iff it is free right now; never waits.
 pub fn try_lock_auth_file_nonblocking(auth_json_path: &Path) -> Option<AuthFileLock> {
     let lock_path = auth_json_path.with_file_name(LOCK_FILE_NAME);

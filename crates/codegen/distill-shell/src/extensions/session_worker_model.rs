@@ -82,6 +82,22 @@ pub(crate) fn worker_from_meta(
     }))
 }
 
+/// An explicit worker (including disable) survives Auto delegation until Auto is selected again.
+pub(crate) fn pin_from_meta(
+    headers: &mut indexmap::IndexMap<String, String>,
+    meta: Option<&acp::Meta>,
+    requested_auto: bool,
+) {
+    if requested_auto {
+        headers.shift_remove("x-distill-worker-pin");
+    } else if meta
+        .and_then(|meta| meta.get(MODEL_META_KEY))
+        .is_some_and(|id| id.is_string())
+    {
+        headers.insert("x-distill-worker-pin".into(), "1".into());
+    }
+}
+
 /// Snapshot the configured worker when a session starts.
 pub(crate) fn config_worker_snapshot() -> SessionWorker {
     let model_id = crate::jev::worker_model();
@@ -177,6 +193,16 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         request.effort.as_deref(),
     )?;
     *handle.worker_override.write() = next;
+    if let Some(mut config) = handle.chat_state_handle.get_sampling_config().await {
+        if request.model_id.is_some() {
+            config
+                .extra_headers
+                .insert("x-distill-worker-pin".into(), "1".into());
+        } else {
+            config.extra_headers.shift_remove("x-distill-worker-pin");
+        }
+        handle.chat_state_handle.update_sampling_config(config);
+    }
     let _ = handle
         .cmd_tx
         .send(crate::session::SessionCommand::RefreshWorkerPrompt);

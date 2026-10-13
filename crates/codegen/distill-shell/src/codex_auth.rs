@@ -439,7 +439,8 @@ pub fn is_logged_in() -> bool {
 /// resolver or by a provider-local OpenAI API key. Grok's auth cell never
 /// satisfies this predicate.
 pub fn sampling_config_has_credentials(config: &crate::sampling::SamplerConfig) -> bool {
-    let has_oauth = config.bearer_resolver.is_some() && is_logged_in();
+    let has_oauth = is_trusted_inference_base_url(&config.base_url)
+        && config.bearer_resolver.as_ref().is_some_and(|resolver| resolver.current_auth().is_some());
     let has_byok = config.bearer_resolver.is_none() && config.api_key.is_some();
     has_oauth || has_byok
 }
@@ -470,7 +471,7 @@ fn load_store_at(path: &Path) -> io::Result<Option<CodexAuthStore>> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn load_credentials_at(path: &Path) -> io::Result<Option<CodexCredentials>> {
+pub fn load_credentials_at(path: &Path) -> io::Result<Option<CodexCredentials>> {
     let Some(store) = load_store_at(path)? else {
         return Ok(None);
     };
@@ -606,7 +607,7 @@ fn save_store_at(path: &Path, store: &CodexAuthStore) -> io::Result<()> {
     Ok(())
 }
 
-fn acquire_auth_lock(path: &Path) -> io::Result<File> {
+pub(crate) fn acquire_auth_lock(path: &Path) -> io::Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -793,12 +794,15 @@ fn persist_token_response(path: &Path, response: TokenResponse) -> Result<CodexC
 }
 
 pub async fn run_cli_login(device_code: bool) -> Result<CodexAccountSummary> {
+    run_cli_login_at(&auth_file_path(), device_code).await
+}
+
+pub async fn run_cli_login_at(path: &Path, device_code: bool) -> Result<CodexAccountSummary> {
     let endpoints = CodexEndpoints::default();
-    let path = auth_file_path();
     let credentials = if device_code {
         run_device_login_at(&path, &endpoints).await?
     } else {
-        run_browser_login_at(&path, &endpoints, true, None).await?
+        run_browser_login_at(&path, &endpoints, true, None, None).await?
     };
     Ok(CodexAccountSummary::from(&credentials))
 }
@@ -815,8 +819,14 @@ pub async fn run_tui_login(
     browser_fallback: tokio::sync::oneshot::Sender<CodexBrowserFallback>,
 ) -> Result<CodexAccountSummary> {
     let endpoints = CodexEndpoints::default();
-    let credentials =
-        run_browser_login_at(&auth_file_path(), &endpoints, false, Some(browser_fallback)).await?;
+    let credentials = run_browser_login_at(
+        &auth_file_path(),
+        &endpoints,
+        false,
+        Some(browser_fallback),
+        None,
+    )
+    .await?;
     Ok(CodexAccountSummary::from(&credentials))
 }
 
@@ -834,11 +844,28 @@ fn report_browser_launch_failure(
     }
 }
 
+/// Silent account-local browser login; dropping the future closes its callback listener.
+pub async fn run_tui_login_at(
+    path: &Path,
+    url_feedback: tokio::sync::oneshot::Sender<String>,
+) -> Result<()> {
+    run_browser_login_at(
+        path,
+        &CodexEndpoints::default(),
+        false,
+        None,
+        Some(url_feedback),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn run_browser_login_at(
     path: &Path,
     endpoints: &CodexEndpoints,
     announce: bool,
     browser_fallback: Option<tokio::sync::oneshot::Sender<CodexBrowserFallback>>,
+    url_feedback: Option<tokio::sync::oneshot::Sender<String>>,
 ) -> Result<CodexCredentials> {
     let listener = bind_callback_listener()
         .await
@@ -861,6 +888,9 @@ async fn run_browser_login_at(
         eprintln!("Signing in to OpenAI Codex with ChatGPT...");
         eprintln!("Open this URL if your browser does not open automatically:");
         eprintln!("  {auth_url}");
+    }
+    if let Some(tx) = url_feedback {
+        let _ = tx.send(auth_url.clone());
     }
     let open_url = auth_url.clone();
     let browser_result = tokio::task::spawn_blocking(move || webbrowser::open(&open_url))
@@ -968,6 +998,28 @@ fn access_token_is_fresh(store: &CodexAuthStore) -> bool {
 
 pub async fn fresh_credentials() -> Result<Option<CodexCredentials>> {
     refresh_at(&auth_file_path(), &CodexEndpoints::default(), false).await
+}
+
+pub async fn fresh_credentials_at(path: &Path) -> Result<Option<CodexCredentials>> {
+    refresh_at(path, &CodexEndpoints::default(), false).await
+}
+
+#[cfg(test)]
+pub(crate) async fn refresh_for_account_test(path: &Path, issuer: String) -> Result<()> {
+    refresh_at(
+        path,
+        &CodexEndpoints {
+            issuer,
+            ..Default::default()
+        },
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn run_cli_logout_at(path: &Path) -> Result<bool> {
+    logout_at(path, &CodexEndpoints::default()).await
 }
 
 pub(crate) async fn force_refresh() -> Result<Option<CodexCredentials>> {
@@ -1095,6 +1147,8 @@ pub async fn run_cli_logout() -> Result<bool> {
 }
 
 async fn logout_at(path: &Path, endpoints: &CodexEndpoints) -> Result<bool> {
+    let path_owned = path.to_path_buf();
+    let _lock = tokio::task::spawn_blocking(move || acquire_auth_lock(&path_owned)).await??;
     let store = match load_store_at(path) {
         Ok(store) => store,
         Err(error) => {
@@ -1140,7 +1194,6 @@ async fn logout_at(path: &Path, endpoints: &CodexEndpoints) -> Result<bool> {
             _ => {}
         }
     }
-    let _lock = acquire_auth_lock(path)?;
     let removed = match std::fs::remove_file(path) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
@@ -1151,14 +1204,18 @@ async fn logout_at(path: &Path, endpoints: &CodexEndpoints) -> Result<bool> {
 }
 
 pub async fn fetch_usage() -> Result<CodexUsageSnapshot> {
+    fetch_usage_at(&auth_file_path()).await
+}
+
+pub async fn fetch_usage_at(path: &Path) -> Result<CodexUsageSnapshot> {
     let endpoints = CodexEndpoints::default();
-    let Some(mut credentials) = fresh_credentials().await? else {
+    let Some(mut credentials) = fresh_credentials_at(path).await? else {
         bail!("Not connected; run `distill login --chatgpt`");
     };
     match fetch_usage_with_credentials(&endpoints, &credentials).await {
         Ok(snapshot) => Ok(snapshot),
         Err(UsageRequestError::Unauthorized) => {
-            credentials = force_refresh()
+            credentials = refresh_at(path, &endpoints, true)
                 .await?
                 .ok_or_else(|| anyhow!("Not connected; run `distill login --chatgpt`"))?;
             fetch_usage_with_credentials(&endpoints, &credentials)
@@ -1355,18 +1412,21 @@ pub(crate) fn credentials_match_identity_anchor(
 /// by this or another Distill process.
 #[derive(Debug, Default)]
 pub struct CodexBearerResolver {
+    path: PathBuf,
     expected_identity: Option<CodexAuthIdentity>,
 }
 
 impl CodexBearerResolver {
     pub(crate) fn from_credentials(credentials: Option<&CodexCredentials>) -> Self {
         Self {
+            path: auth_file_path(),
             expected_identity: credentials.map(CodexCredentials::identity),
         }
     }
 
     pub(crate) fn from_headers(headers: &IndexMap<String, String>) -> Self {
         Self {
+            path: auth_file_path(),
             expected_identity: identity_anchor(headers),
         }
     }
@@ -1399,7 +1459,7 @@ impl distill_sampler::BearerResolver for CodexBearerResolver {
     }
 
     fn current_auth(&self) -> Option<distill_sampler::config::ResolvedBearerAuth> {
-        self.resolve_credentials(load_credentials().ok().flatten()?)
+        self.resolve_credentials(load_credentials_at(&self.path).ok().flatten()?)
     }
 
     fn reserved_headers(&self) -> &'static [&'static str] {
@@ -1409,6 +1469,25 @@ impl distill_sampler::BearerResolver for CodexBearerResolver {
     fn fail_closed_on_missing(&self) -> bool {
         true
     }
+
+    fn prepare_for_send(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {
+            let _ = fresh_credentials_at(&self.path).await;
+        })
+    }
+}
+
+/// Restore a selected account resolver from the session's original identity anchor.
+pub fn codex_bearer_resolver_at(
+    path: &Path,
+    headers: &IndexMap<String, String>,
+) -> distill_sampler::config::SharedBearerResolver {
+    Arc::new(CodexBearerResolver {
+        path: path.to_owned(),
+        expected_identity: identity_anchor(headers),
+    })
 }
 
 /// Adapter for tool clients that need the same identity-anchored Codex bearer
@@ -1532,6 +1611,38 @@ pub fn apply_codex_backend(cfg: &mut distill_sampler::SamplerConfig) {
         cfg.extra_headers.entry(name).or_insert(value);
     }
     set_oauth_identity_anchor(&mut cfg.extra_headers, credentials.as_ref());
+}
+
+/// Attach only the selected account, rejecting a credential sent to another authority.
+pub async fn apply_codex_backend_at(
+    path: &Path,
+    cfg: &mut distill_sampler::SamplerConfig,
+) -> Result<()> {
+    anyhow::ensure!(
+        is_trusted_inference_base_url(&cfg.base_url),
+        "Untrusted ChatGPT endpoint"
+    );
+    let credentials = fresh_credentials_at(path)
+        .await?
+        .ok_or_else(|| anyhow!("ChatGPT account is disconnected"))?;
+    if let Some(expected) = identity_anchor(&cfg.extra_headers) {
+        anyhow::ensure!(
+            expected == credentials.identity(),
+            "ChatGPT account identity changed"
+        );
+    }
+    cfg.base_url = inference_base_url();
+    cfg.api_backend = distill_sampler::ApiBackend::Responses;
+    cfg.api_key = None;
+    cfg.bearer_resolver = Some(Arc::new(CodexBearerResolver {
+        path: path.to_owned(),
+        expected_identity: Some(credentials.identity()),
+    }));
+    for (name, value) in codex_headers() {
+        cfg.extra_headers.entry(name).or_insert(value);
+    }
+    set_oauth_identity_anchor(&mut cfg.extra_headers, Some(&credentials));
+    Ok(())
 }
 
 #[cfg(test)]

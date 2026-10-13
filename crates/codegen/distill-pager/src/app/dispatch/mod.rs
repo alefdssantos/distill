@@ -9,6 +9,7 @@
 //!
 //! Imports in this tree use at most one `super::` hop (absolute `crate::` paths otherwise); tests/ shares a fixture prelude via `use super::*;`.
 
+mod accounts;
 mod auth;
 mod billing;
 mod cta;

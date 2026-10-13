@@ -296,6 +296,9 @@ pub enum ActiveModal {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
     /// Settings modal (F2, /settings, palette). Boxed because the state is large.
+    Accounts {
+        state: Box<crate::views::accounts_modal::AccountsModalState>,
+    },
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
     },
@@ -668,6 +671,7 @@ impl ActiveModal {
             | ActiveModal::DocViewer { .. }
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
+            | ActiveModal::Accounts { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::UsageInfo { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
@@ -704,6 +708,7 @@ impl ActiveModal {
             ActiveModal::DocViewer { title, .. } => title.as_str(),
             ActiveModal::ShortcutsHelp { .. } => "Keyboard Shortcuts",
             ActiveModal::MemoryBrowser { .. } => "Memory",
+            ActiveModal::Accounts { .. } => "Accounts & Auto Routing",
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",

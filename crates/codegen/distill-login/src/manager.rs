@@ -15,6 +15,7 @@ pub(super) mod lock;
 #[path = "manager/remedy.rs"]
 mod remedy;
 pub use remedy::{AuthRemedy, BoundedRefresh, SilentRefresh};
+pub use lock::acquire_auth_file_lock;
 #[path = "manager/refresh_chain.rs"]
 mod refresh_chain;
 #[path = "manager/sleep_gate.rs"]
@@ -141,6 +142,7 @@ pub struct AuthManager {
     refresher: RwLock<Option<Arc<dyn TokenRefresher>>>,
     /// Idempotency guard for `configure_refresher` so double-calls don't reset internal state (e.g. `OidcRefresher::upload_in_flight`).
     refresher_configured: std::sync::atomic::AtomicBool,
+    background_enrichment_enabled: std::sync::atomic::AtomicBool,
     /// Idempotency guard for `start_proactive_refresh` so we don't spawn competing refresh loops on the same Arc.
     proactive_started: std::sync::atomic::AtomicBool,
     /// Serializes concurrent refresh attempts (async, held across .await).
@@ -347,6 +349,30 @@ impl AuthManager {
         manager.enforce_pin_on_loaded_token();
         manager
     }
+    /// Account-local manager. Ignores process token/path overrides and never prunes another store.
+    pub fn new_at(
+        path: &Path,
+        grok_com_config: GrokComConfig,
+        proxy_base_url: String,
+    ) -> std::io::Result<Self> {
+        distill_shell_base::util::secure_file::ensure_owner_only_permissions(path)?;
+        let scope = ActiveAuthBackend::default().scope_key(&grok_com_config);
+        let auth = match read_auth_json(path) {
+            Ok(map) => lookup_auth(&map, &scope),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let manager = Self::assemble(
+            auth,
+            path.to_owned(),
+            scope,
+            grok_com_config,
+            proxy_base_url,
+            None,
+        );
+        manager.enforce_pin_on_loaded_token();
+        Ok(manager)
+    }
     /// Drops inherited `WebLogin` entries that `lookup_auth` skipped, so they are not re-evaluated on
     /// every launch. Best-effort under the advisory lock: a concurrent holder means retry next launch.
     fn prune_stale_inherited_scopes(path: &Path, map: &AuthStore, lookup_missed: bool) {
@@ -393,6 +419,7 @@ impl AuthManager {
             proxy_base_url,
             refresher: RwLock::new(None),
             refresher_configured: std::sync::atomic::AtomicBool::new(false),
+            background_enrichment_enabled: std::sync::atomic::AtomicBool::new(true),
             proactive_started: std::sync::atomic::AtomicBool::new(false),
             refresh_lock: tokio::sync::Mutex::new(()),
             permanent_failure: RwLock::new(None),
@@ -841,11 +868,20 @@ impl AuthManager {
         write_result?;
         Ok(auth)
     }
+    /// Staged login stores must have no writers after the flow returns. Inline enrichment still runs.
+    pub(crate) fn suppress_background_enrichment(&self) {
+        self.background_enrichment_enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     /// Spawn the `/user` enrichment task; body in the `enrichment` submodule.
     /// `/user` lives on the Grok proxy, so a build pointed elsewhere would send its bearer to the wrong host.
     /// That would happen on every login and every refresh.
     fn spawn_user_info_enrichment(self: &Arc<Self>, auth: GrokAuth) {
-        if !ActiveAuthBackend::default().is_xai_authority() {
+        if !self
+            .background_enrichment_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || !ActiveAuthBackend::default().is_xai_authority()
+        {
             return;
         }
         enrichment::spawn(Arc::clone(self), auth);

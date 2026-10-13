@@ -844,6 +844,54 @@ pub async fn run_cli_login(
         .await;
     result
 }
+/// Reuse the CLI transport negotiation with an explicitly scoped manager.
+pub async fn run_cli_login_at(
+    auth_manager: &Arc<AuthManager>,
+    config_device_flow: Option<bool>,
+    device_auth: bool,
+) -> anyhow::Result<GrokAuth> {
+    auth_manager.suppress_background_enrichment();
+    run_cli_login_steps(
+        auth_manager.grok_com_config(),
+        config_device_flow,
+        auth_manager,
+        false,
+        device_auth,
+    )
+    .await
+}
+/// Silent scoped browser login. Uses the existing OIDC callback transport and no detached enrichment.
+pub async fn run_tui_login_at(
+    manager: &Arc<AuthManager>,
+    feedback: oneshot::Sender<String>,
+) -> anyhow::Result<()> {
+    manager.suppress_background_enrichment();
+    let config = manager.grok_com_config();
+    let oidc = config
+        .oidc
+        .clone()
+        .or_else(|| config.oauth2.as_ref().map(|c| c.as_oidc()))
+        .ok_or_else(|| anyhow::anyhow!("Grok browser login is not configured"))?;
+    let (url_tx, url_rx) = oneshot::channel();
+    let (_code_tx, code_rx) = mpsc::channel(1);
+    let login = crate::oidc::run_login_flow_with_config(
+        &oidc,
+        manager,
+        Some(AuthChannels {
+            url_tx: Some(url_tx),
+            code_rx,
+        }),
+    );
+    tokio::pin!(login);
+    tokio::select! {
+        result = &mut login => { result?; }
+        url = url_rx => {
+            if let Ok(info) = url { let _ = feedback.send(info.url); }
+            login.await?;
+        }
+    }
+    Ok(())
+}
 async fn run_cli_login_steps(
     grok_com_config: &GrokComConfig,
     config_device_flow: Option<bool>,
@@ -1007,8 +1055,8 @@ mod tests {
     use crate::AuthMode;
     use crate::config::XAI_OAUTH2_ISSUER;
     use chrono::Utc;
-    use std::path::Path;
     use distill_shell_base::env::EnvVarGuard;
+    use std::path::Path;
     /// `os_error` and the reqwest classification are covered in `distill-http`.
     /// What's local is which `LoginFailureKind` each maps to, and that a decode failure never reads as a transport one.
     #[test]

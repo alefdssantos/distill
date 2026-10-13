@@ -3374,6 +3374,9 @@ impl MvpAgent {
             .values()
             .cloned()
             .collect();
+        if crate::accounts::AccountStore::default().load_routing().is_ok_and(|routing| routing.enabled) {
+            available_models.insert(0, acp::ModelInfo::new(acp::ModelId::new("auto"), "Auto"));
+        }
         let override_effort = session_id
             .and_then(|sid| self.resident_handle(sid).map(|h| h.reasoning_effort))
             .flatten()
@@ -4574,13 +4577,59 @@ impl MvpAgent {
         );
         let compaction_mode = pins.mode;
         let two_pass_enabled = pins.two_pass;
-        let (session_model_id, mut sampling_config) = self
+        let (mut session_model_id, mut sampling_config) = self
             .apply_agent_model_override(
                 pinned_model.as_ref(),
                 session_model_id,
                 sampling_config,
                 origin_client.clone(),
             );
+        let requested = super::reasoning_effort::SessionMainMeta::from_meta(session_meta)
+            .with_cli_model(self.cfg.borrow().default_model_override.as_deref())
+            .model_id;
+        if let Some(requested_model) = requested.as_deref().filter(|model| *model != "auto") {
+            let model_id = acp::ModelId::new(requested_model);
+            if let Ok(model) = self.resolve_model_id(&model_id)
+                && model.info.user_selectable
+            {
+                sampling_config =
+                    self.prepare_sampling_config_for_model(&model, origin_client.clone());
+                session_model_id = model_id;
+            }
+        }
+        sampling_config = if requested.as_deref() == Some("auto") {
+            crate::agent::account_routing::explicit_auto_config(&sampling_config, &self.models_manager.models()).await
+        } else if pinned_model.is_none() && requested.is_none() {
+            match crate::agent::account_routing::load_session_config(&session_info, &self.models_manager.models()).await {
+                Ok(Some(restored)) => Ok(restored), Ok(None) => crate::agent::account_routing::select_startup_config(&sampling_config, &self.models_manager.models(), false).await,
+                Err(error) => Err(error),
+            }
+        } else {
+            crate::agent::account_routing::select_startup_config(&sampling_config, &self.models_manager.models(), true).await
+        }.map_err(|_| acp::Error::auth_required().data("No available account route for this session"))?;
+        crate::extensions::session_worker_model::pin_from_meta(
+            &mut sampling_config.extra_headers,
+            session_meta,
+            requested.as_deref() == Some("auto"),
+        );
+        let portable_history = !chat_history.is_empty()
+            && crate::agent::account_routing::account_history_admission_needs_portability(
+                &session_info,
+                &sampling_config,
+            )
+            && crate::agent::account_routing::make_account_history_portable(&mut chat_history);
+        crate::agent::account_routing::save_session_config(&session_info, &sampling_config)
+            .map_err(|_| acp::Error::internal_error().data("Could not persist selected account route"))?;
+        if portable_history {
+            use crate::session::storage::StorageAdapter as _;
+            crate::session::storage::JsonlStorageAdapter::with_root(crate::util::distill_home::distill_home())
+                .replace_chat_history(&session_info, &chat_history)
+                .await
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+        }
+        let session_model_id = crate::agent::account_routing::AccountRoute::read(&sampling_config.extra_headers)
+            .ok().flatten().map(|route| acp::ModelId::new(route.main_model))
+            .unwrap_or(session_model_id);
         let (auto_compact_threshold_percent, system_prompt_label) = {
             let cfg = self.cfg.borrow();
             let models = self.models_manager.models();

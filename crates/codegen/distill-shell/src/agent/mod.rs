@@ -1,3 +1,4 @@
+pub(crate) mod account_routing;
 pub mod activity;
 pub mod app;
 pub mod auth_method;

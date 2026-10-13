@@ -427,11 +427,9 @@ impl MvpAgent {
             .and_then(|v| v.as_str());
         let client_session_kind = parse_client_session_kind(arguments.meta.as_ref())?;
         let is_headless = client_session_kind.as_deref() == Some("headless");
-        let custom_model_id = arguments
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
-            .filter(|s| !s.is_empty());
+        let main_meta = SessionMainMeta::from_meta(arguments.meta.as_ref())
+            .with_cli_model(self.cfg.borrow().default_model_override.as_deref());
+        let custom_model_id = main_meta.model_id.as_deref();
         #[cfg(all(feature = "local-workspace", unix))]
         self.report_setup_phase(SessionSetupPhase::LocalWorkspace);
         #[cfg(all(feature = "local-workspace", unix))]
@@ -515,11 +513,28 @@ impl MvpAgent {
             });
         let session_info = session_info_for(&session_id, &cwd);
         spawn_session_sweep(&session_info);
+        // Named accounts can supply the initial catalog even with no legacy login.
+        if let Ok(routing) = crate::accounts::AccountStore::default().load_routing()
+            && routing.enabled
+            && routing.options.iter().any(|option| {
+                let models = self.models_manager.models();
+                config::find_model_by_id(&models, &option.main_model).is_none()
+                    || config::find_model_by_id(&models, option.worker_model()).is_none()
+            })
+        {
+            self.models_manager.refresh_chatgpt_models().await;
+        }
         let mut model_agent_type: Option<String> = None;
         let mut session_sampling_override: Option<SamplingConfig> = None;
         let mut disallowed_custom: Option<String> = None;
-        let session_initial_model = chat_initial_model(is_chat_kind, custom_model_id);
-        let build_custom_model_id = if is_chat_kind { None } else { custom_model_id };
+        let requested_auto = custom_model_id == Some("auto");
+        let session_initial_model =
+            chat_initial_model(is_chat_kind, custom_model_id.filter(|_| !requested_auto));
+        let build_custom_model_id = if is_chat_kind || requested_auto {
+            None
+        } else {
+            custom_model_id
+        };
         let campaign_nudge = if is_chat_kind {
             None
         } else {
@@ -594,9 +609,7 @@ impl MvpAgent {
                 origin_client.clone(),
             )
         });
-        let main_meta = SessionMainMeta::from_meta(arguments.meta.as_ref());
-        let session_effort_auto =
-            main_meta.effort_auto(self.models_manager.current_effort_auto());
+        let session_effort_auto = main_meta.effort_auto(self.models_manager.current_effort_auto());
         let effort_route = split_new_session_effort(
             resolved_custom_model,
             resolve_new_session_effort_hint(
@@ -617,6 +630,33 @@ impl MvpAgent {
         session_sampling.conversation_group_id = Some(
             crate::sampling::derive_conversation_group_id(session_id.0.as_ref()),
         );
+        crate::extensions::session_worker_model::pin_from_meta(
+            &mut session_sampling.extra_headers,
+            arguments.meta.as_ref(),
+            requested_auto,
+        );
+        session_sampling = if requested_auto {
+            crate::agent::account_routing::explicit_auto_config(
+                &session_sampling,
+                &self.models_manager.models(),
+            )
+            .await
+        } else {
+            crate::agent::account_routing::select_startup_config(
+                &session_sampling,
+                &self.models_manager.models(),
+                resolved_custom_model.is_some(),
+            )
+            .await
+        }
+        .map_err(|_| {
+            acp::Error::auth_required().data("No available account route for this session")
+        })?;
+        let account_main =
+            crate::agent::account_routing::AccountRoute::read(&session_sampling.extra_headers)
+                .ok()
+                .flatten()
+                .map(|route| route.main_model);
         spawn_sampler_transport_prewarm(&session_sampling.base_url);
         let (summary_client, summary_model) = self.build_summary_client(&session_sampling)?;
         let title_utility_lane = self.build_title_utility_lane(&session_sampling, &summary_model);
@@ -625,7 +665,12 @@ impl MvpAgent {
             Some(chat_model) => acp::ModelId::new(chat_model.clone()),
             None => resolved_custom_model
                 .map(acp::ModelId::new)
-                .unwrap_or_else(|| self.models_manager.current_model_id()),
+                .unwrap_or_else(|| {
+                    account_main
+                        .as_deref()
+                        .map(acp::ModelId::new)
+                        .unwrap_or_else(|| self.models_manager.current_model_id())
+                }),
         };
         let session_model_id = model_id.clone();
         self.report_setup_phase(SessionSetupPhase::PersistenceInit);
@@ -1002,8 +1047,7 @@ impl MvpAgent {
         let mut load_timer = crate::instrumentation_timer!("session.load_session");
         load_timer.with_field("session_id", session_id.0.as_ref());
         load_timer.with_field("cwd", cwd.as_str());
-        let git_root =
-            distill_workspace::session::git::find_git_root_from_path(cwd.as_path()).ok();
+        let git_root = distill_workspace::session::git::find_git_root_from_path(cwd.as_path()).ok();
         if let Some(root) = git_root {
             tokio::task::spawn_blocking(move || {
                 crate::session::worktree_pool::cleanup_stale_pool_worktrees(Some(&root));
@@ -1034,8 +1078,16 @@ impl MvpAgent {
         }
         let initial_reasoning_effort = parse_reasoning_effort_meta(request_meta.as_ref());
         let origin_client = self.origin_client_info_from_meta(request_meta.as_ref());
+        let main_meta = SessionMainMeta::from_meta(request_meta.as_ref())
+            .with_cli_model(self.cfg.borrow().default_model_override.as_deref());
+        let initial_model_id = main_meta
+            .model_id
+            .as_deref()
+            .filter(|model| *model != "auto")
+            .map(acp::ModelId::new)
+            .unwrap_or_else(|| self.models_manager.current_model_id());
         let mut load_session_sampling = self.resolve_sampling_config_for_model(
-            &self.models_manager.current_model_id(),
+            &initial_model_id,
             origin_client.clone(),
         );
         self.models_manager.apply_supported_effort(
@@ -1047,6 +1099,17 @@ impl MvpAgent {
         load_session_sampling.conversation_group_id = Some(
             crate::sampling::derive_conversation_group_id(session_id.0.as_ref()),
         );
+        let requested = main_meta.model_id.as_deref();
+        load_session_sampling = if requested == Some("auto") {
+            crate::agent::account_routing::explicit_auto_config(&load_session_sampling, &self.models_manager.models()).await
+        } else if requested.is_none() {
+            match crate::agent::account_routing::load_session_config(&session_info, &self.models_manager.models()).await {
+                Ok(Some(restored)) => Ok(restored), Ok(None) => crate::agent::account_routing::select_startup_config(&load_session_sampling, &self.models_manager.models(), false).await,
+                Err(error) => Err(error),
+            }
+        } else {
+            crate::agent::account_routing::select_startup_config(&load_session_sampling, &self.models_manager.models(), true).await
+        }.map_err(|_| acp::Error::auth_required().data("Saved account route is unavailable"))?;
         let (summary_client, summary_model) = self.build_summary_client(&load_session_sampling)?;
         let title_utility_lane =
             self.build_title_utility_lane(&load_session_sampling, &summary_model);
@@ -1394,9 +1457,30 @@ impl MvpAgent {
             &session_id,
             &summary,
             initial_reasoning_effort,
-            &SessionMainMeta::from_meta(request_meta.as_ref()),
+            &main_meta,
         )
         .await;
+        if let Some(handle) = self.resident_handle(&session_id)
+            && let Some(mut sampling) = handle.chat_state_handle.get_sampling_config().await
+        {
+            crate::extensions::session_worker_model::pin_from_meta(
+                &mut sampling.extra_headers,
+                request_meta.as_ref(),
+                requested == Some("auto"),
+            );
+            crate::agent::account_routing::save_session_config(
+                &handle.info,
+                &distill_sampler::SamplerConfig {
+                    extra_headers: sampling.extra_headers.clone(),
+                    reasoning_effort: sampling.reasoning_effort,
+                    ..Default::default()
+                },
+            )
+            .map_err(|_| {
+                acp::Error::internal_error().data("Could not persist worker account pin")
+            })?;
+            handle.chat_state_handle.update_sampling_config(sampling);
+        }
         let (model_state, mut response_meta) = self
             .build_attach_response_meta(&session_id, &summary, persist_data, code_restore_info)
             .await;
@@ -1711,6 +1795,16 @@ impl MvpAgent {
         main_meta: &SessionMainMeta,
     ) {
         let session_id = session_id.clone();
+        // A worker-only attach keeps the account route already restored at admission.
+        if main_meta.model_id.is_none()
+            && main_meta.effort.is_none()
+            && main_meta.auto.is_none()
+            && let Some(handle) = self.resident_handle(&session_id)
+            && let Some(sampling) = handle.chat_state_handle.get_sampling_config().await
+            && sampling.extra_headers.contains_key(crate::agent::account_routing::ROUTE_HEADER)
+        {
+            return;
+        }
         let persisted_model = summary.current_model_id.clone();
         let models = self.models_manager.models();
         let available = self.models_manager.available();
@@ -1741,6 +1835,10 @@ impl MvpAgent {
             selectable_catalog_key_for_persisted(&models, &available, &persisted_model);
         // A model the client asked for on this load wins over the persisted one.
         let requested_model = main_meta.model_id.as_deref().and_then(|requested| {
+            // Auto is a logical choice handled by model_switch, not a catalog entry.
+            if requested == "auto" {
+                return Some(acp::ModelId::new(requested));
+            }
             match self.resolve_model_id(&acp::ModelId::new(requested)) {
                 Ok(model) if model.info.user_selectable => Some(acp::ModelId::new(requested)),
                 _ => {

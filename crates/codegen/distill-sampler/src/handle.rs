@@ -21,6 +21,8 @@ pub struct CollectedSamplingResult {
     pub result: Result<(ConversationResponse, InferenceLatencyStats), SamplingError>,
     /// Whether a terminal event was successfully queued on the event rail.
     pub terminal_event_queued: bool,
+    /// Any accepted stream output or backend tool activity; forbids account fallback.
+    pub output_observed: bool,
     /// Deduplicated raw labels observed across every attempt in the request.
     pub doom_loop_signals: Vec<String>,
     /// Doom-loop recovery actions performed for this request.
@@ -179,6 +181,7 @@ impl SamplerHandle {
                     "sampler actor dropped before completion",
                 )),
                 terminal_event_queued: false,
+                output_observed: true,
                 doom_loop_signals: Vec::new(),
                 doom_loop_recovery_attempts: Vec::new(),
             })

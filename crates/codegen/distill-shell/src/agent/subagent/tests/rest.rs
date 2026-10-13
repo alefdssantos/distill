@@ -3912,3 +3912,171 @@ async fn ultracode_descendant_role_pin_beats_inherited_model_and_effort_defaults
     assert_eq!(unconfigured.reasoning_effort.as_deref(), Some("high"));
     assert!(request.runtime_overrides.model.is_none());
 }
+
+#[test]
+#[serial_test::serial]
+fn account_routing_subagent_uses_parent_selected_pair_and_explicit_pin_authority() {
+    crate::agent::account_routing::tests::isolated("agent::subagent::tests::rest::account_routing_subagent_uses_parent_selected_pair_and_explicit_pin_authority", || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        tokio::task::LocalSet::new().block_on(&runtime, async {
+    use crate::agent::account_routing::{self, AccountRoute, tests::NamedAccounts};
+    let fixture = NamedAccounts::new("http://127.0.0.1:1/v1");
+    let mut routes = account_routing::routes_for_turn(&fixture.store, &fixture.models, &fixture.base(), true).await.unwrap();
+    let mut route = routes.pop().unwrap();
+    route.failed_options = vec!["one".into(), "two".into()];
+    let selected = account_routing::config_for_route(&fixture.store, &fixture.models, &fixture.base(), &route).await.unwrap();
+    let mut ctx = ctx_with_parent_chat_state("gpt-6-luna", "gpt-6-luna", "gpt-6.1-sol", fixture.models.clone());
+    ctx.sampling_config = selected.clone();
+    let persisted = serde_json::from_value(serde_json::to_value(&selected).unwrap()).unwrap();
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(persisted);
+    let (worker, mid, unavailable) = resolve_effective_model_config(None, "general-purpose", &ModelOverride::Inherit, Some("gpt-6.1-sol"), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "gpt-6.1-sol");
+    assert!(unavailable.is_none());
+    let selected = AccountRoute::read(&worker.extra_headers).unwrap().unwrap();
+    assert_eq!(selected.account_id, "three");
+    assert!(selected.worker);
+    assert_eq!(selected.failed_options, ["one", "two"]);
+    assert_eq!(worker.bearer_resolver.as_ref().unwrap().current_bearer().as_deref(), Some("three-token"));
+    let (pinned, mid, _) = resolve_effective_model_config(Some("gpt-6-luna"), "general-purpose", &ModelOverride::Inherit, Some("gpt-6.1-sol"), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "gpt-6-luna");
+    assert!(pinned.extra_headers.contains_key(account_routing::PIN_HEADER), "explicit caller model keeps authority");
+
+    // A resumed worker takes the parent's new account without changing its model.
+    {
+        use crate::session::storage::StorageAdapter as _;
+        use base64::Engine as _;
+        use distill_sampling_types::{ContentPart, ToolCall, rs};
+        let mut png = Vec::new();
+        image::ImageBuffer::from_pixel(32, 32, image::Rgba([10u8, 20, 30, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let image_url = format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png));
+        let parent_before = ctx.parent_chat_state.as_ref().unwrap().get_sampling_config().await.unwrap();
+        let mut parent_route = route.clone();
+        parent_route.account_id = "two".into();
+        parent_route.option_id = Some("two".into());
+        parent_route.failed_options.clear();
+        let parent_b = account_routing::config_for_route(&fixture.store, &fixture.models, &ctx.sampling_config, &parent_route).await.unwrap();
+        ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(serde_json::from_value(serde_json::to_value(&parent_b).unwrap()).unwrap());
+        let (worker_b, mid, unavailable) = resolve_effective_model_config(None, "general-purpose", &ModelOverride::Inherit, Some("gpt-6.1-sol"), &ctx).await;
+        assert!(unavailable.is_none());
+        assert_eq!(worker_b.model, worker.model);
+        assert_eq!(AccountRoute::read(&worker_b.extra_headers).unwrap().unwrap().account_id, "two");
+        let cwd = tempfile::tempdir().unwrap();
+        let source_info = SessionInfo { id: acp::SessionId::new("history-worker-a"), cwd: cwd.path().to_string_lossy().into_owned() };
+        let child_info = SessionInfo { id: acp::SessionId::new("history-worker-b"), cwd: source_info.cwd.clone() };
+        let child_dir = session::persistence::session_dir(&child_info);
+        let storage = crate::session::storage::JsonlStorageAdapter::with_root(crate::util::distill_home::distill_home());
+        storage.init_session(&source_info, mid.clone()).await.unwrap();
+        account_routing::save_session_config(&source_info, &worker).unwrap();
+        let ordinary = vec![
+            ConversationItem::user("worker handoff user"),
+            ConversationItem::assistant_tool_calls(vec![ToolCall { id: "worker_handoff_call".into(), name: "read_file".into(), arguments: "{}".into() }]),
+            ConversationItem::tool_result_with_images("worker_handoff_call", "worker handoff result", vec![ContentPart::Image { url: image_url.into() }]),
+            ConversationItem::agent_message("worker handoff task"),
+            ConversationItem::assistant("worker turn complete"),
+        ];
+        let mut history = vec![
+            ConversationItem::system("source system"),
+            ConversationItem::Reasoning(rs::ReasoningItem { id: "worker-old-reason".into(), summary: vec![], content: None, encrypted_content: Some("worker-old-secret".into()), status: None }),
+            ConversationItem::BackendToolCall(distill_sampling_types::BackendToolCallItem {
+                kind: distill_sampling_types::BackendToolKind::WebSearch(rs::WebSearchToolCall {
+                    id: "worker-old-backend".into(), status: rs::WebSearchToolCallStatus::Completed,
+                    action: rs::WebSearchToolCallAction::Search(rs::WebSearchActionSearch { query: "worker search context".into(), sources: None }),
+                }),
+            }),
+        ];
+        history.extend(ordinary.clone());
+        let assert_portable = |items: &[ConversationItem]| {
+            assert!(!items.iter().any(|item| matches!(item, ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_))));
+            assert!(items.iter().any(|item| item.text_content().contains("worker search context")));
+            assert!(items.windows(ordinary.len()).any(|items| serde_json::to_value(items).unwrap() == serde_json::to_value(&ordinary).unwrap()), "worker handoff preserves human/tool/image/provenance records");
+        };
+        storage.replace_chat_history(&source_info, &history).await.unwrap();
+        let source_path = session::persistence::session_dir(&source_info).join("chat_history.jsonl");
+        let source_bytes = std::fs::read(&source_path).unwrap();
+        let source = ResumeSourceData {
+            subagent_id: "history-worker-a".into(), child_session_id: "history-worker-a".into(), child_cwd: source_info.cwd.clone(),
+            worktree_path: None, snapshot_ref: None, subagent_type: "general-purpose".into(), persona: None,
+            model_id: Some(worker.model.clone()), effort_auto: None, model_routing_locked: None, reasoning_effort: None,
+        };
+        let mut resumed_request = bootstrap_test_request(false);
+        resumed_request.resume_from = Some(source.subagent_id.clone());
+        let resumed = bootstrap_initial_context(&resumed_request, Some(&source), &ctx, &worker_b, &child_info, &child_dir, mid.0.as_ref(), super::super::resume_window::ResumeWindowPolicy { context_window: worker_b.context_window, auto_compact_threshold_percent: 85 }).await;
+        let BootstrapInitialContext::Ready(resumed) = resumed else { panic!("resumed worker should load portable history") };
+        assert_eq!(resumed.source, InitialContextSource::Resumed);
+        assert_portable(&resumed.conversation);
+        assert_portable(&storage.load_chat_history_from_dir(&child_dir).unwrap());
+        assert_eq!(std::fs::read(&source_path).unwrap(), source_bytes, "copying a resumed worker preserves its source transcript");
+        let persisted = account_routing::load_session_config(&child_info, &fixture.models).await.unwrap().unwrap();
+        assert_eq!(AccountRoute::read(&persisted.extra_headers).unwrap().unwrap().account_id, "two");
+
+        // In-place resume must reject before rewriting history if route persistence fails.
+        storage.replace_chat_history(&child_info, &history).await.unwrap();
+        let source_b = ResumeSourceData { subagent_id: "history-worker-b".into(), child_session_id: "history-worker-b".into(), ..source };
+        let route_path = child_dir.join("account-route.json");
+        let backup = child_dir.join("account-route.saved");
+        let raw_bytes = std::fs::read(child_dir.join("chat_history.jsonl")).unwrap();
+        std::fs::rename(&route_path, &backup).unwrap();
+        std::fs::create_dir(&route_path).unwrap();
+        let rejected = bootstrap_initial_context(&resumed_request, Some(&source_b), &ctx, &worker_b, &child_info, &child_dir, mid.0.as_ref(), super::super::resume_window::ResumeWindowPolicy { context_window: worker_b.context_window, auto_compact_threshold_percent: 85 }).await;
+        std::fs::remove_dir(&route_path).unwrap();
+        std::fs::rename(&backup, &route_path).unwrap();
+        assert!(matches!(rejected, BootstrapInitialContext::ResumeAbort(_)));
+        assert_eq!(std::fs::read(child_dir.join("chat_history.jsonl")).unwrap(), raw_bytes);
+        let resumed = bootstrap_initial_context(&resumed_request, Some(&source_b), &ctx, &worker_b, &child_info, &child_dir, mid.0.as_ref(), super::super::resume_window::ResumeWindowPolicy { context_window: worker_b.context_window, auto_compact_threshold_percent: 85 }).await;
+        let BootstrapInitialContext::Ready(resumed) = resumed else { panic!("in-place worker resume should succeed after removing the fault") };
+        assert_portable(&resumed.conversation);
+        assert_portable(&storage.load_chat_history_from_dir(&child_dir).unwrap());
+
+        // A live mirror fork with the same model also changes authority before admission.
+        let parent = ctx.parent_chat_state.as_ref().unwrap();
+        parent.update_sampling_config(serde_json::from_value(serde_json::to_value(&worker).unwrap()).unwrap());
+        parent.replace_conversation(history);
+        let fork_info = SessionInfo { id: acp::SessionId::new("history-worker-fork"), cwd: child_info.cwd.clone() };
+        let fork_dir = session::persistence::session_dir(&fork_info);
+        let fork = bootstrap_initial_context(&bootstrap_test_request(true), None, &ctx, &worker_b, &fork_info, &fork_dir, mid.0.as_ref(), super::super::resume_window::ResumeWindowPolicy { context_window: worker_b.context_window, auto_compact_threshold_percent: 85 }).await;
+        let BootstrapInitialContext::Ready(fork) = fork else { panic!("forked worker should load portable history") };
+        assert_eq!(fork.source, InitialContextSource::Forked);
+        assert!(!fork.verbatim_fork, "a rewritten prefix cannot reuse the parent's exact request cache");
+        assert_eq!(fork.prefix_len, Some(fork.conversation.len()));
+        assert_portable(&fork.conversation);
+        assert_portable(&storage.load_chat_history_from_dir(&fork_dir).unwrap());
+        parent.update_sampling_config(parent_before);
+    }
+
+    let mut chosen_entry = fixture.models["gpt-6-luna"].clone();
+    chosen_entry.info.model = "chosen-worker".into();
+    ctx.available_models.insert("chosen-worker".into(), chosen_entry);
+    let meta = serde_json::json!({"workerModelId":"chosen-worker"}).as_object().cloned();
+    ctx.parent_worker = crate::extensions::session_worker_model::worker_from_meta(meta.as_ref()).unwrap();
+    let mut parent = ctx.parent_chat_state.as_ref().unwrap().get_sampling_config().await.unwrap();
+    crate::extensions::session_worker_model::pin_from_meta(&mut parent.extra_headers, meta.as_ref(), false);
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(parent);
+    let mut request = bootstrap_test_request(false);
+    request.subagent_type = "general-purpose".into();
+    request.runtime_overrides.model_override_provenance = ModelOverrideProvenance::Tool;
+    let chosen = delegated_worker_model(&request, false, ctx.parent_worker.as_ref());
+    assert_eq!(chosen.as_deref(), Some("chosen-worker"));
+    let (worker, mid, unavailable) = resolve_effective_model_config(None, "general-purpose", &ModelOverride::Inherit, chosen.as_deref(), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "chosen-worker", "explicit worker beats the saved Auto pair");
+    assert!(unavailable.is_none());
+    assert!(worker.extra_headers.contains_key(account_routing::PIN_HEADER));
+    let admitted = account_routing::select_startup_config(&worker, &ctx.available_models, true).await.unwrap();
+    assert_eq!(admitted.model, "chosen-worker", "the child's first round keeps the chosen worker");
+
+    let meta = serde_json::json!({"workerModelId":""}).as_object().cloned();
+    ctx.parent_worker = crate::extensions::session_worker_model::worker_from_meta(meta.as_ref()).unwrap();
+    let mut parent = ctx.parent_chat_state.as_ref().unwrap().get_sampling_config().await.unwrap();
+    crate::extensions::session_worker_model::pin_from_meta(&mut parent.extra_headers, meta.as_ref(), false);
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(parent);
+    let disabled = delegated_worker_model(&request, true, ctx.parent_worker.as_ref());
+    assert!(disabled.is_none());
+    let (inherited, mid, unavailable) = resolve_effective_model_config(None, "general-purpose", &ModelOverride::Inherit, disabled.as_deref(), &ctx).await;
+    assert_eq!(mid.0.as_ref(), "gpt-6-luna", "disabling the worker makes the child use Main");
+    assert!(unavailable.is_none());
+    assert!(AccountRoute::read(&inherited.extra_headers).unwrap().unwrap().pinned);
+
+        });
+    });
+}

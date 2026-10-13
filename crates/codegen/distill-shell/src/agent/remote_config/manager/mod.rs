@@ -235,8 +235,15 @@ impl ModelsManagerBuilder {
 /// fetched yet. Those catalogs live in memory and are filled by
 /// `refresh_chatgpt_models`, which runs after startup.
 fn subscription_catalog_pending() -> bool {
-    (crate::codex_auth::is_logged_in() && crate::codex_models::cached_models().is_empty())
-        || (crate::claude_auth::is_logged_in() && crate::claude_models::cached_models().is_empty())
+    let store = crate::accounts::AccountStore::default();
+    store.list().unwrap_or_default().iter().any(|account| {
+        store.status(&account.id, None).is_ok_and(|status| status.connected)
+            && match account.provider {
+                crate::accounts::Provider::Chatgpt => crate::codex_models::cached_models().is_empty(),
+                crate::accounts::Provider::Claude => crate::claude_models::cached_models().is_empty(),
+                _ => false,
+            }
+    })
 }
 
 impl ModelsManager {

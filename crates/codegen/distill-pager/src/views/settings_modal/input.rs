@@ -548,6 +548,9 @@ fn upgrade_if_breadcrumb_flipped(
 
 fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyOutcome {
     match key.code {
+        KeyCode::Char('a') if key.modifiers.is_empty() => {
+            SettingsKeyOutcome::Action(Action::OpenAccounts)
+        }
         KeyCode::Down | KeyCode::Char('j') => changed_if(state.advance_next()),
         KeyCode::Up | KeyCode::Char('k') => changed_if(state.advance_prev()),
         KeyCode::PageDown => {
@@ -772,6 +775,17 @@ pub fn handle_settings_mouse(
     column: u16,
     row: u16,
 ) -> SettingsKeyOutcome {
+    if matches!(
+        kind,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left)
+    ) && state.accounts_entry_rect.contains((column, row).into())
+        && matches!(
+            state.state.mode_kind(),
+            SettingsModeKind::Browse | SettingsModeKind::FilterFocused
+        )
+    {
+        return SettingsKeyOutcome::Action(Action::OpenAccounts);
+    }
     // The breadcrumb is hierarchical "up": always return to Browse, never dismiss via `close_on_picker_exit`
     // Clearing the deep-link flag first lets the sub-pane Esc handlers do the preview revert
     if matches!(

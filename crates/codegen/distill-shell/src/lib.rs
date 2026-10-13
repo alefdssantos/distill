@@ -13,6 +13,7 @@
 static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;
 pub(crate) use distill_telemetry::unified_log;
 pub use distill_tracing_macros::{teprintln, timed, tprintln};
+pub mod accounts;
 pub mod agent;
 pub mod auth {
     pub use crate::agent::init::run_cli_logout;

@@ -874,6 +874,7 @@ async fn family_switch_compacts_lossy_with_new_model() {
                 .expect("mock inference server");
             actor
                 .handle_set_session_model(crate::session::SessionModelSwitch {
+                    rebuild_definition: None,
                     sampling_config: switch_target_config("new-model", server.url()),
                     canonical_model_id: None,
                     model_selection_intent: true,

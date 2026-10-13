@@ -9,6 +9,7 @@ impl SessionActor {
     ) -> Result<acp::ModelId, acp::Error> {
         let crate::session::SessionModelSwitch {
             mut sampling_config,
+            rebuild_definition,
             canonical_model_id,
             model_selection_intent,
             use_concise,
@@ -18,10 +19,59 @@ impl SessionActor {
             auto_compact_threshold_percent,
             system_prompt_label,
         } = switch;
-        if let Some(current) = self.chat_state_handle.get_sampling_config().await
-            && let Some(id) = current.conversation_group_id
+        let previous_config = self.chat_state_handle.get_sampling_config().await;
+        let account_handoff = previous_config.as_ref().is_some_and(|previous| {
+            (previous
+                .extra_headers
+                .contains_key(crate::agent::account_routing::ROUTE_HEADER)
+                || sampling_config
+                    .extra_headers
+                    .contains_key(crate::agent::account_routing::ROUTE_HEADER))
+                && crate::agent::account_routing::account_history_needs_portability(
+                    previous,
+                    &sampling_config,
+                )
+        });
+        if account_handoff && self.state.lock().await.running_task.is_some() {
+            return Err(acp::Error::invalid_params()
+                .data("Cannot change the account or model while a turn is running"));
+        }
+        if let Some(id) = previous_config
+            .as_ref()
+            .and_then(|current| current.conversation_group_id.as_ref())
         {
-            sampling_config.conversation_group_id = Some(id);
+            sampling_config.conversation_group_id = Some(id.clone());
+        }
+        if model_selection_intent {
+            sampling_config
+                .extra_headers
+                .insert(crate::agent::account_routing::PIN_HEADER.into(), "1".into());
+        }
+        let rebuilt_agent = match rebuild_definition {
+            Some(definition) => Some(
+                self.prepare_rebuilt_agent(definition, system_prompt_label.clone())
+                    .await?,
+            ),
+            None => None,
+        };
+        let mut portable_history = None;
+        if account_handoff {
+            let mut history = self.chat_state_handle.get_conversation().await;
+            if crate::agent::account_routing::make_account_history_portable(&mut history) {
+                portable_history = Some(history);
+            }
+        }
+        // All rejecting work precedes installation of the harness, prompt, and model.
+        crate::agent::account_routing::save_session_config(&self.session_info, &sampling_config)
+            .map_err(|_| {
+                acp::Error::internal_error().data("Could not persist selected account route")
+            })?;
+        if let Some(history) = portable_history {
+            persist_chat_history_jsonl_sync(&self.session_info, &history);
+            self.chat_state_handle.replace_conversation(history);
+        }
+        if let Some(new_agent) = rebuilt_agent {
+            self.install_rebuilt_agent(new_agent).await;
         }
         let model_id = acp::ModelId::new(sampling_config.model.clone());
         let canonical_model_id = canonical_model_id.unwrap_or_else(|| model_id.clone());
@@ -334,12 +384,23 @@ impl SessionActor {
     }
     /// Handle [`SessionCommand::RebuildAgentForDefinition`].
     /// Builds a fresh [`distill_agent::Agent`] from the cached [`crate::session::agent_rebuild::AgentRebuildSpec`] and the supplied definition.
-    /// Triggered from `MvpAgent::set_session_model` only when the new model's `agent_type` differs from the session's `active_agent_type`.
+    /// Model switches share these preparation and installation steps in `handle_set_session_model`.
     pub(super) async fn handle_rebuild_agent_for_definition(
         &self,
         definition: distill_agent::AgentDefinition,
         system_prompt_label: String,
     ) -> Result<(), acp::Error> {
+        let new_agent = self
+            .prepare_rebuilt_agent(definition, system_prompt_label)
+            .await?;
+        self.install_rebuilt_agent(new_agent).await;
+        Ok(())
+    }
+    async fn prepare_rebuilt_agent(
+        &self,
+        definition: distill_agent::AgentDefinition,
+        system_prompt_label: String,
+    ) -> Result<distill_agent::Agent, acp::Error> {
         {
             let state = self.state.lock().await;
             if state.running_task.is_some() {
@@ -359,8 +420,7 @@ impl SessionActor {
             "handle_rebuild_agent_for_definition: rebuilding harness"
         );
         let session_model = self.canonical_model_id.borrow().clone();
-        let new_agent = self
-            .rebuild_spec
+        self.rebuild_spec
             .build_agent(definition, system_prompt_label, &session_model.0)
             .await
             .map_err(|e| {
@@ -373,7 +433,10 @@ impl SessionActor {
                 acp::Error::internal_error().data(format!(
                     "rebuild_agent: build failed for agent_type={new_agent_name}: {e}"
                 ))
-            })?;
+            })
+    }
+    async fn install_rebuilt_agent(&self, new_agent: distill_agent::Agent) {
+        let new_agent_name = new_agent.definition().name.clone();
         let new_system_prompt = new_agent.system_prompt().to_string();
         let mut new_prompt_context = new_agent.prompt_context().clone();
         new_prompt_context.normalize_for_persistence();
@@ -481,7 +544,6 @@ impl SessionActor {
             new_agent_type = %new_agent_name,
             "handle_rebuild_agent_for_definition: harness rebuild complete"
         );
-        Ok(())
     }
     /// Apply a client-supplied `systemPromptOverride` on attach without wiping user/assistant history: swap only the leading `System` message.
     /// The swap happens atomically inside the `ChatStateActor`.

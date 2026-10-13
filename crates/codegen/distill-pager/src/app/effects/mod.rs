@@ -2,6 +2,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 //! This module takes [`Effect`] values produced by [`super::dispatch`] and spawns them as async tasks on a [`JoinSet`].
 //! When tasks complete, the event loop converts their output into [`TaskResult`] and feeds it back through dispatch.
+mod accounts;
 mod helpers;
 mod session_list;
 use super::actions;
@@ -143,6 +144,27 @@ pub(crate) fn execute(
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
+        Effect::Accounts(task) => {
+            let model_tx = acp_tx.clone();
+            let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (agent_id, instance, seq) = (task.agent_id, task.instance, task.seq);
+            let feedback_cancel = task.cancel.clone();
+            tasks.spawn(async move {
+                let feedback = tokio::select! { feedback = feedback_rx.recv() => feedback, _ = feedback_cancel.cancelled() => None };
+                TaskResult::AccountsLoginFeedback { agent_id, instance, seq, feedback }
+            });
+            tasks.spawn(async move {
+                let mut result = tokio::select! {
+                    result = accounts::run(&task, feedback_tx) => result,
+                    _ = task.cancel.cancelled() => Err("Account operation cancelled.".into()),
+                };
+                if matches!(task.request, crate::views::accounts_modal::AccountsRequest::Login(_) | crate::views::accounts_modal::AccountsRequest::Save(_))
+                    && let Ok(data) = &mut result
+                    && let Ok(Ok(catalog)) = tokio::time::timeout(std::time::Duration::from_secs(15), distill_shell::cli_models::fetch_model_state(&model_tx)).await
+                { data.catalog = Some(catalog); }
+                TaskResult::AccountsFinished { agent_id: task.agent_id, instance: task.instance, seq: task.seq, result }
+            });
+        }
         Effect::RegisterActiveSession { session_id, cwd } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
             if let Err(e) = distill_active_sessions::register(distill_active_sessions::ActiveSession {

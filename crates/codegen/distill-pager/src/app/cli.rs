@@ -4,9 +4,58 @@ use clap::{ArgAction, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+#[derive(Debug, Clone, clap::Args)]
+pub struct AccountsArgs {
+    #[command(subcommand)]
+    pub command: AccountsCommand,
+}
+#[derive(Debug, Clone, Subcommand)]
+pub enum AccountsCommand {
+    List,
+    Add {
+        id: String,
+        #[arg(long)]
+        provider: distill_shell::accounts::Provider,
+        #[arg(long)]
+        label: String,
+    },
+    Rename {
+        id: String,
+        #[arg(long)]
+        label: String,
+    },
+    Remove {
+        id: String,
+    },
+    Login {
+        id: String,
+        #[arg(long)]
+        device_code: bool,
+    },
+    Logout {
+        id: String,
+    },
+    Usage {
+        id: String,
+    },
+    Routing {
+        #[command(subcommand)]
+        command: AccountsRoutingCommand,
+    },
+}
+#[derive(Debug, Clone, Subcommand)]
+pub enum AccountsRoutingCommand {
+    Get,
+    Set {
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        file: PathBuf,
+    },
+}
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Manage isolated subscription accounts and routing (JSON output).
+    Accounts(AccountsArgs),
     /// Run Distill without the interactive UI
     Agent(Box<AgentArgs>),
     /// Show the configuration Distill discovers for this directory
@@ -274,7 +323,7 @@ pub struct AgentArgs {
         default_value = "false"
     )]
     pub reauthenticate: bool,
-    /// Model ID to use
+    /// Model ID, or auto for saved account routing.
     #[arg(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
     /// Reasoning effort for reasoning models
@@ -523,7 +572,7 @@ pub struct PagerArgs {
     /// Example: --json-schema '{"type":"object","properties":{"name":{"type":"string"}}}'
     #[clap(long = "json-schema", value_name = "SCHEMA")]
     pub json_schema: Option<String>,
-    /// Model ID to use.
+    /// Model ID, or auto for saved account routing.
     #[clap(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
     /// Reasoning effort for reasoning models
@@ -1530,5 +1579,56 @@ mod tests {
         assert_eq!(args.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(args.permission_mode_flag.as_deref(), Some("default"));
         assert!(!args.yolo);
+    }
+    #[test]
+    fn accounts_cli_contract() {
+        let args = PagerArgs::try_parse_from([
+            "distill",
+            "accounts",
+            "add",
+            "work",
+            "--provider",
+            "grok",
+            "--label",
+            "Work",
+        ])
+        .unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Accounts(AccountsArgs {
+                command: AccountsCommand::Add {
+                    provider: distill_shell::accounts::Provider::Grok,
+                    ..
+                }
+            }))
+        ));
+        for argv in [
+            vec!["distill", "accounts", "list"],
+            vec!["distill", "accounts", "login", "work", "--device-code"],
+            vec!["distill", "accounts", "routing", "get"],
+            vec![
+                "distill",
+                "accounts",
+                "routing",
+                "set",
+                "--file",
+                "routing.json",
+            ],
+        ] {
+            assert!(PagerArgs::try_parse_from(argv).is_ok());
+        }
+        assert!(
+            PagerArgs::try_parse_from([
+                "distill",
+                "accounts",
+                "add",
+                "work",
+                "--provider",
+                "unknown",
+                "--label",
+                "Work"
+            ])
+            .is_err()
+        );
     }
 }
