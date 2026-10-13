@@ -1063,3 +1063,168 @@ fn account_routing_active_turn_rejects_account_handoff_until_response_is_recorde
         },
     );
 }
+
+/// RemoteCode follows every `session/new` and `session/load` with `session/set_model` for the
+/// SAME model, carrying only the effort. An explicit model admitted without an account route
+/// (here: its own API key) is pinned by `PIN_HEADER` alone, so losing the header on that bind
+/// would let global Auto take the session over from the next turn: another model, another account.
+#[test]
+#[serial_test::serial]
+fn account_routing_effort_bind_keeps_routeless_explicit_model_pinned() {
+    crate::agent::account_routing::tests::isolated(
+        "agent::mvp_agent::tests::account_routing_tests::account_routing_effort_bind_keeps_routeless_explicit_model_pinned",
+        || {
+            run_local_for_bridge_test(|| async {
+                let fixture = NamedAccounts::new("http://127.0.0.1:1/v1");
+                fixture.routing(crate::accounts::AutoStrategy::OrderedFirst, true);
+                let agent = build_minimal_agent_for_tests();
+                for (id, model) in &fixture.models {
+                    agent.models_manager.insert_test_entry(id, model.clone());
+                }
+                let mut own_key = fixture.models["gpt-6-luna"].clone();
+                own_key.info.model = "own-key-model".into();
+                own_key.api_key = Some("own-key".into());
+                own_key.info.supports_reasoning_effort = true;
+                own_key.info.reasoning_effort = Some(ReasoningEffort::High);
+                agent
+                    .models_manager
+                    .insert_test_entry("own-key-model", own_key);
+                agent
+                    .initialize_request
+                    .set(
+                        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+                            acp::ClientCapabilities::new()
+                                .fs(acp::FileSystemCapabilities::new())
+                                .terminal(false),
+                        ),
+                    )
+                    .unwrap();
+                let cwd = tempfile::tempdir().unwrap();
+                let sid = agent
+                    .new_session_inner(
+                        acp::NewSessionRequest::new(cwd.path().to_path_buf()).meta(
+                            serde_json::json!({"modelId":"own-key-model"})
+                                .as_object()
+                                .cloned(),
+                        ),
+                    )
+                    .await
+                    .expect("an own-key model needs no account route")
+                    .session_id;
+                let models = agent.models_manager.models();
+                // The session's stored config, and the routes its next turn would take:
+                // a turn rebuilds its sampler config from exactly these two stores.
+                let next_turn = async || {
+                    let handle = agent.resident_handle(&sid).unwrap();
+                    let stored = handle
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap();
+                    let turn = distill_sampler::SamplerConfig {
+                        api_key: handle.chat_state_handle.get_credentials().await.api_key,
+                        base_url: stored.base_url.clone(),
+                        model: stored.model.clone(),
+                        api_backend: stored.api_backend.clone(),
+                        extra_headers: stored.extra_headers.clone(),
+                        ..Default::default()
+                    };
+                    let routes =
+                        account_routing::routes_for_turn(&fixture.store, &models, &turn, true)
+                            .await
+                            .unwrap();
+                    (stored, turn.api_key, routes)
+                };
+                let handle = agent.resident_handle(&sid).unwrap();
+                assert_eq!(handle.model_id.0.as_ref(), "own-key-model");
+                let (admitted, api_key, routes) = next_turn().await;
+                assert_eq!(api_key.as_deref(), Some("own-key"));
+                assert!(
+                    admitted
+                        .extra_headers
+                        .contains_key(account_routing::PIN_HEADER)
+                );
+                assert!(
+                    AccountRoute::read(&admitted.extra_headers)
+                        .unwrap()
+                        .is_none()
+                        && account_routing::load_session_config(&handle.info, &models)
+                            .await
+                            .unwrap()
+                            .is_none(),
+                    "the header is this session's only pin"
+                );
+                assert!(routes.is_empty());
+
+                for (meta, effort) in [
+                    (
+                        serde_json::json!({"reasoningEffort":"low","reasoningEffortAuto":false}),
+                        ReasoningEffort::Low,
+                    ),
+                    (
+                        serde_json::json!({"reasoningEffortAuto":false}),
+                        ReasoningEffort::Low,
+                    ),
+                    (
+                        serde_json::json!({"reasoningEffortAuto":true}),
+                        ReasoningEffort::Low,
+                    ),
+                    (
+                        serde_json::json!({"reasoningEffort":"high"}),
+                        ReasoningEffort::High,
+                    ),
+                ] {
+                    let acknowledged = Box::pin(
+                        agent.set_model_gated(
+                            acp::SetSessionModelRequest::new(
+                                sid.clone(),
+                                acp::ModelId::new("own-key-model"),
+                            )
+                            .meta(meta.as_object().cloned()),
+                        ),
+                    )
+                    .await
+                    .expect("an effort bind for the session's own model");
+                    assert_eq!(
+                        acknowledged.meta.unwrap()["canonicalModelId"],
+                        serde_json::json!("own-key-model")
+                    );
+                    let (bound, api_key, routes) = next_turn().await;
+                    assert_eq!(bound.model, "own-key-model");
+                    assert_eq!(bound.reasoning_effort, Some(effort), "{meta} was applied");
+                    assert_eq!(api_key.as_deref(), Some("own-key"));
+                    assert!(
+                        bound
+                            .extra_headers
+                            .contains_key(account_routing::PIN_HEADER),
+                        "{meta} dropped the explicit model's pin"
+                    );
+                    assert!(
+                        routes.is_empty(),
+                        "{meta} handed the explicit model to Auto: {routes:?}"
+                    );
+                }
+
+                // Choosing Auto is a model choice: it must still release the pin.
+                Box::pin(agent.set_model_gated(acp::SetSessionModelRequest::new(
+                    sid.clone(),
+                    acp::ModelId::new("auto"),
+                )))
+                .await
+                .expect("explicit Auto replaces the pinned own-key model");
+                let (auto, api_key, routes) = next_turn().await;
+                assert!(!auto.extra_headers.contains_key(account_routing::PIN_HEADER));
+                let selected = AccountRoute::read(&auto.extra_headers).unwrap().unwrap();
+                assert_eq!(selected.option_id.as_deref(), Some("one"));
+                assert!(!selected.pinned);
+                assert!(api_key.is_none(), "Auto never sends the own key");
+                assert_eq!(
+                    routes[0].option_id.as_deref(),
+                    Some("one"),
+                    "the next turn stays on Auto"
+                );
+                agent.remove_session(&sid);
+            });
+        },
+    );
+}

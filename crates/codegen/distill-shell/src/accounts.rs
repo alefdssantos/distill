@@ -48,8 +48,9 @@ impl std::str::FromStr for Provider {
         }
     }
 }
+/// An entry tolerates unknown keys: a client that mirrors the registry may write
+/// its own per-account status fields, and one of those must not fail every session.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Account {
     pub id: String,
     pub provider: Provider,
@@ -1036,6 +1037,96 @@ mod tests {
         }
     }
 
+    /// RemoteCode mirrors the Mac's registry into each bot VM by re-encoding it through
+    /// its own account status type, which adds `"connected": false` to every account.
+    /// A turn reads the registry before anything else (`load_routing`, then `list`), so
+    /// rejecting that key fails every session in the VM. Only an account entry is
+    /// lenient: the registry shape and every semantic check still reject a bad file.
+    #[test]
+    fn registry_mirrored_with_extra_account_keys_loads_and_malformed_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::new(dir.path().to_owned());
+        let write = |registry: &serde_json::Value| {
+            std::fs::write(
+                dir.path().join("accounts.json"),
+                serde_json::to_vec(registry).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut accounts: Vec<_> = ["chatgpt", "claude", "grok", "openrouter"]
+            .into_iter()
+            .map(|provider| {
+                serde_json::json!({
+                    "id": format!("legacy-{provider}"), "provider": provider,
+                    "label": format!("{provider} (default)"), "legacy": true, "connected": false,
+                })
+            })
+            .collect();
+        accounts.push(serde_json::json!({
+            "id": "work", "provider": "claude", "label": "Work", "legacy": false, "connected": false,
+        }));
+        let mirrored = serde_json::json!({
+            "version": 1,
+            "accounts": accounts,
+            "routing": {"enabled": true, "strategy": "ordered_first", "options": [
+                {"id": "route1", "account_id": "work", "main_model": "claude-model"},
+            ]},
+        });
+        write(&mirrored);
+        let routing = store.load_routing().expect("a turn's first registry read");
+        assert!(routing.enabled);
+        assert_eq!(routing.options[0].account_id, "work");
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 5);
+        assert_eq!(
+            listed[4],
+            Account {
+                id: "work".into(),
+                provider: Provider::Claude,
+                label: "Work".into(),
+                legacy: false,
+            }
+        );
+        assert!(!store.status("work", None).unwrap().connected);
+
+        // Leniency stops at the account entry.
+        let mut unknown_top_level = mirrored.clone();
+        unknown_top_level["extra"] = true.into();
+        let mut unknown_routing_key = mirrored.clone();
+        unknown_routing_key["routing"]["extra"] = true.into();
+        let mut unknown_option_key = mirrored.clone();
+        unknown_option_key["routing"]["options"][0]["extra"] = true.into();
+        let mut missing_account_field = mirrored.clone();
+        missing_account_field["accounts"][4]
+            .as_object_mut()
+            .unwrap()
+            .remove("label");
+        let mut unknown_provider = mirrored.clone();
+        unknown_provider["accounts"][4]["provider"] = "other".into();
+        let mut missing_legacy_account = mirrored.clone();
+        missing_legacy_account["accounts"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        for (reason, registry) in [
+            ("unknown top-level key", unknown_top_level),
+            ("unknown routing key", unknown_routing_key),
+            ("unknown routing option key", unknown_option_key),
+            ("account without a label", missing_account_field),
+            ("unknown provider", unknown_provider),
+            ("missing legacy account", missing_legacy_account),
+        ] {
+            write(&registry);
+            assert!(store.load_routing().is_err(), "{reason} must be rejected");
+            assert!(store.list().is_err(), "{reason} must be rejected");
+        }
+        std::fs::write(dir.path().join("accounts.json"), b"{\"version\":1,").unwrap();
+        assert_eq!(
+            store.load_routing().unwrap_err().to_string(),
+            "Invalid account registry"
+        );
+    }
+
     #[test]
     fn quota_identity_allows_token_rotation_and_rejects_replacement_or_logout() {
         let dir = tempfile::tempdir().unwrap();
@@ -1122,7 +1213,9 @@ mod tests {
                     _ => unreachable!(),
                 }
             });
-            tokio::time::timeout(std::time::Duration::from_secs(5), refreshing.notified())
+            // The first request of the process also builds the HTTP client, which
+            // takes several seconds in a debug build on a loaded machine.
+            tokio::time::timeout(std::time::Duration::from_secs(60), refreshing.notified())
                 .await
                 .unwrap();
             let new_credentials = credential("new-identity");

@@ -216,15 +216,38 @@ pub(crate) async fn apply(
         && (wants_auto_effort || explicit_effort.is_some() || auto_off_requested);
     let mut model_sampling = match auto_config {
         Some(config) => config,
-        None if keep_route => crate::agent::account_routing::load_session_config(
+        None if keep_route => match crate::agent::account_routing::load_session_config(
             &handle.info,
             &agent.models_manager.models(),
         )
         .await
         .map_err(|_| acp::Error::auth_required())?
-        .unwrap_or_else(|| {
-            agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone())
-        }),
+        {
+            Some(config) => config,
+            None => {
+                let mut prepared =
+                    agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
+                // An explicit model admitted without an account route (own key, no
+                // connected account) is pinned by this header alone. An effort-only
+                // change is not a model choice, so the rebuilt config inherits the pin;
+                // without it the next turn would hand the session to the Auto profile.
+                if handle
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .is_some_and(|current| {
+                        current
+                            .extra_headers
+                            .contains_key(crate::agent::account_routing::PIN_HEADER)
+                    })
+                {
+                    prepared
+                        .extra_headers
+                        .insert(crate::agent::account_routing::PIN_HEADER.into(), "1".into());
+                }
+                prepared
+            }
+        },
         None => {
             let prepared =
                 agent.prepare_sampling_config_for_model(&model, handle.origin_client.clone());
