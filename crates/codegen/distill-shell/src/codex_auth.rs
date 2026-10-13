@@ -1524,9 +1524,14 @@ pub(crate) fn image_api_key_provider(
 ///
 /// Use the installed Codex CLI version for model discovery and sampling.
 /// A proxy or a test can override it; the fallback keeps standalone installs working.
+///
+/// The backend lists a model only to clients at or above the version that
+/// introduced it, so a stale fallback hides current models from every install
+/// without a `codex` on PATH (a Linux container, a fresh machine): 0.156.0 was
+/// not offered gpt-6.1-sol, which 0.162.1 is. Raise it with the Codex CLI.
 pub const CODEX_CLIENT_VERSION_ENV: &str = "DISTILL_CODEX_CLIENT_VERSION";
 pub const LEGACY_CODEX_CLIENT_VERSION_ENV: &str = "REMOTE_CODE_CODEX_CLIENT_VERSION";
-pub const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.156.0";
+pub const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.162.1";
 static INSTALLED_CODEX_VERSION: OnceLock<Option<String>> = OnceLock::new();
 
 fn installed_codex_version() -> Option<String> {
