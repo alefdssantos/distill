@@ -30,11 +30,6 @@ pub fn render_accounts_modal(
             clickable: false,
             id: 0,
         },
-        Shortcut {
-            label: "Esc",
-            clickable: false,
-            id: 0,
-        },
     ];
     let sizing = ModalSizing {
         width_pct: 0.96,
@@ -66,8 +61,17 @@ pub fn render_accounts_modal(
     } else {
         "Routing saved"
     };
-    let header = format!("{status} · Account changes save immediately");
-    line(buf, area, 0, header, theme.gray_bright);
+    Line::from(Span::styled(
+        status,
+        Style::default()
+            .fg(if state.dirty() {
+                theme.fuzzy_accent
+            } else {
+                theme.gray_bright
+            })
+            .add_modifier(Modifier::BOLD),
+    ))
+    .render(Rect::new(area.x, area.y, area.width, 1), buf);
     let mut y = 1;
     if matches!(state.busy, Some(AccountsRequest::Login(_))) {
         let body = Rect::new(
@@ -196,10 +200,16 @@ pub fn render_accounts_modal(
         );
         render_editor(buf, body, state, theme);
     }
-    let message = state
-        .message
-        .as_deref()
-        .unwrap_or("Account changes save immediately; routing needs Save.");
+    let message = match state.message.as_deref() {
+        None | Some("Account changes save immediately; routing changes need Save.") => {
+            if area.width < 68 {
+                "Accounts save immediately."
+            } else {
+                "Accounts save immediately · Choose Auto in Main to use this profile."
+            }
+        }
+        Some(message) => message,
+    };
     line(
         buf,
         area,
@@ -207,8 +217,13 @@ pub fn render_accounts_modal(
         message,
         if state.busy.is_some() {
             theme.fuzzy_accent
-        } else {
+        } else if state.message.is_some()
+            && state.message.as_deref()
+                != Some("Account changes save immediately; routing changes need Save.")
+        {
             theme.warning
+        } else {
+            theme.gray_bright
         },
     );
 }
@@ -250,17 +265,17 @@ fn buttons(
             1,
         );
         let selected = matches!(control, Control::Pane(p) if *p == state.pane);
-        Line::from(Span::styled(
-            label,
-            Style::default()
-                .fg(if selected {
-                    theme.fuzzy_accent
-                } else {
-                    theme.text_primary
-                })
-                .add_modifier(Modifier::BOLD),
-        ))
-        .render(rect, buf);
+        let primary = matches!(control, Control::Save) && state.dirty();
+        let mut style = Style::default().fg(theme.gray_bright);
+        if primary {
+            style = style
+                .fg(theme.fuzzy_accent)
+                .bg(theme.bg_highlight)
+                .add_modifier(Modifier::BOLD);
+        } else if selected || matches!(control, Control::Add | Control::Login | Control::Edit) {
+            style = style.fg(theme.fuzzy_accent).add_modifier(Modifier::BOLD);
+        }
+        Line::from(Span::styled(label, style)).render(rect, buf);
         state.hits.push((rect, *control));
         x += width + 1;
     }
@@ -287,39 +302,26 @@ fn render_accounts(buf: &mut Buffer, area: Rect, state: &mut AccountsModalState,
     let inner = panel(buf, area, " Accounts ", state.pane == Pane::Accounts, theme);
     let mut y = 0;
     // Wrapping action rows stay outside the scrolling list.
-    if inner.width < 35 || inner.height < 7 {
-        buttons(
-            buf,
-            inner,
-            &mut y,
-            &[
-                ("a Add", Control::Add),
-                ("l Login", Control::Login),
-                ("m More", Control::More),
-            ],
-            state,
-            theme,
-        );
-    } else {
-        buttons(
-            buf,
-            inner,
-            &mut y,
-            &[
-                ("a Add", Control::Add),
-                ("l Login", Control::Login),
-                ("n Rename", Control::Rename),
-                ("d Disconnect", Control::Logout),
-                ("x Remove", Control::Remove),
-                ("r Quota", Control::Refresh),
-                ("i Info", Control::Details),
-            ],
-            state,
-            theme,
-        );
-    }
+    buttons(
+        buf,
+        inner,
+        &mut y,
+        &[
+            ("a Add", Control::Add),
+            ("l Login", Control::Login),
+            ("m More", Control::More),
+        ],
+        state,
+        theme,
+    );
     let room = inner.height.saturating_sub(y) as usize;
-    let row_height = if room >= 3 { 3 } else { 1 };
+    let row_height = if room >= 8 {
+        4
+    } else if room >= 3 {
+        3
+    } else {
+        1
+    };
     let visible = (room / row_height).max(1);
     keep_visible(&mut state.account_scroll, state.account_selected, visible);
     if state.accounts.is_empty() {
@@ -340,11 +342,18 @@ fn render_accounts(buf: &mut Buffer, area: Rect, state: &mut AccountsModalState,
             break;
         }
         let a = &state.accounts[i];
-        let color = if i == state.account_selected {
+        let selected = i == state.account_selected;
+        let color = if selected && state.pane == Pane::Accounts {
             theme.fuzzy_accent
         } else {
             theme.text_primary
         };
+        if selected {
+            buf.set_style(
+                Rect::new(inner.x, inner.y + y, inner.width, row_height.min(3) as u16),
+                Style::default().bg(theme.bg_highlight),
+            );
+        }
         let connection = if a.connection_error.is_some() {
             "Connection error"
         } else if a.connected {
@@ -380,10 +389,12 @@ fn render_accounts(buf: &mut Buffer, area: Rect, state: &mut AccountsModalState,
                         .map(|e| format!(" · {e}"))
                         .unwrap_or_default()
                 ),
-                if a.connected {
+                if a.connection_error.is_some() {
+                    theme.warning
+                } else if a.connected {
                     theme.accent_success
                 } else {
-                    theme.warning
+                    theme.gray_bright
                 },
             );
             line(
@@ -424,14 +435,19 @@ pub(super) fn quota_label(account: &AccountStatus, busy: Option<&AccountsRequest
             else {
                 return format!("Quota: unknown · checked {checked}");
             };
-            let stale = quota.fetched_at.is_none_or(|t| {
-                let age = chrono::Utc::now().signed_duration_since(t);
-                age < chrono::Duration::zero() || age > chrono::Duration::minutes(5)
-            });
-            format!(
-                "Quota: {value:.0}% remaining{} · {checked}",
-                if stale { " (stale)" } else { "" }
-            )
+            let stale = !account.connected
+                || account.connection_error.is_some()
+                || quota.fetched_at.is_none_or(|t| {
+                    let age = chrono::Utc::now().signed_duration_since(t);
+                    age < chrono::Duration::zero() || age > chrono::Duration::minutes(5)
+                });
+            let cue = if stale {
+                " (stale)".into()
+            } else {
+                let filled = (value / 20.0).floor() as usize;
+                format!(" [{}{}]", "━".repeat(filled), "·".repeat(5 - filled))
+            };
+            format!("Quota: {value:.0}% remaining{cue} · {checked}")
         }
     }
 }
@@ -519,16 +535,20 @@ fn render_routes(buf: &mut Buffer, area: Rect, state: &mut AccountsModalState, t
             &[
                 ("a Add", Control::Add),
                 ("e Edit", Control::Edit),
-                ("x Remove", Control::Remove),
-                ("K ↑", Control::Up),
-                ("J ↓", Control::Down),
+                ("m More", Control::More),
             ],
             state,
             theme,
         );
     }
     let room = inner.height.saturating_sub(y) as usize;
-    let row_height = if room >= 3 { 3 } else { 1 };
+    let row_height = if room >= 8 {
+        4
+    } else if room >= 3 {
+        3
+    } else {
+        1
+    };
     let visible = (room / row_height).max(1);
     keep_visible(&mut state.route_scroll, state.route_selected, visible);
     if state.routing.options.is_empty() {
@@ -563,11 +583,18 @@ fn render_routes(buf: &mut Buffer, area: Rect, state: &mut AccountsModalState, t
                 )
             })
             .unwrap_or_else(|| "Account no longer available".into());
-        let color = if i == state.route_selected {
+        let selected = i == state.route_selected;
+        let color = if selected && state.pane == Pane::Routing {
             theme.fuzzy_accent
         } else {
             theme.text_primary
         };
+        if selected {
+            buf.set_style(
+                Rect::new(inner.x, inner.y + y, inner.width, row_height.min(3) as u16),
+                Style::default().bg(theme.bg_highlight),
+            );
+        }
         line(
             buf,
             inner,
@@ -638,6 +665,20 @@ fn render_editor(buf: &mut Buffer, area: Rect, state: &mut AccountsModalState, t
     match &state.mode {
         Mode::Actions => {
             if state.pane == Pane::Accounts {
+                if let Some(account) = state.accounts.get(state.account_selected) {
+                    line(
+                        buf,
+                        area,
+                        y,
+                        format!(
+                            "{} · {}",
+                            provider_name(account.account.provider),
+                            account.account.label
+                        ),
+                        theme.text_primary,
+                    );
+                    y += 1;
+                }
                 buttons(
                     buf,
                     area,
@@ -653,6 +694,18 @@ fn render_editor(buf: &mut Buffer, area: Rect, state: &mut AccountsModalState, t
                     theme,
                 );
             } else {
+                line(
+                    buf,
+                    area,
+                    y,
+                    if state.routing.options.is_empty() {
+                        "Auto actions".into()
+                    } else {
+                        format!("Auto actions · Route {}", state.route_selected + 1)
+                    },
+                    theme.text_primary,
+                );
+                y += 1;
                 buttons(
                     buf,
                     area,

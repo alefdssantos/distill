@@ -383,6 +383,7 @@ fn quota_unknown_unavailable_stale_and_loading_are_distinct() {
     let mut account = account("work", "Work");
     assert!(render::quota_label(&account, None).contains("unknown"));
     assert!(!render::quota_label(&account, None).contains("0%"));
+    account.connected = true;
     account.quota = Some(QuotaSnapshot {
         account_id: "work".into(),
         checked_at: chrono::Utc::now(),
@@ -391,6 +392,10 @@ fn quota_unknown_unavailable_stale_and_loading_are_distinct() {
         remaining_percent: Some(37.0),
         detail: None,
     });
+    assert!(render::quota_label(&account, None).contains("37% remaining (stale)"));
+    account.quota.as_mut().unwrap().fetched_at = Some(chrono::Utc::now());
+    assert!(render::quota_label(&account, None).contains("37% remaining ["));
+    account.connected = false;
     assert!(render::quota_label(&account, None).contains("37% remaining (stale)"));
     account.quota.as_mut().unwrap().status = QuotaStatus::Unavailable;
     assert!(render::quota_label(&account, None).contains("unavailable"));
