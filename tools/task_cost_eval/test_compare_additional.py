@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from .compare_additional import config, native_usage, provider_usage
+from .compare_additional import comparison_cost, config, native_usage, provider_usage
 
 
 class AdditionalBenchmarkTests(unittest.TestCase):
@@ -130,7 +130,56 @@ class AdditionalBenchmarkTests(unittest.TestCase):
             with patch('tools.task_cost_eval.compare_additional.distill_accounting', return_value=accounted):
                 result = provider_usage(home, 's')
             self.assertTrue(result['accounting_complete'])
-            self.assertAlmostEqual(result['cost_usd'], (50 * 2 + 20 * .1 + 20 * 2.5 + 10 * 4 + 10 * 10) / 1e6)
+            self.assertTrue(result['accounting_complete'])
+            self.assertIsNone(result['cost_usd'])
+            self.assertAlmostEqual(result['reference_cost_usd'], (50 * 2 + 20 * .1 + 20 * 2.5 + 10 * 4 + 10 * 10) / 1e6)
+
+    def test_reference_cost_mixed_gpt_jev_and_free_unknown(self):
+        rows = [
+            {'model': 'gpt-6-luna', 'usage': {'prompt_tokens': 100, 'cached_prompt_tokens': 20, 'completion_tokens': 10}},
+            {'model': 'jev/openrouter/utility', 'cost_usd_ticks': 5000000},
+            {'model': 'worker-model:free', 'cost_usd_ticks': 0},
+        ]
+        from .compare_codex import credits
+        expected = credits('gpt-6-luna', 100, 20, 10) * .04 + .0005
+        self.assertAlmostEqual(comparison_cost(rows), expected)
+        self.assertIsNone(comparison_cost([{'model': 'worker-model:free', 'usage': {'prompt_tokens': 1, 'cached_prompt_tokens': 0, 'completion_tokens': 1}}]))
+        self.assertIsNone(comparison_cost([{'model': 'jev/unknown', 'usage': {'prompt_tokens': 1, 'cached_prompt_tokens': 0, 'completion_tokens': 1}}]))
+
+    def test_reference_cost_opus_and_haiku_threshold_and_cache_writes(self):
+        opus = {'model': 'claude-opus-5-5', 'usage': {'prompt_tokens': 100, 'cached_prompt_tokens': 20,
+                'cache_creation_prompt_tokens': 30, 'cache_creation_1h_prompt_tokens': 10, 'completion_tokens': 10}}
+        self.assertAlmostEqual(comparison_cost([opus]), (50 * 4 + 20 * .2 + 20 * 5 + 10 * 8 + 10 * 20) / 1e6)
+        low = {'model': 'claude-haiku-5-5', 'usage': {'prompt_tokens': 100000, 'cached_prompt_tokens': 0, 'completion_tokens': 0}}
+        high = {'model': 'claude-haiku-5-5', 'usage': {'prompt_tokens': 100001, 'cached_prompt_tokens': 0, 'completion_tokens': 0}}
+        self.assertAlmostEqual(comparison_cost([low]), .01)
+        self.assertAlmostEqual(comparison_cost([high]), .0500005)
+        self.assertIsNone(comparison_cost([{'model': 'claude-opus-5-5', 'usage': {'prompt_tokens': 5}}]))
+
+
+    def test_requested_auto_configs_preserve_workers_and_full_deepseek_effort_choices(self):
+        import tomllib
+        from .compare_additional import OPUS, HAIKU, DEEPSEEK, FREE_WORKER
+        opus = tomllib.loads(config(OPUS, worker=HAIKU, enable_jev=True))
+        self.assertEqual(opus['models']['worker'], HAIKU)
+        self.assertEqual(opus['models']['worker_effort'], 'auto')
+        self.assertEqual(opus['models']['session_summary'], HAIKU)
+        self.assertEqual(opus['jev']['local']['model'], HAIKU)
+        self.assertEqual(opus['jev']['api_key_env'], 'OPENROUTER_API_KEY')
+        deepseek = tomllib.loads(config(DEEPSEEK, worker=FREE_WORKER, enable_jev=True))
+        self.assertEqual(deepseek['model'][FREE_WORKER]['model'], 'openrouter/free')
+        self.assertEqual(deepseek['model'][FREE_WORKER]['context_window'], 200000)
+        self.assertEqual({r['value'] for r in deepseek['model'][DEEPSEEK]['reasoning_efforts']}, {'none', 'low', 'high', 'max'})
+
+
+    def test_native_list_cost_preserves_unexposed_cache_write_lifetime(self):
+        from .compare_additional import comparison_cost
+        row = {'model': 'claude-opus-5-5', 'costBasis': 'list', 'costUSD': .1570766,
+               'usage': {'prompt_tokens': 62690, 'cached_prompt_tokens': 50743,
+                         'cache_creation_prompt_tokens': 11935, 'completion_tokens': 2570}}
+        self.assertAlmostEqual(comparison_cost([row]), .1570766)
+        del row['costUSD']
+        self.assertAlmostEqual(comparison_cost([row]), .1212716)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,78 @@
+{
+  "retrieved_at_utc": "2026-10-16T19:46:52.673425+00:00",
+  "currency": "USD",
+  "metric": "Standardized estimated inference cost, not invoices, fixed subscriptions, or cross-family quality equivalence",
+  "sources": {
+    "chatgpt": "https://learn.chatgpt.com/docs/pricing#token-rates",
+    "credit_conversion": "https://developers.openai.com/community/students",
+    "claude": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "openrouter": "https://openrouter.ai/api/v1/models"
+  },
+  "chatgpt_credits_per_million": {
+    "gpt-6-astra": {
+      "input": 250,
+      "cached_input": 25,
+      "output": 1250
+    },
+    "gpt-6.1-sol": {
+      "input": 50,
+      "cached_input": 2.5,
+      "output": 250
+    },
+    "gpt-6-luna": {
+      "input": 2.5,
+      "cached_input": 0.25,
+      "output": 12.5
+    }
+  },
+  "usd_per_credit_reference": 0.04,
+  "claude_usd_per_million": {
+    "claude-opus-5-5": {
+      "input": 4,
+      "cached_input": 0.2,
+      "cache_write_5m": 5,
+      "cache_write_1h": 8,
+      "output": 20
+    },
+    "claude-haiku-5-5": {
+      "prompt_tokens_at_most_100000": {
+        "input": 0.1,
+        "cached_input": 0.01,
+        "cache_write_5m": 0.125,
+        "cache_write_1h": 0.2,
+        "output": 0.5
+      },
+      "prompt_tokens_over_100000": {
+        "input": 0.5,
+        "cached_input": 0.05,
+        "cache_write_5m": 0.625,
+        "cache_write_1h": 1,
+        "output": 2.5
+      }
+    }
+  },
+  "openrouter_models": {
+    "deepseek/deepseek-v4.1-flash": {
+      "id": "deepseek/deepseek-v4.1-flash",
+      "pricing_per_token": {
+        "prompt": "0.000000036",
+        "completion": "0.0000006435",
+        "input_cache_read": "0.0000000054"
+      },
+      "context_length": 1048576
+    },
+    "openrouter/free": {
+      "id": "openrouter/free",
+      "pricing_per_token": {
+        "prompt": "0",
+        "completion": "0"
+      },
+      "context_length": 200000
+    }
+  },
+  "decision_overhead": "Jev calls use reported per-attempt cost_usd_ticks / 1e10 and are included once, including calls owned by children. Missing receipts are unknown, not zero.",
+  "free_worker_cost": "Every free-model call must have a reported zero-cost receipt; no paid worker substitution.",
+  "deepseek_cost": "Same fixed public catalog rates applied to Codex and Distill token counts. Native Codex exposes no OpenRouter invoice/generation cost; estimates are not billed charges.",
+  "native_claude_cost": "Use Claude Code reported costBasis=list API-equivalent costUSD per model. Native modelUsage lacks a 5m/1h cache-write split; never silently assume 5m. Distill uses explicit sampler cache_creation_1h_prompt_tokens.",
+  "credential_path_redaction": "Private account identifiers in authentication-file paths are placeholders; original local commands remain in raw task artifacts."
+}

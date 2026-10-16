@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one isolated benchmark cell using ChatGPT subscription models only."""
+"""Run one isolated Codex or Distill task-cost benchmark cell."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .acp_driver import OwnedTree
 from .evaluate import _sha256_file, _sha256_tree
 from .runner import _terminate_owned_group
 
@@ -64,7 +65,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
                         if (key in {'event.name', 'event_name', 'event.kind', 'event_kind',
                                     'event', 'model', 'model_provider', 'reasoning_effort',
                                     'conversation.id', 'conversation_id', 'session.id', 'session_id',
-                                    'response_id', 'request_id', 'http.status_code', 'status',
+                                    'response_id', 'response.id', 'request_id', 'http.status_code', 'status', 'cost', 'cost_usd', 'cost_metadata', 'usage.cost',
                                     'is_warmup', 'warmup', 'prewarm', 'attempt', 'success',
                                     'event.timestamp', 'auth_mode', 'auth.mode', 'provider_name',
                                     'model_reasoning_effort', 'http.response.status_code', 'endpoint'}
@@ -82,9 +83,7 @@ class CollectorHandler(BaseHTTPRequestHandler):
 
 
 def distill_config(*, main_model='chatgpt/gpt-6.1-sol', worker_model='chatgpt/gpt-6-luna',
-                   worker_effort='auto', utility_effort='auto'):
-    # No third-party model credentials: auto effort retains the native fallback
-    # when the optional Jev decision service is unavailable.
+                   worker_effort='auto', utility_effort='auto', enable_jev=False):
     return f'''[cli]
 use_leader = false
 [models]
@@ -93,8 +92,9 @@ worker = {json.dumps(worker_model)}
 worker_effort = {json.dumps(worker_effort)}
 session_summary = "chatgpt/gpt-6-luna"
 [jev]
+enabled = true
 effort_auto = true
-api_key_env = "DISTILL_BENCH_NO_EXTERNAL_MODEL_KEY"
+api_key_env = {json.dumps("OPENROUTER_API_KEY" if enable_jev else "DISTILL_BENCH_NO_EXTERNAL_MODEL_KEY")}
 [jev.local]
 model = "chatgpt/gpt-6-luna"
 effort = {json.dumps(utility_effort)}
@@ -430,7 +430,7 @@ def distill_accounting(home, session, *, strict=False):
             'credit_estimate': sum(r['credits'] for r in rows) if complete else None}
 
 
-def codex_accounting(events, stdout):
+def codex_accounting(events, stdout, provider='chatgpt'):
     # Native response-completed telemetry is per model request, including child
     # conversations. CLI turn totals alone cannot prove complete child billing.
     logs = [json.loads(line)['fields'] for line in events.read_text().splitlines()]
@@ -462,6 +462,9 @@ def codex_accounting(events, stdout):
         row['agent'] = 'main' if row.get('conversation') == main_conversation else 'subagent'
     failures = any(row.get('type') in {'error', 'turn.failed'} for row in cli)
     requests = [log for log in logs if log.get('event.name') == 'codex.websocket_request']
+    if not requests:
+        requests = [log for log in logs if log.get('event.name') == 'codex.api_request'
+                    ]
     conversations = {log.get('conversation.id') for log in logs
                      if log.get('event.name') == 'codex.conversation_starts'}
     response_conversations = {row.get('conversation') for row in rows}
@@ -475,11 +478,14 @@ def codex_accounting(events, stdout):
                    - sum(row.get('conversation') == conversation for row in rows))
         for _ in range(max(0, missing)):
             rows.append({'conversation': conversation, 'complete': False, 'status': 'missing_usage'})
-    complete = (bool(rows) and not failures and counts_match
-                and all(str(request.get('success')).lower() == 'true' for request in requests)
+    subscription_only = provider == 'chatgpt' and all(str(row.get('auth_mode', '')).lower() == 'chatgpt' for row in rows)
+    for row in rows:
+        row['provider'] = provider
+    request_success = all(str(r.get('success')).lower() == 'true' if r.get('event.name') == 'codex.websocket_request'
+                          else str(r.get('http.status_code', r.get('http.response.status_code', ''))).startswith('2') for r in requests)
+    complete = (bool(rows) and not failures and counts_match and request_success
                 and conversations == response_conversations
-                and all(r['complete'] and r.get('credits') is not None for r in rows))
-    subscription_only = all(str(row.get('auth_mode', '')).lower() == 'chatgpt' for row in rows)
+                and all(r['complete'] and (provider != 'chatgpt' or r.get('credits') is not None) for r in rows))
     return {'accounting_complete': complete, 'calls': len(rows), 'call_usage': rows,
             'subscription_only': subscription_only, 'main_conversation': main_conversation,
             'native_requests': len(requests), 'conversations': len(conversations),
@@ -488,9 +494,9 @@ def codex_accounting(events, stdout):
             'telemetry_events': len(logs),
             **{key: sum(row.get(key, 0) for row in rows)
                for key in ('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_tokens')},
-            'credit_estimate': sum(r['credits'] for r in rows) if complete else None,
+            'credit_estimate': sum(r['credits'] for r in rows) if complete and provider == 'chatgpt' else None,
             'credit_estimate_excluding_zero_output':
-                sum(r['credits'] for r in rows if r.get('output_tokens', 0) > 0) if complete else None}
+                sum(r['credits'] for r in rows if r.get('output_tokens', 0) > 0) if complete and provider == 'chatgpt' else None}
 
 
 def subscription_account(auth_file):
@@ -506,9 +512,17 @@ def subscription_account(auth_file):
 def run_cell(args):
     distill_auth = args.codex_auth.expanduser()
     codex_auth = Path.home() / '.codex/auth.json'
-    account = subscription_account(distill_auth)
-    if not account or account != subscription_account(codex_auth):
-        raise ValueError('Both agents must use the same signed-in ChatGPT account')
+    provider = getattr(args, 'provider', 'chatgpt')
+    main_model = getattr(args, 'main_model', 'gpt-6.1-sol')
+    worker_model = getattr(args, 'worker_model', 'gpt-6-luna')
+    codex_effort = getattr(args, 'codex_effort', 'high')
+    enable_jev = getattr(args, 'enable_jev', False)
+    if provider == 'chatgpt':
+        account = subscription_account(distill_auth)
+        if not account or account != subscription_account(codex_auth):
+            raise ValueError('Both agents must use the same signed-in ChatGPT account')
+    elif args.variant != 'codex':
+        raise ValueError('Use compare_additional deepseek-free-distill for the OpenRouter Distill arm')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     cohort = json.loads((ROOT / 'cohort-v1.json').read_text())
@@ -536,8 +550,7 @@ def run_cell(args):
     thread = threading.Thread(target=collector.serve_forever, daemon=True)
     thread.start()
     session = str(uuid.uuid4())
-    environment = {k: v for k, v in os.environ.items()
-                   if not k.endswith('_API_KEY') and k != 'DISTILL_BENCH_NO_EXTERNAL_MODEL_KEY'}
+    environment = {k: v for k, v in os.environ.items() if not k.endswith('_API_KEY')}
     environment['PATH'] = str(args.codex.expanduser().parent) + os.pathsep + environment['PATH']
     environment['GROK_MANAGED_MCPS_ENABLED'] = 'false'
     environment['GROK_MANAGED_MCP_GATEWAY_TOOLS_ENABLED'] = 'false'
@@ -546,8 +559,25 @@ def run_cell(args):
     started = None
     timed_out = False
     process = None
+    tree = None
+    cleanup_complete = False
     try:
         if args.variant == 'distill':
+            main_model = getattr(args, 'main_model', 'gpt-6.1-sol')
+            worker_model = getattr(args, 'worker_model', 'gpt-6-luna')
+            codex_effort = getattr(args, 'codex_effort', 'high')
+            enable_jev = getattr(args, 'enable_jev', False)
+            if enable_jev:
+                jev_source = args.distill_profile.expanduser() / 'openrouter-auth.json'
+                jev_auth = json.loads(jev_source.read_text())
+                key = jev_auth.get('key')
+                if not isinstance(key, str) or not key:
+                    raise ValueError('OpenRouter auth file has no key')
+                jev_target = home / 'openrouter-auth.json'
+                staged_auth.append(jev_target)
+                jev_target.touch(mode=0o600)
+                jev_target.write_text(jev_source.read_text())
+                environment['OPENROUTER_API_KEY'] = key
             shutil.copyfile(distill_auth, auth_target)
             auth_target.chmod(0o600)
             for name in ('auth.json', 'campaigns_state.json'):
@@ -557,38 +587,56 @@ def run_cell(args):
                     staged_auth.append(target)
                     shutil.copyfile(source, target)
                     target.chmod(0o600)
-            config = distill_config()
+            config = distill_config(main_model=f'chatgpt/{main_model}',
+                                    worker_model=f'chatgpt/{worker_model}', enable_jev=enable_jev)
             (home / 'config.toml').write_text(config)
             environment['DISTILL_HOME'] = environment['GROK_HOME'] = str(home)
             command = [str(executable), '--no-leader', '--always-approve', '--disable-web-search',
                        '--cwd', str(worktree), '--session-id', session, '--prompt-file',
                        str(output / 'prompt.txt'), '--output-format', 'streaming-json',
-                       '--model', 'chatgpt/gpt-6.1-sol']
+                       '--model', f'chatgpt/{main_model}']
             command.extend(['--tools', LOCAL_TOOLS])
         else:
+            main_model = getattr(args, 'main_model', 'gpt-6.1-sol')
+            codex_effort = getattr(args, 'codex_effort', 'high')
             endpoint = f'http://127.0.0.1:{collector.server_port}/v1/logs'
-            config = 'model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\nforced_login_method="chatgpt"\n'
+            config = f'model="{main_model}"\nmodel_reasoning_effort="{codex_effort}"\nforced_login_method="chatgpt"\n'
             command = [str(executable), 'exec', '--yolo', '--ignore-user-config', '--ephemeral',
-                       '--json', '-C', str(worktree), '-m', 'gpt-6.1-sol',
-                       '-c', 'model_reasoning_effort="high"', '-c', 'forced_login_method="chatgpt"',
+                       '--json', '-C', str(worktree), '-m', main_model,
+                       '-c', f'model_reasoning_effort="{codex_effort}"', '-c', 'forced_login_method="chatgpt"',
                        '-c', 'web_search="disabled"',
                        '-c', f'otel.exporter={{otlp-http={{endpoint="{endpoint}",protocol="json"}}}}',
                        '-c', 'otel.log_user_prompt=false', '-']
+            if provider == 'openrouter':
+                environment['OPENROUTER_API_KEY'] = json.loads((args.distill_profile / 'openrouter-auth.json').read_text())['key']
+                index = command.index('forced_login_method="chatgpt"')
+                del command[index - 1:index + 1]
+                definition = '{name="OpenRouter",base_url="https://openrouter.ai/api/v1",wire_api="responses",env_key="OPENROUTER_API_KEY"}'
+                command[-1:-1] = ['-c', 'model_provider="openrouter"', '-c', 'model_providers.openrouter=' + definition]
+                config = f'model="{main_model}"\nmodel_reasoning_effort="{codex_effort}"\nmodel_provider="openrouter"\nmodel_providers.openrouter={definition}\n'
         (output / 'config.toml').write_text(config)
         (output / 'command.json').write_text(json.dumps(command, indent=2) + '\n')
         started = time.monotonic()
         with (output / 'stdout.jsonl').open('w') as stdout, (output / 'stderr.txt').open('w') as stderr:
             process = subprocess.Popen(command, env=environment, cwd=worktree, stdin=subprocess.PIPE,
                                        stdout=stdout, stderr=stderr, start_new_session=True, text=True)
-            try:
-                process.communicate(prompt if args.variant == 'codex' else None, timeout=args.timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _terminate_owned_group(process)
+            tree = OwnedTree(process)
+            if args.variant == 'codex':
+                process.stdin.write(prompt)
+            process.stdin.close()
+            while process.poll() is None:
+                tree.refresh()
+                if time.monotonic() - started >= args.timeout:
+                    timed_out = True
+                    break
+                time.sleep(.02)
+            cleanup_complete = tree.stop()
     finally:
-        elapsed = time.monotonic() - started if started is not None else 0
-        if process is not None and process.poll() is None:
+        if tree is not None and not cleanup_complete:
+            cleanup_complete = tree.stop()
+        elif process is not None and process.poll() is None:
             _terminate_owned_group(process)
+        elapsed = time.monotonic() - started if started is not None else 0
         collector.shutdown()
         collector.server_close()
         thread.join()
@@ -596,13 +644,28 @@ def run_cell(args):
             auth_target.unlink(missing_ok=True)
             for staged in staged_auth:
                 staged.unlink(missing_ok=True)
+    if not cleanup_complete:
+        raise RuntimeError('Inference process tree did not terminate; grading skipped')
     grade = subprocess.run(['python3', str(ROOT / case['grader']['script_ref']), str(worktree)],
                            text=True, capture_output=True)
     (output / 'grader.txt').write_text(grade.stdout + grade.stderr)
     diff = subprocess.check_output(['git', 'diff', '--no-ext-diff'], cwd=worktree, text=True)
     (output / 'diff.patch').write_text(diff)
-    accounting = (distill_accounting(home, session) if args.variant == 'distill'
-                  else codex_accounting(output / 'telemetry.jsonl', output / 'stdout.jsonl'))
+    from .compare_additional import comparison_cost, provider_usage
+    accounting = (provider_usage(home, session) if args.variant == 'distill' and enable_jev
+                  else distill_accounting(home, session) if args.variant == 'distill'
+                  else codex_accounting(output / 'telemetry.jsonl', output / 'stdout.jsonl', provider=provider))
+    accounting['reference_cost_usd'] = comparison_cost(accounting.get('call_usage', [])) if accounting.get('accounting_complete') else None
+    expected = main_model
+    if args.variant == 'distill':
+        main_calls = [r for r in accounting.get('call_usage', []) if r.get('agent') == 'main' and r.get('role') in ('main', 'main_retry')]
+        children = [r for r in accounting.get('call_usage', []) if r.get('agent') == 'worker' and r.get('role') != 'jev']
+        model_verified = bool(main_calls) and all(r['model'] == expected for r in main_calls)
+        worker_verified = all(r['model'] == worker_model for r in children)
+    else:
+        main_calls = [r for r in accounting.get('call_usage', []) if r.get('agent') == 'main' and r.get('output_tokens', 0) > 0]
+        model_verified = bool(main_calls) and all(r['model'] == expected and r['effort'] == codex_effort for r in main_calls)
+        worker_verified = True
     inputs_unchanged = (frozen['fixture_sha256'] == _sha256_tree(ROOT / case['fixture_ref'])
                         and frozen['grader_sha256'] == _sha256_file(ROOT / case['grader']['script_ref']))
     native_payloads = list((executable.parent.parent / 'node_modules/@openai').glob(
@@ -610,8 +673,9 @@ def run_cell(args):
     if len(native_payloads) != 1:
         raise ValueError('Cannot identify the native benchmark executable')
     summary = {'variant': args.variant, 'case': args.case, 'session': session,
-               'provider': 'chatgpt_subscription', 'version': version,
-               'same_subscription_account': True,
+               'provider': provider, 'version': version, 'main_model': main_model, 'worker_model': worker_model if args.variant == 'distill' else None,
+               'requested_effort': 'auto' if args.variant == 'distill' else codex_effort, 'jev_enabled': bool(enable_jev and args.variant == 'distill'),
+               'same_subscription_account': provider == 'chatgpt', 'model_verified': model_verified, 'worker_verified': worker_verified,
                'executable_sha256': _sha256_file(executable),
                'native_payload_sha256': _sha256_file(native_payloads[0]),
                'source_sha': subprocess.check_output(['git', 'rev-parse', version.split('(')[-1].rstrip(')')],
@@ -622,12 +686,12 @@ def run_cell(args):
                **frozen, 'frozen_inputs_unchanged': inputs_unchanged,
                'config_sha256': hashlib.sha256(config.encode()).hexdigest(),
                'wall_time_s': round(elapsed, 6), 'exit_code': process.returncode,
-               'timed_out': timed_out, 'grader_passed': grade.returncode == 0,
+               'timed_out': timed_out, 'cleanup_complete': cleanup_complete, 'grader_passed': grade.returncode == 0,
                'cost_basis': 'published_subscription_credit_rates', **accounting}
+    summary['passed'] = process.returncode == 0 and grade.returncode == 0 and inputs_unchanged and not timed_out and model_verified and worker_verified
     (output / 'result.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps({k: v for k, v in summary.items() if k != 'call_usage'}), flush=True)
-    return 0 if (process.returncode == 0 and grade.returncode == 0 and inputs_unchanged
-                 and accounting['accounting_complete'] and accounting['subscription_only']) else 1
+    return 0 if summary['passed'] and accounting['accounting_complete'] and accounting.get('reference_cost_usd') is not None else 1
 
 
 def main():
@@ -640,6 +704,11 @@ def main():
     parser.add_argument('--distill-profile', type=Path, default=Path.home() / '.distill')
     parser.add_argument('--codex-auth', type=Path, default=Path.home() / '.codex/auth.json')
     parser.add_argument('--timeout', type=float, default=300)
+    parser.add_argument('--main-model', choices=('gpt-6.1-sol', 'gpt-6-astra', 'deepseek/deepseek-v4.1-flash'), default='gpt-6.1-sol')
+    parser.add_argument('--codex-effort', choices=('low', 'medium', 'high', 'max'), default='high')
+    parser.add_argument('--worker-model', default='gpt-6-luna')
+    parser.add_argument('--enable-jev', action='store_true')
+    parser.add_argument('--provider', choices=('chatgpt', 'openrouter'), default='chatgpt')
     return run_cell(parser.parse_args())
 
 

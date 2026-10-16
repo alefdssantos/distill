@@ -19,6 +19,10 @@ class ProfileConfigTest(unittest.TestCase):
         self.assertEqual(explicit['models']['worker_effort'], 'medium')
         self.assertEqual(explicit['jev']['local']['effort'], 'medium')
         self.assertEqual(sol_worker['models']['worker'], 'chatgpt/gpt-6.1-sol')
+        astra = tomllib.loads(distill_config(main_model='chatgpt/gpt-6-astra', enable_jev=True))
+        self.assertEqual(astra['models']['default'], 'chatgpt/gpt-6-astra')
+        self.assertTrue(astra['jev']['enabled'])
+        self.assertEqual(astra['jev']['api_key_env'], 'OPENROUTER_API_KEY')
         sol_worker['models']['worker'] = default['models']['worker']
         self.assertEqual(sol_worker, default)
         explicit['models']['worker_effort'] = 'auto'
@@ -41,7 +45,7 @@ class CredentialCleanupTest(unittest.TestCase):
                 (profile / name).write_text('{}')
             output = root / 'cell'
             args = SimpleNamespace(distill_profile=profile, codex_auth=profile / 'codex-auth.json',
-                                   output=output, case='tax-bug-en', variant='distill',
+                                   output=output, case='tax-bug-en', variant='distill', enable_jev=False,
                                    distill=root / 'distill', codex=root / 'codex', timeout=1)
             copyfile = shutil.copyfile
 
@@ -59,6 +63,34 @@ class CredentialCleanupTest(unittest.TestCase):
             self.assertFalse((output / 'distill-home/codex-auth.json').exists())
             self.assertFalse((output / 'distill-home/auth.json').exists())
             self.assertTrue((profile / 'codex-auth.json').exists())
+
+
+class NativeOpenRouterAccountingTest(unittest.TestCase):
+    def test_http_calls_use_openrouter_route_not_misleading_auth_label_and_keep_failures(self):
+        from .compare_additional import comparison_cost
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events, stdout = root / 'events.jsonl', root / 'stdout.jsonl'
+            stdout.write_text(json.dumps({'type': 'thread.started', 'thread_id': 'c'}) + '\n')
+            logs = [
+                {'event.name': 'codex.conversation_starts', 'conversation.id': 'c', 'event.timestamp': '0'},
+                {'event.name': 'codex.api_request', 'conversation.id': 'c', 'event.timestamp': '1', 'http.response.status_code': '200'},
+                {'event.name': 'codex.sse_event', 'event.kind': 'response.completed', 'conversation.id': 'c', 'event.timestamp': '2',
+                 'model': 'deepseek/deepseek-v4.1-flash', 'auth_mode': 'Chatgpt', 'model_reasoning_effort': 'max',
+                 'input_token_count': 100, 'cached_token_count': 80, 'output_token_count': 10},
+            ]
+            def write():
+                events.write_text('\n'.join(json.dumps({'fields': row}) for row in logs) + '\n')
+            write()
+            result = codex_accounting(events, stdout, provider='openrouter')
+            self.assertTrue(result['accounting_complete'])
+            self.assertFalse(result['subscription_only'])
+            self.assertIsNone(result['credit_estimate'])
+            self.assertEqual(result['call_usage'][0]['effort'], 'max')
+            self.assertAlmostEqual(comparison_cost(result['call_usage']), (20 * .036 + 80 * .0054 + 10 * .6435) / 1e6)
+            logs.append({'event.name': 'codex.api_request', 'conversation.id': 'c', 'event.timestamp': '3', 'http.response.status_code': '500'})
+            write()
+            self.assertFalse(codex_accounting(events, stdout, provider='openrouter')['accounting_complete'])
 
 
 class SubscriptionAccountingTest(unittest.TestCase):

@@ -20,30 +20,37 @@ OpenAI-compatible protocol.
 
 ## Benchmarks
 
-Latest measured results (2026-10-16). Three distinct comparisons; all arms
-passed frozen graders in 9/9 small-task runs. Results do not prove universal
-quality equivalence.
+Four requested native-versus-Distill cohorts (2026-10-16), each with three
+frozen tasks and three repetitions per arm. Every Distill run enabled external
+Jev; its cost includes Jev and child calls. Quality requires a passing unchanged
+external behavior grader, successful agent exit, completion within the identical
+300-second deadline, and frozen inputs. These small fixtures had no human review
+and do not establish universal quality equivalence.
 
-| Comparison | Agent | Time | Cost | Passes |
-|---|---|---:|---:|---:|
-| GPT subscription | Distill GPT-6.1 Sol auto + GPT-6 Luna auto | 258.92 s | $0.20¹ | 9/9 |
-|  | Codex GPT-6.1 Sol high | 300.60 s | $0.72¹ | 9/9 |
-| Claude Sonnet 5.5 | Distill auto | 97.69 s | $0.185 | 9/9 |
-|  | Claude Code medium | 99.69 s | $0.207 | 9/9 |
-| DeepSeek V4.1 Flash policy ablation | Distill auto/delegation | 323.15 s | $0.00717 | 9/9 |
-|  | Distill low/no delegation | 346.03 s | $0.00796 | 9/9 |
+| Native baseline | Distill main + worker | Estimated cost (native → Distill) | Δ cost | Quality (native → Distill) | Δ quality | Time (native → Distill) | Δ time |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Codex GPT-6 Astra max | GPT-6 Astra auto + GPT-6 Luna auto | $4.07658 → $1.00374 | −75.4% | 9/9 → 9/9 | +0.0% | 440.29 s → 284.99 s | −35.3% |
+| Codex GPT-6.1 Sol max | GPT-6.1 Sol auto + GPT-6 Luna auto | $0.79826 → $0.24981 | −68.7% | 9/9 → 9/9 | +0.0% | 384.09 s → 296.60 s | −22.8% |
+| Claude Code Opus 5.5 max | Opus 5.5 auto + Haiku 5.5 auto | $2.49456 → $0.34875 | −86.0% | 9/9 → 9/9 | +0.0% | 798.16 s → 191.02 s | −76.1% |
+| Codex DeepSeek V4.1 Flash max via OpenRouter Responses | DeepSeek auto + free models (OpenRouter free router) auto | ≥$0.09785 → $0.01177 | ≤−87.9%* | 5/9 → 9/9 | +80.0% | 1973.99 s → 490.27 s | −75.2% |
 
-Distill used 72.4% lower modeled cost and 13.9% less time than Codex. With
-Claude, it used 10.7% lower modeled cost and 2.0% less time. The DeepSeek
-auto/delegation policy used 9.9% lower cost and 6.6% less time than fixed low.
+*DeepSeek native full cost is unknown: three timed-out calls have no usage
+receipts. The displayed native cost is a lower bound, not a point estimate; the
+cost delta is a conservative upper bound rounded toward zero. Native functional
+graders passed 8/9, but only 5/9 completed successfully within the deadline.
+The success-rate gain is 44.4 percentage points (+80.0% relative).
+Codex used fallback model metadata for this custom DeepSeek integration.
 
-¹ GPT cost is modeled subscription credits converted at a reference $0.04 per
-credit, not the subscription bill. Claude uses native list-price API-equivalent
-cost; DeepSeek uses native reported per-attempt cost. These different cost bases
-are not cross-provider invoice comparisons. The DeepSeek comparison tests two
-Distill policies on the same model, not an external DeepSeek competitor.
+Cost uses standardized model-specific token reference rates, not invoices or
+monthly subscription charges. GPT credits convert at a reference $0.04 each.
+Claude uses API-equivalent list pricing; native Opus cache-write lifetime is not
+exposed. DeepSeek uses the same published OpenRouter rates for both arms; native
+Codex actual invoice cost is unavailable. These results do not show pure API
+savings. Configured workers were not forced and were not necessarily used on
+every task.
 
-See [BENCHMARKS.md](BENCHMARKS.md) for methodology, limitations, and receipts.
+See [BENCHMARKS.md](BENCHMARKS.md) for definitions, methodology, exact totals,
+cost bounds, reproduction commands, and source JSON.
 
 ## Install
 
