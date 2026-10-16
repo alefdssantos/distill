@@ -26,6 +26,41 @@ class ProfileConfigTest(unittest.TestCase):
         self.assertEqual(explicit, default)
 
 
+class CredentialCleanupTest(unittest.TestCase):
+    def test_setup_failure_removes_all_staged_credentials(self):
+        import shutil
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from .compare_codex import run_cell
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / 'profile'
+            profile.mkdir()
+            for name in ('codex-auth.json', 'auth.json', 'campaigns_state.json'):
+                (profile / name).write_text('{}')
+            output = root / 'cell'
+            args = SimpleNamespace(distill_profile=profile, codex_auth=profile / 'codex-auth.json',
+                                   output=output, case='tax-bug-en', variant='distill',
+                                   distill=root / 'distill', codex=root / 'codex', timeout=1)
+            copyfile = shutil.copyfile
+
+            def fail_campaign(source, target, *args, **kwargs):
+                if Path(source).name == 'campaigns_state.json':
+                    raise PermissionError('injected setup failure')
+                return copyfile(source, target, *args, **kwargs)
+
+            with patch('tools.task_cost_eval.compare_codex.subscription_account', return_value='account'), \
+                 patch('tools.task_cost_eval.compare_codex.Collector'), \
+                 patch('tools.task_cost_eval.compare_codex.subprocess.check_output', return_value='distill test'), \
+                 patch('tools.task_cost_eval.compare_codex.shutil.copyfile', side_effect=fail_campaign):
+                with self.assertRaisesRegex(PermissionError, 'injected setup failure'):
+                    run_cell(args)
+            self.assertFalse((output / 'distill-home/codex-auth.json').exists())
+            self.assertFalse((output / 'distill-home/auth.json').exists())
+            self.assertTrue((profile / 'codex-auth.json').exists())
+
+
 class SubscriptionAccountingTest(unittest.TestCase):
     def test_codex_counts_children_and_deduplicates_exports_without_hiding_missing_usage(self):
         with tempfile.TemporaryDirectory() as directory:

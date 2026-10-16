@@ -504,7 +504,7 @@ def subscription_account(auth_file):
 
 
 def run_cell(args):
-    distill_auth = args.distill_profile.expanduser() / 'codex-auth.json'
+    distill_auth = args.codex_auth.expanduser()
     codex_auth = Path.home() / '.codex/auth.json'
     account = subscription_account(distill_auth)
     if not account or account != subscription_account(codex_auth):
@@ -541,33 +541,42 @@ def run_cell(args):
     environment['PATH'] = str(args.codex.expanduser().parent) + os.pathsep + environment['PATH']
     environment['GROK_MANAGED_MCPS_ENABLED'] = 'false'
     environment['GROK_MANAGED_MCP_GATEWAY_TOOLS_ENABLED'] = 'false'
-    if args.variant == 'distill':
-        auth_target = home / 'codex-auth.json'
-        shutil.copyfile(distill_auth, auth_target)
-        auth_target.chmod(0o600)
-        config = distill_config()
-        (home / 'config.toml').write_text(config)
-        environment['DISTILL_HOME'] = environment['GROK_HOME'] = str(home)
-        command = [str(executable), '--no-leader', '--always-approve', '--disable-web-search',
-                   '--cwd', str(worktree), '--session-id', session, '--prompt-file',
-                   str(output / 'prompt.txt'), '--output-format', 'streaming-json',
-                   '--model', 'chatgpt/gpt-6.1-sol']
-        command.extend(['--tools', LOCAL_TOOLS])
-    else:
-        endpoint = f'http://127.0.0.1:{collector.server_port}/v1/logs'
-        config = 'model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\nforced_login_method="chatgpt"\n'
-        command = [str(executable), 'exec', '--yolo', '--ignore-user-config', '--ephemeral',
-                   '--json', '-C', str(worktree), '-m', 'gpt-6.1-sol',
-                   '-c', 'model_reasoning_effort="high"', '-c', 'forced_login_method="chatgpt"',
-                   '-c', 'web_search="disabled"',
-                   '-c', f'otel.exporter={{otlp-http={{endpoint="{endpoint}",protocol="json"}}}}',
-                   '-c', 'otel.log_user_prompt=false', '-']
-    (output / 'config.toml').write_text(config)
-    (output / 'command.json').write_text(json.dumps(command, indent=2) + '\n')
-    started = time.monotonic()
+    auth_target = home / 'codex-auth.json'
+    staged_auth = []
+    started = None
     timed_out = False
     process = None
     try:
+        if args.variant == 'distill':
+            shutil.copyfile(distill_auth, auth_target)
+            auth_target.chmod(0o600)
+            for name in ('auth.json', 'campaigns_state.json'):
+                source = args.distill_profile.expanduser() / name
+                if source.is_file():
+                    target = home / name
+                    staged_auth.append(target)
+                    shutil.copyfile(source, target)
+                    target.chmod(0o600)
+            config = distill_config()
+            (home / 'config.toml').write_text(config)
+            environment['DISTILL_HOME'] = environment['GROK_HOME'] = str(home)
+            command = [str(executable), '--no-leader', '--always-approve', '--disable-web-search',
+                       '--cwd', str(worktree), '--session-id', session, '--prompt-file',
+                       str(output / 'prompt.txt'), '--output-format', 'streaming-json',
+                       '--model', 'chatgpt/gpt-6.1-sol']
+            command.extend(['--tools', LOCAL_TOOLS])
+        else:
+            endpoint = f'http://127.0.0.1:{collector.server_port}/v1/logs'
+            config = 'model="gpt-6.1-sol"\nmodel_reasoning_effort="high"\nforced_login_method="chatgpt"\n'
+            command = [str(executable), 'exec', '--yolo', '--ignore-user-config', '--ephemeral',
+                       '--json', '-C', str(worktree), '-m', 'gpt-6.1-sol',
+                       '-c', 'model_reasoning_effort="high"', '-c', 'forced_login_method="chatgpt"',
+                       '-c', 'web_search="disabled"',
+                       '-c', f'otel.exporter={{otlp-http={{endpoint="{endpoint}",protocol="json"}}}}',
+                       '-c', 'otel.log_user_prompt=false', '-']
+        (output / 'config.toml').write_text(config)
+        (output / 'command.json').write_text(json.dumps(command, indent=2) + '\n')
+        started = time.monotonic()
         with (output / 'stdout.jsonl').open('w') as stdout, (output / 'stderr.txt').open('w') as stderr:
             process = subprocess.Popen(command, env=environment, cwd=worktree, stdin=subprocess.PIPE,
                                        stdout=stdout, stderr=stderr, start_new_session=True, text=True)
@@ -577,7 +586,7 @@ def run_cell(args):
                 timed_out = True
                 _terminate_owned_group(process)
     finally:
-        elapsed = time.monotonic() - started
+        elapsed = time.monotonic() - started if started is not None else 0
         if process is not None and process.poll() is None:
             _terminate_owned_group(process)
         collector.shutdown()
@@ -585,6 +594,8 @@ def run_cell(args):
         thread.join()
         if args.variant == 'distill':
             auth_target.unlink(missing_ok=True)
+            for staged in staged_auth:
+                staged.unlink(missing_ok=True)
     grade = subprocess.run(['python3', str(ROOT / case['grader']['script_ref']), str(worktree)],
                            text=True, capture_output=True)
     (output / 'grader.txt').write_text(grade.stdout + grade.stderr)
@@ -626,7 +637,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--distill', type=Path, default=Path('target/release/distill'))
     parser.add_argument('--codex', type=Path, default=Path(shutil.which('codex')))
-    parser.add_argument('--distill-profile', type=Path, default=Path.home() / '.grok')
+    parser.add_argument('--distill-profile', type=Path, default=Path.home() / '.distill')
+    parser.add_argument('--codex-auth', type=Path, default=Path.home() / '.codex/auth.json')
     parser.add_argument('--timeout', type=float, default=300)
     return run_cell(parser.parse_args())
 

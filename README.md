@@ -20,14 +20,30 @@ OpenAI-compatible protocol.
 
 ## Benchmarks
 
-| Agent | Models and effort | Total time | Estimated cost (USD) |
-|---|---|---:|---:|
-| Distill | GPT-6.1 Sol auto + GPT-6 Luna auto | 308.18 s (**-33.8%**) | $0.19 (**-67.2%**) |
-| Codex | GPT-6.1 Sol high | 465.27 s  | $0.59 | 
+Latest measured results (2026-10-16). Three distinct comparisons; all arms
+passed frozen graders in 9/9 small-task runs. Results do not prove universal
+quality equivalence.
 
-Same quality and 9/9 passing runs.
+| Comparison | Agent | Time | Cost | Passes |
+|---|---|---:|---:|---:|
+| GPT subscription | Distill GPT-6.1 Sol auto + GPT-6 Luna auto | 258.92 s | $0.20¹ | 9/9 |
+|  | Codex GPT-6.1 Sol high | 300.60 s | $0.72¹ | 9/9 |
+| Claude Sonnet 5.5 | Distill auto | 97.69 s | $0.185 | 9/9 |
+|  | Claude Code medium | 99.69 s | $0.207 | 9/9 |
+| DeepSeek V4.1 Flash policy ablation | Distill auto/delegation | 323.15 s | $0.00717 | 9/9 |
+|  | Distill low/no delegation | 346.03 s | $0.00796 | 9/9 |
 
-See more in [BENCHMARKS.md](BENCHMARKS.md) .
+Distill used 72.4% lower modeled cost and 13.9% less time than Codex. With
+Claude, it used 10.7% lower modeled cost and 2.0% less time. The DeepSeek
+auto/delegation policy used 9.9% lower cost and 6.6% less time than fixed low.
+
+¹ GPT cost is modeled subscription credits converted at a reference $0.04 per
+credit, not the subscription bill. Claude uses native list-price API-equivalent
+cost; DeepSeek uses native reported per-attempt cost. These different cost bases
+are not cross-provider invoice comparisons. The DeepSeek comparison tests two
+Distill policies on the same model, not an external DeepSeek competitor.
+
+See [BENCHMARKS.md](BENCHMARKS.md) for methodology, limitations, and receipts.
 
 ## Install
 

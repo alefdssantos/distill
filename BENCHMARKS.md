@@ -1,7 +1,113 @@
-# Distill vs. Codex: ChatGPT Sol + Luna
+# Benchmarks — 2026-10-16 results
 
-Status: **complete for the measured task cohort**. The sixth full cohort meets
-the speed, modeled credit cost, accounting, subscription and delivered-quality
+Three separate matched comparisons, each using three frozen tasks with three
+repetitions per arm. Every arm passed its frozen graders in 9/9 runs. These small
+task cohorts do not establish universal quality equivalence. The cohorts are
+separate; their runs may have overlapped across model families.
+
+| Comparison | Arm and configuration | Total time | Cost | Graders |
+|---|---|---:|---:|---:|
+| GPT subscription | Distill 2.0.46, Sol auto + Luna auto | 258.916630 s | 4.9944705 credits × $0.04 = **$0.19977882** | 9/9 |
+|  | Codex 0.162.1, Sol high | 300.602317 s | 18.08482 credits × $0.04 = **$0.7233928** | 9/9 |
+| Claude Sonnet | Distill 2.0.46, Sonnet 5.5 auto; same-model worker, auto | 97.692339 s | **$0.1850125** | 9/9 |
+|  | Claude Code 2.1.300, Sonnet 5.5, native medium | 99.686450 s | **$0.2071824** | 9/9 |
+| DeepSeek V4.1 Flash, Distill policy ablation | Auto main/worker with delegation | 323.145283 s | **$0.00717** | 9/9 |
+|  | Fixed low main/worker, no delegation/Jev | 346.029005 s | **$0.00796** | 9/9 |
+
+For GPT, Distill was 13.9% faster and its modeled cost was 72.4% lower. Its
+cost uses published Standard credit rates: Sol 50/2.5/250 and Luna 2.5/0.25/12.5
+credits per million input/cached-input/output tokens, respectively. The $0.04
+per-credit conversion is a reference, not the subscription bill. See
+[ChatGPT/Codex token rates](https://learn.chatgpt.com/docs/pricing#token-rates).
+
+For Claude, Distill was **2.0% faster** and its native list-price cost was
+**10.7% lower**. Cost uses native per-attempt usage at current Sonnet 5.5 rates
+($2 input, $0.10 cache reads, $2.50 5-minute cache writes, $4 1-hour cache
+writes, and $10 output per million tokens); this is an API-equivalent estimate,
+not subscription billing. See [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+
+Auto effort remained selected without an external Jev decision credential;
+the agents used existing per-model fallback efforts. This does not measure the
+external Jev service. Observed GPT efforts were Sol low and Luna medium;
+Claude Distill used high while native Claude used fixed medium. DeepSeek main
+requests used low in both arms, and neither DeepSeek arm spawned a worker.
+The policy comparison therefore does not establish a delegation speedup.
+
+For GPT, excluding Codex zero-output requests from modeled billing gives
+13.56592 credits ($0.5426368) and a conservative 63.2% modeled cost reduction.
+Those calls remain included in full usage and time totals.
+
+The DeepSeek rows compare Distill agent policies on the same model, not Distill
+against an external DeepSeek competitor. The configured alias was
+`~deepseek/deepseek-flash-latest`; observed model was
+`deepseek/deepseek-v4.1-flash`. Cost sums native per-attempt reported USD ticks,
+including rejected auxiliary answers, from complete receipts. No cached static
+rates were used. OpenRouter provider routing was not pinned; provider load,
+caching, and the small sample can affect these latency and cost differences.
+
+DeepSeek auto/delegation was 6.6% faster and 9.9% lower cost than fixed low
+without delegation in the accepted cohort.
+
+Cost bases differ; dollar figures are not cross-provider invoice comparisons.
+Pilot and setup costs are excluded from headline cohort totals and retained in
+each evidence record. Initial GPT model-discovery failures were excluded after
+native-auth correction and accepted 18-cell rerun. The Claude legacy quota was
+exhausted, so matched runs used an alternate account; the fourth model-prefix
+pilot was corrected by auditing its ledger, not by inferring usage. The first
+18 Claude runs grouped repetitions by arm; they remain retained as
+protocol-rejected evidence. The accepted Claude cohort was rerun with alternating
+arm order within every task/repetition pair, matching the other comparisons.
+The first 18 DeepSeek runs used grouped agent order and were rejected for protocol; they
+remain retained but excluded as protocol failures, not outcome-based selection.
+The accepted second 18 alternated order within pairs. Their reported costs
+total $0.0151330032; the protocol-rejected cohort cost $0.0161478621.
+All 36 DeepSeek executions remain visible, totaling $0.0312808653 before pilots. Same-family cells ran
+sequentially with alternating agent order within each pair, but do not assume
+all families ran globally sequentially.
+
+Evidence and raw cohort receipts:
+- GPT accepted cohort: [`refresh-20261016-gpt-corrected.json`](tools/task_cost_eval/results/refresh-20261016-gpt-corrected.json)
+- GPT original setup/model-discovery attempt: [`refresh-20261016-gpt.json`](tools/task_cost_eval/results/refresh-20261016-gpt.json)
+- Claude cohort, pilot, and setup evidence: [`refresh-20261016-claude.json`](tools/task_cost_eval/results/refresh-20261016-claude.json)
+- DeepSeek accepted/rejected cohorts and pilot: [`refresh-20261016-deepseek.json`](tools/task_cost_eval/results/refresh-20261016-deepseek.json)
+- Additional setup/authentication pilots: [`refresh-20261016-additional-pilots.json`](tools/task_cost_eval/results/refresh-20261016-additional-pilots.json)
+- Shared task runner: [`compare_codex.py`](tools/task_cost_eval/compare_codex.py)
+- Claude and DeepSeek runner: [`compare_additional.py`](tools/task_cost_eval/compare_additional.py)
+
+Harness commands (use a unique output directory for each run):
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m tools.task_cost_eval.compare_codex \
+  --variant distill --distill /path/to/distill --codex /path/to/codex \
+  --codex-auth "$HOME/.codex/auth.json" --case tax-bug-en --output /tmp/bench/tax-distill-1
+PYTHONDONTWRITEBYTECODE=1 python3 -m tools.task_cost_eval.compare_codex \
+  --variant codex --distill /path/to/distill --codex /path/to/codex \
+  --codex-auth "$HOME/.codex/auth.json" --case tax-bug-en --output /tmp/bench/tax-codex-1
+PYTHONDONTWRITEBYTECODE=1 python3 -m tools.task_cost_eval.compare_additional \
+  --variant sonnet-distill --case tax-bug-en --output /tmp/bench/claude-distill-1
+PYTHONDONTWRITEBYTECODE=1 python3 -m tools.task_cost_eval.compare_additional \
+  --variant claude-native --case tax-bug-en --output /tmp/bench/claude-native-1
+PYTHONDONTWRITEBYTECODE=1 python3 -m tools.task_cost_eval.compare_additional \
+  --variant deepseek-distill --case tax-bug-en --output /tmp/bench/deepseek-distill-1
+PYTHONDONTWRITEBYTECODE=1 python3 -m tools.task_cost_eval.compare_additional \
+  --variant deepseek-same-agent-ablation --case tax-bug-en --output /tmp/bench/deepseek-low-1
+```
+
+Optional `--claude-auth /path/to/matched/account` selects the matched Claude
+account. Distill uses the default `.distill` profile unless overridden. All runs
+use identical fixtures and external graders; setup/pilot runs are retained but
+not added to accepted-cohort totals.
+
+## Historical results — 2026-09-30 and earlier
+
+The remainder of this file preserves earlier benchmark evidence and setup history.
+It is historical context, not the latest result.
+
+# Historical benchmark — 2026-09-30: Distill vs. Codex
+
+This section records the historical ChatGPT Sol + Luna comparison. It is not the
+latest benchmark; see the 2026-10-16 cohorts above. The sixth full cohort met
+its measured speed, modeled credit cost, accounting, subscription and delivered-quality
 gates. Every earlier attempt, including rejected results, remains below.
 Branch: `perf/distill-sol-luna-benchmarks-20260930`.
 
