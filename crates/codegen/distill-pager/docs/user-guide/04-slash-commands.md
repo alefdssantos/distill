@@ -136,16 +136,20 @@ Toggle Ultracode for the current session. While on, every request you send is tr
 /ultracode off
 ```
 
-### `/always-approve` and `/auto`
+### `/always-approve`
 
-Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.
+A real toggle for the permission mode: running it while always-approve is on turns it back off (back to ask). You can also change mode with `Shift+Tab` (cycles Normal / Plan / Auto (when enabled) / Always-approve), `Ctrl+O`, or `/settings`.
 
-| Command | When off | When already on |
-|---|---|---|
-| `/always-approve` | Skip all permission prompts | Back to ask |
-| `/auto` | Classifier approves safe tools (dangerous ones may still prompt) | Back to ask |
+### `/auto`
 
-Running one while the other is active switches modes — for example, `/auto` while always-approve is on switches to auto. `/auto` only appears when the auto permission-mode feature is enabled. You can also change mode with `Shift+Tab` (cycles Normal / Plan / Auto (when enabled) / Always-approve), `Ctrl+O`, or `/settings`.
+Turns Auto routing on or off. Auto routing uses the routes set up in `/accounts` to pick each session's Main and Worker models.
+
+| State | Which models run |
+|---|---|
+| On | Auto picks Main and Worker; the footer shows `Main: Auto → <model> \| Worker: Auto → <model>` |
+| Off | The selected Main and Worker always run |
+
+Turning Auto off moves an Auto-routed session back to the selected Main and Worker.
 
 ### `/multiline`
 

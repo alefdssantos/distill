@@ -5,6 +5,10 @@
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
 use crate::sampling::EffortTarget;
+/// The models an Auto route runs, as clients read them under `_meta.autoRoute`.
+pub(crate) fn auto_route_meta(route: &crate::agent::account_routing::AccountRoute) -> serde_json::Value {
+    serde_json::json!({ "mainModelId": route.main_model, "workerModelId": route.worker_model })
+}
 use distill_login::PreferredAuthMethod;
 use crate::upload::trace::PromptMetadataParams;
 use distill_tools::implementations::distill::task::backend::SubagentBackend;
@@ -3394,7 +3398,14 @@ impl MvpAgent {
             );
             info.meta = Some(map);
         }
-        acp::SessionModelState::new(model_id, available_models)
+        let auto_route = session_id
+            .and_then(|sid| self.resident_handle(sid))
+            .and_then(|handle| crate::agent::account_routing::session_auto_route(&handle.info));
+        acp::SessionModelState::new(model_id, available_models).meta(auto_route.map(|route| {
+            let mut meta = acp::Meta::new();
+            meta.insert("autoRoute".into(), auto_route_meta(&route));
+            meta
+        }))
     }
     pub(crate) async fn session_model_state(
         &self,

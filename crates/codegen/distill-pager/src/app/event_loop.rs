@@ -1562,7 +1562,6 @@ pub(crate) async fn run(
     };
     app.current_ui.permission_mode = Some(display_mode.to_string());
     super::dispatch::downgrade_displayed_auto_if_gated(&mut app);
-    app.sync_permission_mode_slash_gate();
     if let Some(ref pref) = app.current_ui.voice_stt_language {
         app.voice_config.language =
             crate::settings::canonical_voice_stt_language(Some(pref)).to_string();
@@ -2699,8 +2698,6 @@ pub(crate) async fn run(
                             load_plans.push((id, plan));
                         }
                         let any_reload = !reload_agent_ids.is_empty();
-                        // Per-agent `auto_mode` was just re-seeded from the reload meta; keep `/auto` feature-gate slash visibility in sync
-                        app.sync_permission_mode_slash_gate();
 
                         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
                         reconnect_reinit = Some(ReconnectReinit {

@@ -343,6 +343,21 @@ pub(crate) fn save_session_config(
     Ok(())
 }
 
+/// The session's saved route when enabled Auto chose it (not an explicit model pin).
+pub(crate) fn session_auto_route(info: &crate::session::info::Info) -> Option<AccountRoute> {
+    if !AccountStore::default()
+        .load_routing()
+        .is_ok_and(|routing| routing.enabled)
+    {
+        return None;
+    }
+    read_session_route(info)
+        .ok()
+        .flatten()
+        .map(|saved| saved.route)
+        .filter(|route| route.option_id.is_some() && !route.pinned)
+}
+
 fn read_session_route(info: &crate::session::info::Info) -> Result<Option<PersistedAccountRoute>> {
     let dir = crate::session::persistence::ensure_owner_only_session_dir(info)?;
     let bytes = match std::fs::read(dir.join("account-route.json")) {

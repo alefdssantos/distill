@@ -1408,7 +1408,13 @@ pub(in crate::app::dispatch) fn handle_session_created(
             app.default_yolo = false;
             app.current_ui.permission_mode = Some("ask".into());
         }
-        let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
+        // Auto on wins over a stashed Main: the session keeps the routed pair.
+        let deferred = if agent.session.models.auto_route.is_some() {
+            agent.session.deferred_model_switch = None;
+            None
+        } else {
+            apply_deferred_model_switch(agent, app.cli_effort_token.as_deref())
+        };
         let deferred_mode = agent.deferred_session_mode.take();
         let deferred_permission = agent.deferred_permission_mode.take();
         let cwd = agent.session.cwd.clone();
@@ -1547,7 +1553,13 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         if let Some(summary) = strategy_summary {
             agent.scrollback.push_block(RenderBlock::system(summary));
         }
-        let deferred = apply_deferred_model_switch(agent, app.cli_effort_token.as_deref());
+        // Auto on wins over a stashed Main: the session keeps the routed pair.
+        let deferred = if agent.session.models.auto_route.is_some() {
+            agent.session.deferred_model_switch = None;
+            None
+        } else {
+            apply_deferred_model_switch(agent, app.cli_effort_token.as_deref())
+        };
         let deferred_mode = agent.deferred_session_mode.take();
         let deferred_permission = agent.deferred_permission_mode.take();
         let cwd = agent.session.cwd.clone();
@@ -1912,7 +1924,8 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                     };
                     agent.scrollback.push_block(RenderBlock::system(msg));
                 }
-                if unchanged {
+                // Auto is a routing mode, never the saved Main.
+                if unchanged || model_id.0.as_ref() == "auto" {
                     vec![]
                 } else {
                     vec![Effect::PersistPreferredModel {
@@ -1933,10 +1946,13 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 return open_agent_type_mismatch_question(app, model_id, effort, &display_name);
             }
             Err(SwitchModelError::Other(msg)) => {
-                if let Some(ref prev) = prev_model_id
-                    && app.models.current.as_ref() == Some(&model_id)
-                {
-                    app.models.set_current(prev.clone(), None);
+                if let Some(ref prev) = prev_model_id {
+                    if agent.session.models.current.as_ref() == Some(&model_id) {
+                        agent.session.models.set_current(prev.clone(), None);
+                    }
+                    if app.models.current.as_ref() == Some(&model_id) {
+                        app.models.set_current(prev.clone(), None);
+                    }
                 }
                 agent
                     .scrollback

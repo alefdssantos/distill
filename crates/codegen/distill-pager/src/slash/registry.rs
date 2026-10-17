@@ -149,8 +149,6 @@ impl CommandRegistry {
         hidden.insert("recap".to_string());
         // Voice is fail-closed until `set_voice_visible` runs after the runtime gate resolves (GA default on; remote kill switch may hide)
         hidden.insert("voice".to_string());
-        // `/auto` is fail-closed: hidden until `set_auto_mode_available(true)`.
-        hidden.insert("auto".to_string());
         // Memory commands follow the shell's own gate: shown once the ACP catalog advertises them.
         hidden.extend(SHELL_GATED_COMMANDS.iter().map(|name| name.to_string()));
         // `/share` starts menu-hidden (still dispatchable) until `set_share_visible(true)`
@@ -365,17 +363,6 @@ impl CommandRegistry {
         self.set_command_visible("voice", visible);
     }
 
-    /// Gate `/auto` on the auto permission-mode feature.
-    /// When `available` is false, `/auto` is hard-hidden (fail-closed: neither offered nor executable).
-    /// `/always-approve` is always offered; both commands are true toggles and stay on the menu while already active.
-    pub fn set_auto_mode_available(&mut self, available: bool) {
-        if available {
-            self.hidden.remove("auto");
-        } else {
-            self.hidden.insert("auto".to_string());
-        }
-        self.rebuild_triggers();
-    }
 
     /// Test-only: put `name` in (or out of) the menu-only hide set so unit tests can cover [`Self::get`] vs [`Self::get_for_dispatch`].
     #[cfg(test)]
@@ -1254,7 +1241,6 @@ mod tests {
     #[test]
     fn menu_hidden_is_menu_only_and_still_dispatches() {
         let mut reg = permission_mode_registry();
-        reg.set_auto_mode_available(true);
 
         reg.set_menu_hidden_for_test("always-approve", true);
         assert!(
@@ -1288,31 +1274,6 @@ mod tests {
         );
     }
 
-    /// The `/auto` feature gate stays HARD (fail-closed): gated off, `/auto` is neither offered nor executable.
-    /// `get_for_dispatch` must NOT resurrect feature-hidden commands. `/always-approve` is ungated.
-    #[test]
-    fn auto_feature_gate_blocks_dispatch_resolution() {
-        let mut reg = permission_mode_registry();
-
-        // Fail-closed default from `new()`: /auto starts hard-hidden.
-        assert!(reg.get_for_dispatch("auto").is_none());
-        assert!(reg.get("auto").is_none());
-
-        // Gate on: offered and dispatchable. Always-approve always was.
-        reg.set_auto_mode_available(true);
-        assert!(reg.get("auto").is_some());
-        assert!(reg.get_for_dispatch("auto").is_some());
-        assert!(reg.get("always-approve").is_some());
-        assert!(reg.get_for_dispatch("always-approve").is_some());
-
-        // Gate off again: /auto gone everywhere; /always-approve stays.
-        reg.set_auto_mode_available(false);
-        assert!(reg.get("auto").is_none());
-        assert!(reg.get_for_dispatch("auto").is_none());
-        assert!(!reg.triggers().iter().any(|t| t.canonical == "auto"));
-        assert!(reg.get("always-approve").is_some());
-        assert!(reg.get_for_dispatch("always-approve").is_some());
-    }
 
     /// `get_for_dispatch` only bypasses the menu-only hide.
     /// Hard-hidden (feature-gated), tier-restricted, and tool-gated commands stay unresolvable for dispatch, exactly like `get()`.

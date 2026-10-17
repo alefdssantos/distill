@@ -486,6 +486,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             return effects;
         }
+        TaskResult::WithAutoRoute {
+            agent_id,
+            auto_route,
+            result,
+        } => {
+            let switched = matches!(
+                result.as_ref(),
+                TaskResult::SwitchModelComplete { result: Ok(_), .. }
+            );
+            let effects = dispatch_task_result(*result, app);
+            if switched && let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.session.models.auto_route = auto_route.clone();
+                if app.active_view == ActiveView::Agent(agent_id) {
+                    app.models.auto_route = auto_route;
+                }
+            }
+            return effects;
+        }
         result => result,
     };
     if result.ends_startup() {
@@ -528,8 +546,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             seq,
             result,
         } => super::accounts::complete(app, agent_id, instance, seq, result),
-        TaskResult::WithPinnedMemoryMode { .. } => {
-            unreachable!("pinned memory mode wrapper is removed before task-result dispatch")
+        TaskResult::AutoRoutingSet { result } => super::accounts::auto_routing_set(app, result),
+        TaskResult::WithPinnedMemoryMode { .. } | TaskResult::WithAutoRoute { .. } => {
+            unreachable!("result wrappers are removed before task-result dispatch")
         }
         TaskResult::SessionCreated {
             agent_id,

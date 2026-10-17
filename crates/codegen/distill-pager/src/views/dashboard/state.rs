@@ -1307,13 +1307,6 @@ impl DashboardState {
         self.peek_reply.set_voice_visible(visible);
     }
 
-    /// Gate `/auto` on both dashboard prompt registries (dispatch and peek reply).
-    /// See [`crate::slash::SlashController::set_auto_mode_available`].
-    pub(crate) fn set_auto_mode_available(&mut self, available: bool) {
-        self.dispatch.set_auto_mode_available(available);
-        self.peek_reply.set_auto_mode_available(available);
-    }
-
     /// Replace the restricted slash-command deny list on both dashboard prompt registries (dispatch and peek reply).
     pub(crate) fn set_restricted_commands(&mut self, names: &[String]) {
         self.dispatch.set_restricted_commands(names);

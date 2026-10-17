@@ -652,11 +652,22 @@ impl MvpAgent {
         .map_err(|_| {
             acp::Error::auth_required().data("No available account route for this session")
         })?;
-        let account_main =
+        let account_route =
             crate::agent::account_routing::AccountRoute::read(&session_sampling.extra_headers)
                 .ok()
-                .flatten()
-                .map(|route| route.main_model);
+                .flatten();
+        // Auto chose this session's pair: its worker replaces the configured one.
+        if let Some(route) = account_route
+            .as_ref()
+            .filter(|route| route.option_id.is_some() && !route.pinned)
+        {
+            session_sampling.extra_headers.shift_remove("x-distill-worker-pin");
+            *worker_override.write() = Some(crate::session::handle::SessionWorker {
+                model_id: Some(route.worker_model.clone()),
+                effort: None,
+            });
+        }
+        let account_main = account_route.map(|route| route.main_model);
         spawn_sampler_transport_prewarm(&session_sampling.base_url);
         let (summary_client, summary_model) = self.build_summary_client(&session_sampling)?;
         let title_utility_lane = self.build_title_utility_lane(&session_sampling, &summary_model);

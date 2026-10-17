@@ -468,6 +468,8 @@ pub enum Action {
     /// Set the permission mode by canonical kind (`always-approve` / `ask` / `default`).
     /// Typed wrapper over [`Action::SetYoloMode`] that preserves the `default` canonical (the `bool` variant collapses `default` to `ask`).
     SetPermissionMode(PermissionModeKind),
+    /// `/auto`: flip Auto routing on disk, then move the active session to match.
+    ToggleAutoRouting,
     /// Toggle multiline input mode (swap Enter and Shift+Enter behavior).
     ToggleMultiline,
     /// Set multiline input mode (swap Enter and Shift+Enter behavior).
@@ -1483,6 +1485,8 @@ pub struct AccountsTask {
 #[derive(Debug)]
 pub enum Effect {
     Accounts(AccountsTask),
+    /// Flip `routing.enabled` in the account store.
+    ToggleAutoRouting,
     LoginProvider {
         provider: LoginProvider,
         attempt_id: u64,
@@ -2558,6 +2562,18 @@ pub enum TaskResult {
     /// Session lifecycle result paired with the memory mode pinned by the
     /// actor that produced it. The wrapper lets all lifecycle variants share
     /// one typed metadata path.
+    /// A model switch result plus the Auto route the agent reported; a
+    /// successful switch replaces the session's route (`None` clears it).
+    WithAutoRoute {
+        agent_id: AgentId,
+        auto_route: Option<(acp::ModelId, acp::ModelId)>,
+        result: Box<TaskResult>,
+    },
+    /// Result of toggling Auto routing (`/auto`): the new state, and with Auto
+    /// off the configured Main (`[models].default`) the session returns to.
+    AutoRoutingSet {
+        result: Result<(bool, Option<acp::ModelId>), String>,
+    },
     WithPinnedMemoryMode {
         agent_id: AgentId,
         memory_mode: Option<distill_shell::config::MemoryMode>,

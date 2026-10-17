@@ -455,6 +455,13 @@ pub struct PromptModelTiers {
 
 impl PromptModelTiers {
     pub fn from_model_state(models: &crate::acp::ModelState) -> Option<Self> {
+        if let Some((main, worker)) = &models.auto_route {
+            return Some(Self {
+                main: format!("Auto → {}", models.effort_label(&models.display_name(main))),
+                worker: Some(format!("Auto → {} (auto)", models.display_name(worker))),
+                ultracode: models.ultracode,
+            });
+        }
         let main = models.current_model_name()?;
         Some(Self {
             main: models.effort_label(&main),
@@ -1389,11 +1396,6 @@ impl PromptWidget {
             .set_dashboard_visible(visible);
     }
 
-    /// Gate `/auto` on the auto permission-mode feature.
-    /// See [`crate::slash::SlashController::set_auto_mode_available`].
-    pub(crate) fn set_auto_mode_available(&mut self, available: bool) {
-        self.slash_controller.set_auto_mode_available(available);
-    }
 
     /// Replace the restricted slash-command deny list (see [`crate::slash::registry::CommandRegistry::set_restricted_commands`]).
     pub(crate) fn set_restricted_commands(&mut self, names: &[String]) {

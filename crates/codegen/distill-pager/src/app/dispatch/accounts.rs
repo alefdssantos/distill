@@ -134,6 +134,62 @@ pub(super) fn complete(
     }
     vec![]
 }
+/// `/auto` saved: Auto on moves the active session to Auto; Auto off returns
+/// an Auto-routed session to the selected Main and this instance's Worker.
+pub(super) fn auto_routing_set(
+    app: &mut AppView,
+    result: Result<(bool, Option<acp::ModelId>), String>,
+) -> Vec<Effect> {
+    let (enabled, main) = match result {
+        Ok(state) => state,
+        Err(message) => {
+            app.show_toast(&message);
+            return vec![];
+        }
+    };
+    app.show_toast(if enabled {
+        "Auto routing on: accounts pick Main and Worker"
+    } else {
+        "Auto routing off: selected Main and Worker run"
+    });
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let routed = agent.session.models.auto_route.is_some();
+    let model_id = match (enabled, main) {
+        (true, _) => acp::ModelId::new("auto"),
+        (false, Some(main)) if routed => main,
+        (false, _) => {
+            agent.session.models.auto_route = None;
+            app.models.auto_route = None;
+            return vec![];
+        }
+    };
+    let mut effects = super::router::dispatch(
+        Action::SwitchModel {
+            model_id,
+            effort: None,
+        },
+        app,
+    );
+    if !enabled
+        && let Some(session_id) = app
+            .agents
+            .get(&id)
+            .and_then(|agent| agent.session.session_id.clone())
+    {
+        effects.push(Effect::SetSessionWorker {
+            session_id,
+            model_id: crate::acp::ModelState::configured_worker_model()
+                .map_or_else(String::new, |worker| worker.0.to_string()),
+            effort: crate::acp::ModelState::configured_worker_effort(),
+        });
+    }
+    effects
+}
 /// A saved profile and successful model activation are separate acknowledgements.
 pub(super) fn activation_finished(
     app: &mut AppView,

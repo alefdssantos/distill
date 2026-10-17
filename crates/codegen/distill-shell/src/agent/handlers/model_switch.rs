@@ -397,6 +397,8 @@ pub(crate) async fn apply(
             "reasoningEffortAuto": handle
                 .jev_effort_auto
                 .load(std::sync::atomic::Ordering::Relaxed),
+            "autoRoute": crate::agent::account_routing::session_auto_route(&handle.info)
+                .map(|route| crate::agent::mvp_agent::auto_route_meta(&route)),
         })
         .as_object()
         .cloned(),

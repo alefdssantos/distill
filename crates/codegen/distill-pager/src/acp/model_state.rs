@@ -130,6 +130,9 @@ pub struct ModelState {
     pub effort_auto: bool,
     /// Session Ultracode mode (`/ultracode`); the prompt status line shows `Ultracode: on|off`.
     pub ultracode: bool,
+    /// The `(main, worker)` models Auto routing chose for this session; `None`
+    /// when the selected Main and Worker run as configured.
+    pub auto_route: Option<(acp::ModelId, acp::ModelId)>,
     /// External override for the context window size (tokens).
     /// When set, `get_context_window()` returns this instead of reading from the current model's metadata.
     /// Used for subagent views where SubagentProgress reports the actual window size.
@@ -165,6 +168,19 @@ impl ModelState {
         } else {
             Some(current.0.to_string())
         }
+    }
+
+    /// Reads `_meta.autoRoute` from a session model state or a model-switch response.
+    pub fn parse_auto_route(meta: Option<&acp::Meta>) -> Option<(acp::ModelId, acp::ModelId)> {
+        let route = meta?.get("autoRoute")?;
+        let id = |key: &str| route.get(key)?.as_str().map(acp::ModelId::new);
+        Some((id("mainModelId")?, id("workerModelId")?))
+    }
+
+    pub fn display_name(&self, id: &acp::ModelId) -> String {
+        self.available
+            .get(id)
+            .map_or_else(|| id.0.to_string(), |info| info.name.clone())
     }
 
     pub fn worker_model_name(&self) -> Option<String> {
@@ -443,6 +459,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
     fn from(state: Option<acp::SessionModelState>) -> Self {
         state
             .map(|state| {
+                let auto_route = Self::parse_auto_route(state.meta.as_ref());
                 let mut models = IndexMap::new();
                 for model in state.available_models {
                     models.insert(model.model_id.clone(), model);
@@ -468,6 +485,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     // explicit level (`/effort <level>`, `--effort`) clears it.
                     effort_auto: distill_shell::jev::effort_auto_cached(),
                     ultracode: false,
+                    auto_route,
                     context_window_override: None,
                 }
             })
@@ -540,6 +558,30 @@ mod tests {
     fn sample_session_model_state() -> acp::SessionModelState {
         let id = acp::ModelId::new(Arc::from("m"));
         acp::SessionModelState::new(id.clone(), vec![acp::ModelInfo::new(id, "M".to_string())])
+    }
+
+    /// The footer must name the pair Auto actually runs, not the configured
+    /// Main/Worker: the screenshot bug showed GPT while Claude answered.
+    #[test]
+    fn auto_route_meta_drives_the_footer() {
+        let main = acp::ModelId::new("claude/opus");
+        let worker = acp::ModelId::new("claude/haiku");
+        let meta = serde_json::json!({"autoRoute": {"mainModelId": "claude/opus", "workerModelId": "claude/haiku"}});
+        let mut wire = acp::SessionModelState::new(
+            main.clone(),
+            vec![
+                acp::ModelInfo::new(main.clone(), "Opus".to_string()),
+                acp::ModelInfo::new(worker.clone(), "Haiku".to_string()),
+            ],
+        );
+        wire.meta = meta.as_object().cloned();
+        let mut state = ModelState::from(Some(wire));
+        state.worker_model = Some(acp::ModelId::new("chatgpt/luna"));
+        assert_eq!(state.auto_route, Some((main, worker)));
+        let tiers = crate::views::prompt_widget::PromptModelTiers::from_model_state(&state).unwrap();
+        assert!(tiers.main.starts_with("Auto → Opus"), "{}", tiers.main);
+        assert_eq!(tiers.worker.as_deref(), Some("Auto → Haiku (auto)"));
+        assert_eq!(ModelState::from(Some(sample_session_model_state())).auto_route, None);
     }
 
     fn state_with_meta(meta: Option<serde_json::Value>) -> ModelState {

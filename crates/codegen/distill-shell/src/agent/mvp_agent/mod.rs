@@ -1255,6 +1255,7 @@ pub(crate) mod reasoning_effort;
 mod sampler_prewarm;
 mod session_setup;
 pub use session_setup::SessionSetupPhase;
+pub(crate) use agent_ops::auto_route_meta;
 mod subagent_spawn;
 pub(crate) mod test_hooks;
 mod turn_end;

@@ -144,6 +144,29 @@ pub(crate) fn execute(
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
     match effect {
+        Effect::ToggleAutoRouting => {
+            tasks.spawn(async {
+                let result = tokio::task::spawn_blocking(|| {
+                    let store = distill_shell::accounts::AccountStore::default();
+                    let mut routing = store.load_routing().map_err(|_| "Could not read Auto routing.".to_owned())?;
+                    if !routing.enabled && routing.options.is_empty() {
+                        return Err("Auto has no routes yet. Add them in /accounts.".to_owned());
+                    }
+                    routing.enabled = !routing.enabled;
+                    store.save_routing(&routing).map_err(|_| "Could not save Auto routing.".to_owned())?;
+                    let main = (!routing.enabled)
+                        .then(|| distill_shell::config::load_effective_config().ok())
+                        .flatten()
+                        .and_then(|config| config.get("models")?.get("default")?.as_str().map(str::to_owned))
+                        .filter(|id| !id.trim().is_empty())
+                        .map(acp::ModelId::new);
+                    Ok((routing.enabled, main))
+                })
+                .await
+                .unwrap_or_else(|_| Err("Auto routing update stopped unexpectedly.".to_owned()));
+                TaskResult::AutoRoutingSet { result }
+            });
+        }
         Effect::Accounts(task) => {
             let model_tx = acp_tx.clone();
             let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2200,9 +2223,11 @@ pub(crate) fn execute(
                             model_id.clone(),
                         )
                         .meta(meta);
+                    let mut auto_route = None;
                     let result = acp_send(req, &tx)
                         .await
                         .map(|response| {
+                            auto_route = crate::acp::ModelState::parse_auto_route(response.meta.as_ref());
                             response
                                 .meta
                                 .and_then(|meta| meta.get("contextWindow").and_then(|value| value.as_u64()))
@@ -2220,12 +2245,16 @@ pub(crate) fn execute(
                                 SwitchModelError::Other(sanitize_user_error(&e.to_string()))
                             }
                         });
-                    TaskResult::SwitchModelComplete {
+                    TaskResult::WithAutoRoute {
                         agent_id,
-                        model_id,
-                        effort,
-                        result,
-                        prev_model_id,
+                        auto_route,
+                        result: Box::new(TaskResult::SwitchModelComplete {
+                            agent_id,
+                            model_id,
+                            effort,
+                            result,
+                            prev_model_id,
+                        }),
                     }
                 });
         }
