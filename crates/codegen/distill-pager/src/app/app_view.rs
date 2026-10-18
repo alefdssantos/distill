@@ -3406,46 +3406,17 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             use crate::views::modal_window as mw;
             if let crate::views::modal::ActiveModal::DocViewer {
                 tier_editor: Some(editor),
-                window,
                 ..
             } = modal
             {
-                let chrome_cfg = mw::ModalWindowConfig {
-                    title: "",
-                    tabs: None,
-                    shortcuts: &[],
-                    sizing: mw::ModalSizing::default(),
-                    fold_info: None,
-                };
-                match mw::handle_modal_key(window, key, &chrome_cfg) {
-                    mw::ModalWindowOutcome::CloseRequested => {
-                        *ctx.welcome_doc_viewer = None;
-                        return InputOutcome::Changed;
-                    }
-                    mw::ModalWindowOutcome::Handled => return InputOutcome::Changed,
-                    mw::ModalWindowOutcome::Unhandled => {}
-                    _ => return InputOutcome::Changed,
+                let (close, action, changed) = editor.handle_key(key).host();
+                if close {
+                    *ctx.welcome_doc_viewer = None;
                 }
-                return match editor.handle_key(key) {
-                    crate::views::tier_editor::TierEditorOutcome::Submitted {
-                        main,
-                        worker,
-                        utility,
-                        ultracode,
-                    } => InputOutcome::Action(Action::SetTierEditor {
-                        main,
-                        worker,
-                        utility,
-                        ultracode,
-                    }),
-                    crate::views::tier_editor::TierEditorOutcome::Cancelled => {
-                        *ctx.welcome_doc_viewer = None;
-                        InputOutcome::Changed
-                    }
-                    crate::views::tier_editor::TierEditorOutcome::Changed => InputOutcome::Changed,
-                    crate::views::tier_editor::TierEditorOutcome::Unchanged => {
-                        InputOutcome::Unchanged
-                    }
+                return match action {
+                    Some(action) => InputOutcome::Action(action),
+                    None if changed => InputOutcome::Changed,
+                    None => InputOutcome::Unchanged,
                 };
             }
             if let crate::views::modal::ActiveModal::DocViewer { window, scroll, .. } = modal {
@@ -3480,6 +3451,23 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             return match editor.insert_paste(text) {
                 crate::views::tier_editor::TierEditorOutcome::Changed => InputOutcome::Changed,
                 _ => InputOutcome::Unchanged,
+            };
+        }
+        if let Event::Mouse(mouse) = ev
+            && let crate::views::modal::ActiveModal::DocViewer {
+                tier_editor: Some(editor),
+                ..
+            } = modal
+        {
+            let (close, action, changed) =
+                editor.handle_mouse(mouse.kind, mouse.column, mouse.row).host();
+            if close {
+                *ctx.welcome_doc_viewer = None;
+            }
+            return match action {
+                Some(action) => InputOutcome::Action(action),
+                None if changed => InputOutcome::Changed,
+                None => InputOutcome::Unchanged,
             };
         }
         if let Event::Mouse(mouse) = ev {

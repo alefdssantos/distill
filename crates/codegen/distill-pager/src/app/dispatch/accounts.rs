@@ -140,6 +140,21 @@ pub(super) fn auto_routing_set(
     app: &mut AppView,
     result: Result<(bool, Option<acp::ModelId>), String>,
 ) -> Vec<Effect> {
+    let editor = match app.active_view {
+        ActiveView::Agent(id) => app
+            .agents
+            .get_mut(&id)
+            .and_then(|agent| agent.active_modal.as_mut()),
+        ActiveView::Welcome => app.welcome_doc_viewer.as_mut(),
+        _ => None,
+    };
+    if let Some(ActiveModal::DocViewer {
+        tier_editor: Some(editor),
+        ..
+    }) = editor
+    {
+        editor.auto_routing_result(result.as_ref().map(|(enabled, _)| *enabled).map_err(Clone::clone));
+    }
     let (enabled, main) = match result {
         Ok(state) => state,
         Err(message) => {

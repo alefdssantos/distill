@@ -305,48 +305,20 @@ impl AgentView {
             }
         }
 
-        // The tier form uses the same modal chrome as a document, but keeps
-        // keyboard input in its three line editors.
+        // The model setup screen draws its own frame and handles every key itself.
         if let ActiveModal::DocViewer {
             tier_editor: Some(editor),
-            window,
             ..
         } = modal
         {
-            let chrome_cfg = mw::ModalWindowConfig {
-                title: "",
-                tabs: None,
-                shortcuts: &[],
-                sizing: mw::ModalSizing::default(),
-                fold_info: None,
-            };
-            match mw::handle_modal_key(window, key, &chrome_cfg) {
-                ModalWindowOutcome::CloseRequested => {
-                    self.active_modal = None;
-                    return InputOutcome::Changed;
-                }
-                ModalWindowOutcome::Handled => return InputOutcome::Changed,
-                ModalWindowOutcome::Unhandled => {}
-                _ => return InputOutcome::Changed,
+            let (close, action, changed) = editor.handle_key(key).host();
+            if close {
+                self.active_modal = None;
             }
-            return match editor.handle_key(key) {
-                crate::views::tier_editor::TierEditorOutcome::Submitted {
-                    main,
-                    worker,
-                    utility,
-                    ultracode,
-                } => InputOutcome::Action(Action::SetTierEditor {
-                    main,
-                    worker,
-                    utility,
-                    ultracode,
-                }),
-                crate::views::tier_editor::TierEditorOutcome::Cancelled => {
-                    self.active_modal = None;
-                    InputOutcome::Changed
-                }
-                crate::views::tier_editor::TierEditorOutcome::Changed => InputOutcome::Changed,
-                crate::views::tier_editor::TierEditorOutcome::Unchanged => InputOutcome::Unchanged,
+            return match action {
+                Some(action) => InputOutcome::Action(action),
+                None if changed => InputOutcome::Changed,
+                None => InputOutcome::Unchanged,
             };
         }
 
@@ -1484,35 +1456,18 @@ impl AgentView {
 
         if let Some(ActiveModal::DocViewer {
             tier_editor: Some(editor),
-            window,
             ..
         }) = self.active_modal.as_mut()
         {
-            let chrome_cfg = mw::ModalWindowConfig {
-                title: "",
-                tabs: None,
-                shortcuts: &[],
-                sizing: mw::ModalSizing::default(),
-                fold_info: None,
-            };
-            return match mw::handle_modal_mouse(window, mouse.kind, mouse.column, mouse.row) {
-                ModalWindowOutcome::CloseRequested => {
-                    self.active_modal = None;
-                    InputOutcome::Changed
-                }
-                ModalWindowOutcome::Handled => InputOutcome::Changed,
-                ModalWindowOutcome::Unhandled => {
-                    let _ = editor;
-                    if matches!(
-                        mouse.kind,
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                    ) {
-                        InputOutcome::Changed
-                    } else {
-                        InputOutcome::Unchanged
-                    }
-                }
-                _ => InputOutcome::Changed,
+            let (close, action, changed) =
+                editor.handle_mouse(mouse.kind, mouse.column, mouse.row).host();
+            if close {
+                self.active_modal = None;
+            }
+            return match action {
+                Some(action) => InputOutcome::Action(action),
+                None if changed => InputOutcome::Changed,
+                None => InputOutcome::Unchanged,
             };
         }
 

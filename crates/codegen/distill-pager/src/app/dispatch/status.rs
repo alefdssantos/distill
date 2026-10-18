@@ -915,7 +915,7 @@ pub(super) fn dispatch_show_release_notes(
 pub(super) fn dispatch_show_tier_editor(app: &mut AppView) -> Vec<Effect> {
     let make_modal =
         |models: &crate::acp::ModelState| crate::views::modal::ActiveModal::DocViewer {
-            title: "Model tiers".to_owned(),
+            title: "Models".to_owned(),
             content: crate::slash::commands::provider_status::tier_status(
                 models.current_model_id_str(),
             ),
