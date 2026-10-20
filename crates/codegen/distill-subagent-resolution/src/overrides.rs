@@ -195,7 +195,7 @@ mod tests {
         reasoning_effort: Option<&str>,
     ) -> SubagentRuntimeOverrides {
         SubagentRuntimeOverrides {
-            ultracode: None,
+            execution_policy: None,
             inherited_model: None,
             inherited_reasoning_effort: None,
             inherited_cwd: None,

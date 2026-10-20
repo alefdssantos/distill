@@ -146,8 +146,8 @@ pub(crate) struct AgentRebuildSpec {
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,
-    pub ultracode_policy:
-        Option<distill_tools::implementations::distill::task::types::UltracodePolicy>,
+    pub execution_policy:
+        Option<distill_tools::implementations::distill::task::types::ExecutionPolicy>,
     pub subagents_max_depth: u32,
     pub session_id_str: String,
     pub blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
@@ -268,7 +268,7 @@ impl AgentRebuildSpec {
             monitor_event_buffer,
             user_question_tx,
             subagent_depth,
-            ultracode_policy,
+            execution_policy,
             subagents_max_depth,
             session_id_str,
             blocking_wait_depth,
@@ -453,7 +453,7 @@ impl AgentRebuildSpec {
                                 ),
                             ),
                         );
-                    if let Some(policy) = ultracode_policy.clone() {
+                    if let Some(policy) = execution_policy.clone() {
                         resources.insert(policy);
                     }
                     resources.insert(SubagentDepthCounter(*subagent_depth));
@@ -570,7 +570,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         monitor_event_buffer: None,
         user_question_tx: uq_tx,
         subagent_depth: 0,
-        ultracode_policy: None,
+        execution_policy: None,
         subagents_max_depth: distill_tools::implementations::distill::task::MAX_SUBAGENT_DEPTH,
         session_id_str: "test-session".to_string(),
         blocking_wait_depth: Arc::new(crate::tools::tool_context::BlockingWaitState::new()),

@@ -95,4 +95,5 @@ its subagents, and neither has an off switch:
 - [Accounts and local models](docs/local-models.md)
 - [How Jev routes work](docs/jev-routing.md)
 - [UltraCode activation, hierarchy limits and paired comparisons](docs/ultracode.md)
+- [UltraFast execution mode and paired speed/quality evaluation](docs/ultrafast.md)
 - [Where the token savings come from](docs/token-saver.md)

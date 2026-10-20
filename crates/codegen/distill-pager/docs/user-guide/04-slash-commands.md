@@ -126,15 +126,21 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
-### `/ultracode [on|off]`
+### `/ultrafast [on|off]` and `/ultracode [on|off]`
 
-Toggle Ultracode for the current session. While on, every request you send is treated as a dynamic workflow: the main agent plans briefly, fans the independent parts out to parallel subagents, then integrates the results and runs the verification itself. Trivial single-step requests are still done directly. Ultracode is independent of the reasoning effort and never changes it. The prompt status line shows `Ultracode: on` or `Ultracode: off`, and the Models screen has an Ultracode toggle. `/ultracode` with no argument flips the current state.
+Each session has one execution mode: **Normal**, **UltraFast**, or **UltraCode**. Selecting either command turns off the other mode. With no argument, the command toggles its mode; `off` returns to Normal only when that command's mode is active.
+
+UltraFast prioritizes direct execution and parallel independent tasks, with one level of executors and the same required verification. UltraCode keeps its existing task decomposition policy. Both preserve an explicitly selected model and reasoning effort.
+
+The prompt footer shows `Mode: Normal`, `Mode: UltraFast`, or `Mode: UltraCode`. In the Models screen, select **Execution** and press Enter to cycle through the three modes, then save.
 
 ```
-/ultracode
+/ultrafast on
 /ultracode on
 /ultracode off
 ```
+
+For headless prompts, use `--ultrafast` or `--ultracode`. The flags cannot be combined, and the prompt is sent only after the agent confirms the requested mode.
 
 ### `/always-approve`
 

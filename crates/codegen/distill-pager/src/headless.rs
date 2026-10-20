@@ -91,7 +91,7 @@ pub struct HeadlessOptions {
     /// Effort token (`--reasoning-effort` / `--effort`); resolved like `/effort` after models load.
     pub reasoning_effort: Option<String>,
     /// Explicitly enable the real session mode before sending the prompt.
-    pub ultracode: bool,
+    pub execution_mode: distill_tool_types::ExecutionMode,
     /// Wait for background tasks to report `task_completed` before exiting (default true).
     pub wait_for_background: bool,
     /// Max time to wait for background work to finish after the first turn ends.
@@ -831,37 +831,37 @@ fn headless_materialize_ctx(
 }
 
 /// Keep activation and prompt transmission in one ordered ACP path. An activation
-/// failure must never silently run the requested comparison with UltraCode off.
+/// failure must never silently run the requested comparison in a different mode.
 async fn send_headless_prompt(
     acp_tx: &AcpAgentTx,
     request: acp::PromptRequest,
-    ultracode: bool,
+    mode: distill_tool_types::ExecutionMode,
 ) -> distill_acp_lib::AcpResult<acp::PromptResponse> {
-    if ultracode {
+    if mode != distill_tool_types::ExecutionMode::Normal {
         let params = serde_json::value::to_raw_value(&serde_json::json!({
             "sessionId": request.session_id.0.as_ref(),
-            "enabled": true,
+            "mode": mode,
         }))
-        .map_err(|e| distill_acp_lib::acp_internal_error(format!("UltraCode activation: {e}")))?;
+        .map_err(|e| distill_acp_lib::acp_internal_error(format!("{} activation: {e}", mode.label())))?;
         let response: acp::ExtResponse = acp_send(
             acp::ExtRequest::new(
-                distill_shell::extensions::session_ultracode::SET_METHOD,
+                "x.ai/session/execution_mode/set",
                 params.into(),
             ),
             acp_tx,
         )
         .await?;
         let response: serde_json::Value = serde_json::from_str(response.0.get()).map_err(|e| {
-            distill_acp_lib::acp_internal_error(format!("UltraCode activation: {e}"))
+            distill_acp_lib::acp_internal_error(format!("{} activation: {e}", mode.label()))
         })?;
-        if response.get("enabled").and_then(serde_json::Value::as_bool) != Some(true) {
+        if response.get("mode") != Some(&serde_json::json!(mode)) {
             return Err(distill_acp_lib::acp_internal_error(
-                "UltraCode activation did not confirm enabled=true",
+                format!("{} activation did not confirm the requested mode", mode.label()),
             ));
         }
         eprint_line(&format!(
-            "UltraCode enabled for session {}",
-            request.session_id.0
+            "{} enabled for session {}",
+            mode.label(), request.session_id.0
         ));
     }
     acp_send(request, acp_tx).await
@@ -1283,7 +1283,7 @@ pub async fn run_single_turn(
                 Some(Box::pin(send_headless_prompt(
                     &acp_tx,
                     request,
-                    options.ultracode,
+                    options.execution_mode,
                 ))),
                 Some(PromptAckWatch::new(prompt_id, Instant::now())),
             )

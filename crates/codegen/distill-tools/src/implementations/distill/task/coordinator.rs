@@ -1323,7 +1323,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .get(id)
             .map(|child| &child.request)
             .or_else(|| self.pending.get(id).map(|child| &child.request))
-            .is_some_and(|request| request.runtime_overrides.ultracode.is_some());
+            .is_some_and(|request| request.runtime_overrides.execution_policy.is_some());
         if recursive {
             let descendants: Vec<_> = self
                 .active

@@ -8,7 +8,7 @@ use crate::implementations::distill::task::types::{
     SubagentCancelRequest, SubagentClearUsageNotAppliedRequest, SubagentCompletionsRequest,
     SubagentListActiveRequest, SubagentLoopUnitActiveRequest, SubagentMarkUsageNotAppliedRequest,
     SubagentOutstandingReply, SubagentOutstandingRequest, SubagentOwner, SubagentRegistryCounts,
-    SubagentRequest, SubagentSnapshotStatus, SubagentWaitPromptDrainedRequest, UltracodePolicy,
+    SubagentRequest, SubagentSnapshotStatus, SubagentWaitPromptDrainedRequest, ExecutionPolicy,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -4175,14 +4175,44 @@ async fn workflow_spawns_bypass_the_session_concurrent_limit() {
 
 fn ultracode_request(id: &str) -> SubagentRequest {
     let mut request = request(id, true);
-    request.runtime_overrides.ultracode = Some(UltracodePolicy {
-        enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    request.runtime_overrides.execution_policy = Some(ExecutionPolicy {
+        mode: std::sync::Arc::new(distill_tool_types::AtomicExecutionMode::new(distill_tool_types::ExecutionMode::Ultracode)),
         max_depth: 2,
         off_max_depth: 1,
         capability_ceiling: None,
         allowed_subagent_types: None,
     });
     request
+}
+
+#[tokio::test]
+async fn ultrafast_runs_siblings_concurrently_but_rejects_nested_spawns() {
+    let mut harness = harness_with_config(false, limited(2, LimitBehavior::Queue));
+    let mut tasks = Vec::new();
+    let mode = std::sync::Arc::new(distill_tool_types::AtomicExecutionMode::default());
+    for id in ["first", "second"] {
+        let mut request = ultracode_request(id);
+        request.runtime_overrides.execution_policy.as_mut().unwrap().mode = mode.clone();
+        request.runtime_overrides.execution_policy.as_mut().unwrap().off_max_depth = 3;
+        let backend = harness.backend.clone();
+        tasks.push(tokio::spawn(async move { backend.spawn(request, None).await }));
+        harness.requests.recv().await.expect("sibling observed");
+        harness.started.recv().await.expect("sibling active before either finishes");
+        // The first child started in Normal; a mode change also reaches it.
+        mode.store(distill_tool_types::ExecutionMode::Ultrafast);
+    }
+    let result = session_backend(&harness, "first").spawn(ultracode_request("nested"), None).await.unwrap();
+    assert!(!result.success);
+    assert!(result.error.unwrap().contains("depth limit"));
+    assert_eq!(harness.backend.registry_counts().await.queued, 0);
+    assert!(harness.requests.try_recv().is_err());
+    for id in ["first", "second"] {
+        harness.backend.cancel(id).await;
+    }
+    for task in tasks {
+        assert!(task.await.unwrap().unwrap().cancelled);
+    }
+    harness.actor.abort();
 }
 
 #[tokio::test]
@@ -4221,9 +4251,9 @@ async fn ultracode_nested_spawn_at_capacity_returns_local_fallback_without_queue
 async fn ultracode_nested_depth_and_root_prompt_are_preserved_and_cancelled_as_one_tree() {
     let mut harness = harness(false, std::time::Duration::from_secs(60));
     let mut pinned_outer = ultracode_request("outer");
-    let policy = pinned_outer.runtime_overrides.ultracode.as_mut().unwrap();
+    let policy = pinned_outer.runtime_overrides.execution_policy.as_mut().unwrap();
     policy.off_max_depth = 3;
-    let enabled = policy.enabled.clone();
+    let enabled = policy.mode.clone();
     pinned_outer.cwd = Some("/isolated-parent".into());
     pinned_outer.runtime_overrides.model = Some("test-model".into());
     pinned_outer.runtime_overrides.reasoning_effort = Some("high".into());
@@ -4271,7 +4301,7 @@ async fn ultracode_nested_depth_and_root_prompt_are_preserved_and_cancelled_as_o
         .unwrap();
     assert!(!refused.success);
     assert!(refused.error.unwrap().contains("depth limit"));
-    enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+    enabled.store(distill_tool_types::ExecutionMode::Normal);
     let third = tokio::spawn({
         let backend = grandchild_backend.clone();
         async move {
@@ -4287,15 +4317,15 @@ async fn ultracode_nested_depth_and_root_prompt_are_preserved_and_cancelled_as_o
         .expect("off-mode depth-three child admitted");
     assert_eq!(observed.runtime_overrides.spawn_depth, Some(3));
     assert!(
-        observed.runtime_overrides.ultracode.is_none(),
-        "off must not reactivate adaptive mode"
+        observed.runtime_overrides.execution_policy.as_ref().is_some_and(|policy| !policy.is_enabled()),
+        "Normal retains the shared switch without activating adaptive mode"
     );
     harness
         .started
         .recv()
         .await
         .expect("depth-three child active");
-    enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+    enabled.store(distill_tool_types::ExecutionMode::Ultracode);
     let refused = grandchild_backend
         .spawn(ultracode_request("on-again-too-deep"), None)
         .await
@@ -4315,10 +4345,10 @@ async fn ultracode_output_budgeted_parent_remains_a_leaf_when_mode_is_off_or_on(
     outer_request.runtime_overrides.output_token_budget = Some(32);
     let enabled = outer_request
         .runtime_overrides
-        .ultracode
+        .execution_policy
         .as_ref()
         .unwrap()
-        .enabled
+        .mode
         .clone();
     let outer = tokio::spawn({
         let backend = harness.backend.clone();
@@ -4335,13 +4365,13 @@ async fn ultracode_output_budgeted_parent_remains_a_leaf_when_mode_is_off_or_on(
         .await
         .expect("budgeted parent active");
     let child_backend = session_backend(&harness, "budgeted");
-    enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+    enabled.store(distill_tool_types::ExecutionMode::Normal);
     let refused = child_backend
         .spawn(request("off-nested", true), None)
         .await
         .unwrap();
     assert!(refused.error.unwrap().contains("output-budgeted"));
-    enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+    enabled.store(distill_tool_types::ExecutionMode::Ultracode);
     let refused = child_backend
         .spawn(ultracode_request("on-nested"), None)
         .await
@@ -4363,10 +4393,10 @@ async fn ultracode_isolated_spawner_is_a_leaf_before_admission_even_when_off_or_
     owner_request.resume_from = Some("durable-source-outside-completed-cache".into());
     let enabled = owner_request
         .runtime_overrides
-        .ultracode
+        .execution_policy
         .as_ref()
         .unwrap()
-        .enabled
+        .mode
         .clone();
     let owner = tokio::spawn({
         let backend = harness.backend.clone();
@@ -4376,7 +4406,7 @@ async fn ultracode_isolated_spawner_is_a_leaf_before_admission_even_when_off_or_
     harness.started.recv().await.unwrap();
     let child_backend = session_backend(&harness, "isolated-owner");
     for (index, mode) in [true, false, true].into_iter().enumerate() {
-        enabled.store(mode, std::sync::atomic::Ordering::Relaxed);
+        enabled.store(if mode { distill_tool_types::ExecutionMode::Ultracode } else { distill_tool_types::ExecutionMode::Normal });
         let mut nested = ultracode_request(&format!("denied-{index}"));
         nested.run_in_background = index == 2;
         nested.resume_from = Some("another-durable-source".into());

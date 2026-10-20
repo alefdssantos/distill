@@ -1,6 +1,18 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+#[test]
+fn execution_mode_metadata_prefers_exclusive_mode_and_reads_legacy_sessions() {
+    use distill_tool_types::ExecutionMode;
+    let parse = |meta: serde_json::Value| parse_session_execution_mode(meta.as_object());
+    assert_eq!(
+        parse(serde_json::json!({"executionMode": "ultrafast", "ultracode": true})),
+        Some(ExecutionMode::Ultrafast)
+    );
+    assert_eq!(parse(serde_json::json!({"ultracode": true})), Some(ExecutionMode::Ultracode));
+    assert_eq!(parse(serde_json::json!({"ultracode": false})), Some(ExecutionMode::Normal));
+    assert_eq!(parse_session_execution_mode(None), None);
+}
 fn nth<T>(xs: &[T], i: usize) -> &T {
     let Some(x) = xs.get(i) else {
         panic!("expected index {i}, len {}", xs.len());

@@ -670,3 +670,39 @@ async fn report_budget_skips_sessions_that_are_not_fresh_children() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn ultrafast_keeps_permitted_tools_and_skills_without_selection_calls() {
+    with_actor(|actor| async move {
+        actor
+            .execution_mode
+            .store(distill_tool_types::ExecutionMode::Ultrafast);
+        seed_catalog(&actor).await;
+        ask_about(&actor, "fix the parser");
+        let _ = crate::jev::take_test_asked_questions();
+        let defs = actor
+            .jev_filter_tool_definitions(optional_family_defs(), false)
+            .await;
+        assert_eq!(
+            defs.iter().map(|d| &d.function.name).collect::<Vec<_>>(),
+            optional_family_defs()
+                .iter()
+                .map(|d| &d.function.name)
+                .collect::<Vec<_>>()
+        );
+        assert!(actor.jev_ledger.borrow().deferred_tools.is_empty());
+        assert!(
+            actor
+                .jev_model_skill_projection(Some("fix the parser"))
+                .await
+                .is_none(),
+            "None keeps the full catalog"
+        );
+        assert_eq!(
+            actor.tool_bridge_handle().slash_skills().await.len(),
+            SKILLS.len()
+        );
+        assert!(crate::jev::take_test_asked_questions().is_empty());
+    })
+    .await;
+}

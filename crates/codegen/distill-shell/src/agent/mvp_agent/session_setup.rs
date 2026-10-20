@@ -987,10 +987,15 @@ impl MvpAgent {
         let config_options = self.acp_config_options(Some(&session_id), &models);
         self.report_setup_phase(SessionSetupPhase::ResponseReady);
         if let Some(meta) = meta.as_object_mut() {
-            let enabled = self
+            let mode = self
                 .resident_handle(&session_id)
-                .is_some_and(|handle| handle.ultracode.load(std::sync::atomic::Ordering::Relaxed));
-            meta.insert("ultracode".into(), serde_json::Value::Bool(enabled));
+                .map(|handle| handle.execution_mode.load())
+                .unwrap_or_default();
+            meta.insert("executionMode".into(), serde_json::json!(mode));
+            meta.insert(
+                "ultracode".into(),
+                serde_json::Value::Bool(mode == distill_tool_types::ExecutionMode::Ultracode),
+            );
         }
         Ok(acp::NewSessionResponse::new(session_id)
             .models(Some(models))
@@ -1498,10 +1503,15 @@ impl MvpAgent {
         distill_telemetry::unified_log::info("session loaded", Some(session_id.0.as_ref()), None);
         let config_options = self.acp_config_options(Some(&session_id), &model_state);
         if let Some(meta) = response_meta.as_object_mut() {
-            let enabled = self
+            let mode = self
                 .resident_handle(&session_id)
-                .is_some_and(|handle| handle.ultracode.load(std::sync::atomic::Ordering::Relaxed));
-            meta.insert("ultracode".into(), serde_json::Value::Bool(enabled));
+                .map(|handle| handle.execution_mode.load())
+                .unwrap_or_default();
+            meta.insert("executionMode".into(), serde_json::json!(mode));
+            meta.insert(
+                "ultracode".into(),
+                serde_json::Value::Bool(mode == distill_tool_types::ExecutionMode::Ultracode),
+            );
         }
         let response = acp::LoadSessionResponse::new()
             .models(Some(model_state))

@@ -428,6 +428,25 @@ pub(crate) fn parse_session_memory_mode(
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
 }
+/// Prefer the exclusive mode; retain readback for sessions from older shells.
+pub(crate) fn parse_session_execution_mode(
+    resp_meta: Option<&acp::Meta>,
+) -> Option<distill_tool_types::ExecutionMode> {
+    let meta = resp_meta?;
+    meta.get("executionMode")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .or_else(|| {
+            meta.get("ultracode")
+                .and_then(serde_json::Value::as_bool)
+                .map(|enabled| {
+                    if enabled {
+                        distill_tool_types::ExecutionMode::Ultracode
+                    } else {
+                        distill_tool_types::ExecutionMode::Normal
+                    }
+                })
+        })
+}
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
 pub(crate) fn is_disk_full_error(raw: &str) -> bool {
     raw.contains(distill_fast_worktree::OUT_OF_DISK_CONTEXT)

@@ -4,60 +4,38 @@ use super::support::*;
 use super::*;
 
 #[tokio::test]
-async fn ultracode_reminder_only_when_on_and_effort_untouched() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (actor, _gateway_rx) = build_actor().await;
-            let effort_before = actor
-                .chat_state_handle
-                .get_sampling_config()
-                .await
-                .map(|cfg| cfg.reasoning_effort);
-
-            actor.inject_ultracode_reminder();
-            assert_eq!(
-                actor.chat_state_handle.get_conversation_len().await,
-                0,
-                "off must push nothing"
-            );
-
-            actor.ultracode.store(true, std::sync::atomic::Ordering::Relaxed);
-            actor.inject_ultracode_reminder();
-            let conv = actor.chat_state_handle.get_conversation().await;
-            assert_eq!(conv.len(), 1);
-            let text = conv[0].text_content();
-            assert!(text.contains("<system-reminder>"), "{text}");
-            assert!(text.contains("Ultracode mode is ON"), "{text}");
-
-            actor.ultracode.store(false, std::sync::atomic::Ordering::Relaxed);
-            actor.inject_ultracode_reminder();
-            assert_eq!(
-                actor.chat_state_handle.get_conversation_len().await,
-                1,
-                "off again must push nothing more"
-            );
-
-            let effort_after = actor
-                .chat_state_handle
-                .get_sampling_config()
-                .await
-                .map(|cfg| cfg.reasoning_effort);
-            assert_eq!(effort_before, effort_after, "Ultracode must not touch effort");
-        })
-        .await;
+async fn execution_mode_reminder_supersedes_previous_modes_without_changing_effort() {
+    use distill_tool_types::ExecutionMode;
+    tokio::task::LocalSet::new().run_until(async {
+        let (actor, _gateway_rx) = build_actor().await;
+        let before = actor.chat_state_handle.get_sampling_config().await.map(|cfg| cfg.reasoning_effort);
+        for (mode, expected) in [
+            (ExecutionMode::Normal, "Normal execution mode is active"),
+            (ExecutionMode::Ultracode, "Ultracode mode is ON"),
+            (ExecutionMode::Ultrafast, "UltraFast mode is active"),
+            (ExecutionMode::Normal, "Normal execution mode is active"),
+        ] {
+            actor.execution_mode.store(mode);
+            actor.inject_execution_mode_reminder();
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let text = conversation.last().unwrap().text_content();
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("supersedes all earlier"), "{text}");
+        }
+        assert_eq!(before, actor.chat_state_handle.get_sampling_config().await.map(|cfg| cfg.reasoning_effort));
+    }).await;
 }
 
 #[tokio::test]
-async fn ultracode_policy_survives_agent_rebuild_and_shared_off() {
-    use distill_tools::implementations::distill::task::types::UltracodePolicy;
+async fn execution_policy_survives_agent_rebuild_and_shared_off() {
+    use distill_tools::implementations::distill::task::types::ExecutionPolicy;
     tokio::task::LocalSet::new()
         .run_until(async {
             let mut spec = crate::session::agent_rebuild::test_rebuild_spec_default();
-            let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let enabled = std::sync::Arc::new(distill_tool_types::AtomicExecutionMode::new(distill_tool_types::ExecutionMode::Ultracode));
             let mutable = std::sync::Arc::get_mut(&mut spec).unwrap();
-            mutable.ultracode_policy = Some(UltracodePolicy {
-                enabled: enabled.clone(),
+            mutable.execution_policy = Some(ExecutionPolicy {
+                mode: enabled.clone(),
                 max_depth: 2,
                 off_max_depth: 1,
                 capability_ceiling: None,
@@ -83,18 +61,18 @@ async fn ultracode_policy_survives_agent_rebuild_and_shared_off() {
             let before = first
                 .tool_bridge()
                 .toolset()
-                .get_resource_cloned::<UltracodePolicy>()
+                .get_resource_cloned::<ExecutionPolicy>()
                 .await
                 .unwrap();
             let after = rebuilt
                 .tool_bridge()
                 .toolset()
-                .get_resource_cloned::<UltracodePolicy>()
+                .get_resource_cloned::<ExecutionPolicy>()
                 .await
                 .unwrap();
-            assert!(std::sync::Arc::ptr_eq(&before.enabled, &after.enabled));
+            assert!(std::sync::Arc::ptr_eq(&before.mode, &after.mode));
             assert_eq!(after.max_depth, 2);
-            enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+            enabled.store(distill_tool_types::ExecutionMode::Normal);
             assert!(!before.is_enabled() && !after.is_enabled());
         })
         .await;

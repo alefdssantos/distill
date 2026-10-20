@@ -786,8 +786,8 @@ pub(crate) struct SessionActor {
     /// sessions for catalog refreshes, so this must not be read from it while
     /// routing a child.
     pub(crate) jev_effort_auto: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Ultracode mode: every user turn gets the orchestration reminder. Shared with the session handle.
-    pub(crate) ultracode: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Exclusive execution mode, shared with the session handle and eligible task descendants.
+    pub(crate) execution_mode: std::sync::Arc<distill_tool_types::AtomicExecutionMode>,
     /// Canonical catalogue identity for this session. The chat/sampler model
     /// may be a provider wire slug or an effort variant, so it cannot be used
     /// to infer the selected catalogue entry or an explicit model pin.

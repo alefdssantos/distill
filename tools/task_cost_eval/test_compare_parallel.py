@@ -122,6 +122,28 @@ class VerdictTest(unittest.TestCase):
 
 
 class DryRunTest(unittest.TestCase):
+    def test_ultrafast_plan_uses_explicit_modes_and_common_capacity(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(compare_parallel, 'run_one') as run_one:
+            code = compare_parallel.main([
+                '--baseline-binary', '/same/distill', '--candidate-binary', '/same/distill',
+                '--baseline-mode', 'normal', '--candidate-mode', 'ultrafast', '--transport', 'acp',
+                '--max-concurrent', '8', '--order-seed', '20261020', '--verdict', 'ultrafast',
+                '--work-root', '/unused', '--output', '/unused.json'])
+        self.assertEqual(code, 0)
+        self.assertIn('"execution_mode": "normal"', out.getvalue())
+        self.assertIn('"execution_mode": "ultrafast"', out.getvalue())
+        self.assertIn('"max_concurrent": 8', out.getvalue())
+        run_one.assert_not_called()
+
+    def test_conflicting_mode_flags_are_rejected_before_execution(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit), \
+                mock.patch.object(compare_parallel, 'run_one') as run_one:
+            compare_parallel.main(['--baseline-binary', '/same', '--candidate-binary', '/same',
+                '--candidate-ultracode', '--candidate-mode', 'ultrafast',
+                '--work-root', '/unused', '--output', '/unused.json', '--execute'])
+        run_one.assert_not_called()
+
     def test_seeded_three_repetitions_balance_starts_and_keep_pairs_adjacent(self):
         cohort = {'cases': COHORT['cases'][:4]}
         plan = compare_parallel.plan_runs(cohort, 3, 20261009)
@@ -226,6 +248,30 @@ class DryRunTest(unittest.TestCase):
 
 
 class ActivationRunTest(unittest.TestCase):
+    def test_ultrafast_acknowledgement_and_fixed_capacity_are_recorded(self):
+        case = COHORT['cases'][0]
+        accounting = {'accounting_complete': True, 'credit_estimate': 1.0, 'calls': 1,
+                      'call_usage': [{'complete': True}], 'accounting_evidence': {'complete': True},
+                      **{field: 1 for field in compare_parallel.TOKEN_FIELDS}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            peer = fake_peer(root)
+            profile = root / 'profile'
+            profile.mkdir()
+            (profile / 'codex-auth.json').write_text('{}')
+            with mock.patch.object(compare_parallel, 'distill_accounting', return_value=accounting), \
+                    mock.patch.object(compare_parallel, 'run_grader', return_value={
+                        'exit_code': 0, 'timed_out': False, 'wall_time_s': .01}), \
+                    mock.patch.dict(os.environ, {key: '99' for key in compare_parallel.CAPACITY_ENV}):
+                result = compare_parallel.run_one(peer, 'candidate', case, 1, root / 'runs', profile, 3,
+                    frozen_inputs=compare_parallel.case_hashes(case), binary_hash=compare_parallel._sha256_file(peer),
+                    transport='acp', execution_mode='ultrafast', max_concurrent=8)
+            self.assertTrue(result['passed'])
+            self.assertTrue(result['execution_mode_activation_confirmed'])
+            self.assertFalse(result['ultracode_activation_confirmed'])
+            self.assertEqual(result['settings']['execution_mode'], 'ultrafast')
+            self.assertEqual(result['settings']['capacity_env'], {key: '8' for key in compare_parallel.CAPACITY_ENV})
+
     def test_unverified_teardown_skips_grading_and_ledger_reads(self):
         case = COHORT['cases'][0]
         with tempfile.TemporaryDirectory() as directory:

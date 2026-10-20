@@ -113,6 +113,13 @@ impl SessionActor {
         names: &[String],
         pending: &[&'static str],
     ) {
+        if self.execution_mode.load() == distill_tool_types::ExecutionMode::Ultrafast {
+            // Optional selection costs another model round. Keep every permitted
+            // family and let the executing model choose its tools directly.
+            self.jev_ledger.borrow_mut().tool_families.record(request, pending, None);
+            self.jev_offer_joined_tools(names, pending).await;
+            return;
+        }
         let pending_names: Vec<String> = names
             .iter()
             .filter(|name| {

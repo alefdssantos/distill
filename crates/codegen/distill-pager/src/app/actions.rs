@@ -709,12 +709,12 @@ pub enum Action {
     },
     /// Open the editable main, worker, and utility model form.
     ShowTierEditor,
-    /// Save all model tier fields and the Ultracode toggle from the tier editor.
+    /// Save all model tier fields and the execution mode from the tier editor.
     SetTierEditor {
         main: String,
         worker: String,
         utility: String,
-        ultracode: bool,
+        execution_mode: distill_tool_types::ExecutionMode,
     },
     /// Rename the current session's title/summary.
     RenameSession {
@@ -743,8 +743,11 @@ pub enum Action {
     /// Set plan mode on/off. Per-session, ACP-mediated (not persisted to config.toml).
     /// `/plan <desc>` uses `EnterPlanMode` instead because it also starts a turn.
     SetPlanMode(PlanModeKind),
-    /// `/ultracode`: `None` toggles, `Some(on)` sets. Per-session, ACP-mediated.
-    SetUltracode(Option<bool>),
+    /// Update the session execution mode through an atomic ACP operation.
+    SetExecutionMode {
+        mode: distill_tool_types::ExecutionMode,
+        operation: distill_tool_types::ExecutionModeOperation,
+    },
     /// Open the feedback modal (every screen mode).
     /// The payload's images were drained at slash-execution time; the modal composer adopts them as chips.
     OpenFeedbackModal(crate::views::feedback_modal::OpenFeedbackModal),
@@ -1722,10 +1725,11 @@ pub enum Effect {
         session_id: acp::SessionId,
         model_id: acp::ModelId,
     },
-    /// Set or toggle the session-scoped Ultracode flag (`x.ai/session/ultracode/set`).
-    SetUltracode {
+    /// Set the exclusive session execution mode (`x.ai/session/execution_mode/set`).
+    SetExecutionMode {
         session_id: acp::SessionId,
-        enabled: Option<bool>,
+        mode: distill_tool_types::ExecutionMode,
+        operation: distill_tool_types::ExecutionModeOperation,
     },
     /// Set the session-scoped worker model.
     SetSessionWorker {
@@ -2577,8 +2581,8 @@ pub enum TaskResult {
     WithPinnedMemoryMode {
         agent_id: AgentId,
         memory_mode: Option<distill_shell::config::MemoryMode>,
-        /// Actual session mode from ACP; older responses omit it and default off.
-        ultracode: Option<bool>,
+        /// Actual session mode from ACP; older responses default to Normal.
+        execution_mode: Option<distill_tool_types::ExecutionMode>,
         result: Box<TaskResult>,
     },
     /// A `command` status line finished.
@@ -2873,10 +2877,10 @@ pub enum TaskResult {
         /// Forwarded from `Effect::SwitchModel.prev_model_id` for rollback on `IncompatibleAgent`.
         prev_model_id: Option<acp::ModelId>,
     },
-    /// Ultracode set/toggle finished; `enabled` is the agent-reported new state.
-    UltracodeSet {
+    /// Execution-mode update finished; the agent-reported mode is authoritative.
+    ExecutionModeSet {
         session_id: acp::SessionId,
-        result: Result<bool, String>,
+        result: Result<distill_tool_types::ExecutionMode, String>,
     },
     /// Auto effort request finished; a rejection rolls the optimistic flag back.
     EffortAutoSet {

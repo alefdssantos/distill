@@ -53,6 +53,7 @@ distill-tty-utils = { workspace = true }
 # `collect_crashed()` for the startup crash notice.
 distill-active-sessions = { workspace = true }
 distill-config = { workspace = true }
+distill-tool-types = { workspace = true }
 distill-sandbox = { path = "../distill-sandbox", default-features = false }
 distill-extra-ca = { workspace = true }
 

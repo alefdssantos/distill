@@ -459,9 +459,7 @@ pub(crate) fn execute(
                             TaskResult::WithPinnedMemoryMode {
                                 agent_id,
                                 memory_mode: parse_session_memory_mode(resp.meta.as_ref()),
-                                ultracode: resp.meta.as_ref()
-                                    .and_then(|meta| meta.get("ultracode"))
-                                    .and_then(serde_json::Value::as_bool),
+                                execution_mode: parse_session_execution_mode(resp.meta.as_ref()),
                                 result: Box::new(TaskResult::SessionCreated {
                                     agent_id,
                                     session_id: resp.session_id,
@@ -630,9 +628,7 @@ pub(crate) fn execute(
                             TaskResult::WithPinnedMemoryMode {
                                 agent_id,
                                 memory_mode: parse_session_memory_mode(resp.meta.as_ref()),
-                                ultracode: resp.meta.as_ref()
-                                    .and_then(|meta| meta.get("ultracode"))
-                                    .and_then(serde_json::Value::as_bool),
+                                execution_mode: parse_session_execution_mode(resp.meta.as_ref()),
                                 result: Box::new(TaskResult::WorktreeSessionCreated {
                                     agent_id,
                                     session_id: resp.session_id,
@@ -706,9 +702,7 @@ pub(crate) fn execute(
                             TaskResult::WithPinnedMemoryMode {
                                 agent_id,
                                 memory_mode: parse_session_memory_mode(resp.meta.as_ref()),
-                                ultracode: resp.meta.as_ref()
-                                    .and_then(|meta| meta.get("ultracode"))
-                                    .and_then(serde_json::Value::as_bool),
+                                execution_mode: parse_session_execution_mode(resp.meta.as_ref()),
                                 result: Box::new(TaskResult::SessionLoaded {
                                     agent_id,
                                     session_id: acp_session_id,
@@ -2119,27 +2113,29 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
-        Effect::SetUltracode { session_id, enabled } => {
+        Effect::SetExecutionMode { session_id, mode, operation } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
                 let params = serde_json::json!({
                     "sessionId": session_id.0.to_string(),
-                    "enabled": enabled,
+                    "mode": mode,
+                    "operation": operation,
                 });
                 let request = acp::ExtRequest::new(
-                    "x.ai/session/ultracode/set",
+                    "x.ai/session/execution_mode/set",
                     serde_json::value::to_raw_value(&params)
-                        .expect("serialize ultracode params")
+                        .expect("serialize execution mode params")
                         .into(),
                 );
                 let result = match acp_send(request, &tx).await {
                     Ok(resp) => serde_json::from_str::<serde_json::Value>(resp.0.get())
                         .ok()
-                        .and_then(|v| v.get("enabled").and_then(serde_json::Value::as_bool))
+                        .and_then(|v| v.get("mode").cloned())
+                        .and_then(|v| serde_json::from_value(v).ok())
                         .ok_or_else(|| "unexpected response from agent".to_owned()),
                     Err(e) => Err(sanitize_user_error(&e.to_string())),
                 };
-                TaskResult::UltracodeSet { session_id, result }
+                TaskResult::ExecutionModeSet { session_id, result }
             });
         }
         Effect::SetSessionWorker { session_id, model_id, effort } => {

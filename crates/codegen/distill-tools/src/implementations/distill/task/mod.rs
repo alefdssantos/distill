@@ -46,8 +46,8 @@ pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resourc
         .get::<MaxSubagentDepth>()
         .map(|d| d.0)
         .unwrap_or(MAX_SUBAGENT_DEPTH);
-    match resources.get::<UltracodePolicy>() {
-        Some(policy) if policy.is_enabled() => policy.max_depth,
+    match resources.get::<ExecutionPolicy>() {
+        Some(policy) if policy.is_enabled() => policy.effective_max_depth(),
         Some(policy) => ordinary.min(policy.off_max_depth),
         None => ordinary,
     }
@@ -380,7 +380,7 @@ impl distill_tool_runtime::Tool for TaskTool {
             parent_session_id,
             parent_prompt_id,
             foreground_wait,
-            ultracode,
+            execution_policy,
         ) = {
             let res = resources.lock().await;
 
@@ -418,13 +418,11 @@ impl distill_tool_runtime::Tool for TaskTool {
                 parent_session_id,
                 parent_prompt_id,
                 foreground_wait,
-                res.get::<UltracodePolicy>()
-                    .filter(|policy| policy.is_enabled() || depth > 0)
-                    .cloned(),
+                res.get::<ExecutionPolicy>().cloned(),
             )
         };
 
-        if let Some(allowed) = ultracode
+        if let Some(allowed) = execution_policy
             .as_ref()
             .and_then(|policy| policy.allowed_subagent_types.as_ref())
             && !allowed.iter().any(|name| name == &input.subagent_type)
@@ -633,7 +631,7 @@ impl distill_tool_runtime::Tool for TaskTool {
             resume_from,
             cwd,
             runtime_overrides: SubagentRuntimeOverrides {
-                ultracode: ultracode.clone(),
+                execution_policy: execution_policy.clone(),
                 inherited_model: None,
                 inherited_reasoning_effort: None,
                 inherited_cwd: None,
@@ -645,7 +643,7 @@ impl distill_tool_runtime::Tool for TaskTool {
                 // populate it in-process; model-facing spawns stay `None`.
                 capability_mode: intersect_capability_modes(
                     input.capability_mode,
-                    ultracode
+                    execution_policy
                         .as_ref()
                         .and_then(|policy| policy.capability_ceiling),
                 ),
@@ -977,13 +975,13 @@ mod tests {
     #[tokio::test]
     async fn ultracode_task_inherits_shared_mode_and_capability_and_off_restores_depth() {
         let (backend, mut rx) = make_backend();
-        let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let enabled = Arc::new(distill_tool_types::AtomicExecutionMode::new(distill_tool_types::ExecutionMode::Ultracode));
         let mut resources = Resources::new();
         resources.insert(backend);
         resources.insert(SubagentDepthCounter(2));
         resources.insert(MaxSubagentDepth(3));
-        resources.insert(UltracodePolicy {
-            enabled: enabled.clone(),
+        resources.insert(ExecutionPolicy {
+            mode: enabled.clone(),
             max_depth: 2,
             off_max_depth: 3,
             capability_ceiling: Some(distill_tool_types::SubagentCapabilityMode::ReadOnly),
@@ -999,16 +997,16 @@ mod tests {
         .await;
         assert!(on.unwrap_err().to_string().contains("depth limit"));
         assert!(rx.try_recv().is_err());
-        enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+        enabled.store(distill_tool_types::ExecutionMode::Normal);
         let inherited_enabled = enabled.clone();
         let drain = tokio::spawn(async move {
             let mut request = unwrap_spawn(rx.recv().await.expect("nested spawn"));
             let inherited = request
                 .runtime_overrides
-                .ultracode
+                .execution_policy
                 .as_ref()
                 .expect("inherited policy");
-            assert!(Arc::ptr_eq(&inherited.enabled, &inherited_enabled));
+            assert!(Arc::ptr_eq(&inherited.mode, &inherited_enabled));
             assert_eq!(
                 request.runtime_overrides.capability_mode,
                 Some(distill_tool_types::SubagentCapabilityMode::ReadOnly)
@@ -1024,7 +1022,7 @@ mod tests {
             "off restores ordinary depth three for the same depth-two child"
         );
         drain.await.unwrap();
-        enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        enabled.store(distill_tool_types::ExecutionMode::Ultracode);
         let result = distill_tool_runtime::Tool::run(
             &TaskTool,
             test_ctx(shared),

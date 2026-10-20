@@ -2208,15 +2208,15 @@ async fn ultracode_nested_shell_inherits_distinct_shared_cwd_without_reparenting
             });
             ctx.fs = Arc::new(distill_workspace::file_system::LocalFs::new(root.clone()));
             let root_fs = ctx.fs.clone();
-            let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let policy = UltracodePolicy {
-                enabled: enabled.clone(),
+            let enabled = Arc::new(distill_tool_types::AtomicExecutionMode::new(distill_tool_types::ExecutionMode::Ultracode));
+            let policy = ExecutionPolicy {
+                mode: enabled.clone(),
                 max_depth: 2,
                 off_max_depth: 3,
                 capability_ceiling: None,
                 allowed_subagent_types: None,
             };
-            ctx.parent_ultracode_policy = Some(policy.clone());
+            ctx.parent_execution_policy = Some(policy.clone());
             ctx.subagents_max_depth = 3;
             let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
             ctx.parent_cmd_tx = Some(parent_cmd_tx);
@@ -2237,7 +2237,7 @@ async fn ultracode_nested_shell_inherits_distinct_shared_cwd_without_reparenting
             let mut request = auto_wake_test_request(&id);
             request.run_in_background = false;
             request.prompt = "Verify the bounded descendant objective".into();
-            request.runtime_overrides.ultracode = Some(policy);
+            request.runtime_overrides.execution_policy = Some(policy);
             request.runtime_overrides.model_override_provenance = ModelOverrideProvenance::Tool;
             request.runtime_overrides.spawn_depth = Some(2);
             request.runtime_overrides.inherited_cwd = Some(ordinary.to_string_lossy().into_owned());
@@ -2265,14 +2265,14 @@ async fn ultracode_nested_shell_inherits_distinct_shared_cwd_without_reparenting
                     2
                 );
             }
-            enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+            enabled.store(distill_tool_types::ExecutionMode::Normal);
             assert_eq!(
                 distill_tools::implementations::distill::task::effective_max_subagent_depth(
                     &*resources.lock().await
                 ),
                 3
             );
-            enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+            enabled.store(distill_tool_types::ExecutionMode::Ultracode);
             assert_eq!(
                 distill_tools::implementations::distill::task::effective_max_subagent_depth(
                     &*resources.lock().await
@@ -2405,15 +2405,15 @@ async fn ultracode_durable_isolated_resume_is_a_leaf_with_mode_on_or_off() {
                 .await
                 .unwrap();
             server.set_response("isolated leaf completed");
-            let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let enabled = Arc::new(distill_tool_types::AtomicExecutionMode::new(distill_tool_types::ExecutionMode::Ultracode));
             for (mode, resumed_source) in [
                 (true, &source_info),
                 (false, &source_info),
                 (true, &shared_source_info),
             ] {
-                enabled.store(mode, std::sync::atomic::Ordering::Relaxed);
-                let policy = UltracodePolicy {
-                    enabled: enabled.clone(),
+                enabled.store(if mode { distill_tool_types::ExecutionMode::Ultracode } else { distill_tool_types::ExecutionMode::Normal });
+                let policy = ExecutionPolicy {
+                    mode: enabled.clone(),
                     max_depth: 2,
                     off_max_depth: 3,
                     capability_ceiling: None,
@@ -2429,7 +2429,7 @@ async fn ultracode_durable_isolated_resume_is_a_leaf_with_mode_on_or_off() {
                 configure_completion_harness(&mut ctx, &server, harness);
                 ctx.parent_cwd = root.clone();
                 ctx.parent_session_info = Some(root_info.clone());
-                ctx.parent_ultracode_policy = Some(policy.clone());
+                ctx.parent_execution_policy = Some(policy.clone());
                 let mut config = crate::agent::config::Config::default();
                 config.feature_values.insert(
                     crate::agent::config::Feature::SubagentWorktreeSnapshot,
@@ -2459,7 +2459,7 @@ async fn ultracode_durable_isolated_resume_is_a_leaf_with_mode_on_or_off() {
                 let mut request = auto_wake_test_request(&uuid::Uuid::now_v7().to_string());
                 request.prompt = "Continue in this isolated checkout locally".into();
                 request.resume_from = Some(resumed_source.id.to_string());
-                request.runtime_overrides.ultracode = mode.then_some(policy);
+                request.runtime_overrides.execution_policy = mode.then_some(policy);
                 request.runtime_overrides.model_override_provenance = ModelOverrideProvenance::Tool;
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -2486,12 +2486,12 @@ async fn ultracode_durable_isolated_resume_is_a_leaf_with_mode_on_or_off() {
                         "restored isolated children remain leaves at ordinary depth 3"
                     );
                     if mode {
-                        let leaf = child.ultracode_policy.as_ref().unwrap();
+                        let leaf = child.execution_policy.as_ref().unwrap();
                         assert_eq!(leaf.max_depth, child.subagent_depth);
                         assert_eq!(leaf.off_max_depth, child.subagent_depth);
-                        enabled.store(false, std::sync::atomic::Ordering::Relaxed);
+                        enabled.store(distill_tool_types::ExecutionMode::Normal);
                         assert!(!leaf.is_enabled());
-                        enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        enabled.store(distill_tool_types::ExecutionMode::Ultracode);
                         assert_eq!(leaf.max_depth, child.subagent_depth);
                     }
                 } else {

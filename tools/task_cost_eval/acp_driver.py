@@ -16,6 +16,8 @@ import time
 from .runner import _terminate_owned_group
 
 ULTRACODE_METHOD = '_x.ai/session/ultracode/set'
+EXECUTION_MODE_METHOD = '_x.ai/session/execution_mode/set'
+EXECUTION_MODES = ('normal', 'ultrafast', 'ultracode')
 HOOK_RUN_METHOD = '_x.ai/hooks/run'
 STOP_CALLBACK_ID = 'benchmark-root-stop'
 SHUTDOWN_GRACE = 2.0
@@ -137,6 +139,8 @@ class _Client:
         self.tools = {}
         self.pending = set()
         self.finished = set()
+        self.observed_subagents = set()
+        self.peak_live_subagents = 0
         self.stop_feedback = stop_feedback
         self.before_stop_feedback = before_stop_feedback
         self.stop_feedback_sent = False
@@ -329,9 +333,14 @@ class _Client:
                 self.finished.add(key)
             elif key not in self.finished:
                 self.pending.add(key)
+            if key[0] == 'subagent':
+                self.observed_subagents.add(key)
+                self.peak_live_subagents = max(self.peak_live_subagents,
+                    sum(1 for pending in self.pending if pending[0] == 'subagent'))
 
 
-def run_acp(command, *, cwd, environment, prompt, model, effort, ultracode, timeout, output, stop_feedback=None,
+def run_acp(command, *, cwd, environment, prompt, model, effort, ultracode=False, execution_mode=None,
+            timeout, output, stop_feedback=None,
             before_stop_feedback=None):
     """Return receipts and failure state; optionally deny one root Stop with feedback.
 
@@ -341,6 +350,9 @@ def run_acp(command, *, cwd, environment, prompt, model, effort, ultracode, time
     and model calls, and let failures abort the run. Omitted by default.
     Always stop the owned tree before returning.
     """
+    if execution_mode is not None and (execution_mode not in EXECUTION_MODES or ultracode):
+        raise ValueError('Use one execution_mode or the legacy ultracode flag')
+    activation_method = EXECUTION_MODE_METHOD if execution_mode is not None else ULTRACODE_METHOD
     result = {'session': None, 'setup_confirmed': False, 'completed': False, 'timed_out': False, 'error': None,
               'exit_code': None, 'cleanup_complete': False}
     process = client = tree = None
@@ -379,9 +391,14 @@ def run_acp(command, *, cwd, environment, prompt, model, effort, ultracode, time
             if (not isinstance(applied, dict) or applied.get('canonicalModelId') != model or applied.get('reasoningEffortAuto') is not auto
                     or (not auto and applied.get('reasoningEffort') != effort)):
                 raise AcpError('session/set_model did not confirm the requested model/effort')
-            activation = client.request(ULTRACODE_METHOD, {'sessionId': session, 'enabled': ultracode})
-            if activation.get('enabled') is not ultracode:
-                raise AcpError(f'UltraCode activation did not confirm enabled={ultracode}')
+            if execution_mode is not None:
+                activation = client.request(activation_method, {'sessionId': session, 'mode': execution_mode})
+                if activation.get('mode') != execution_mode:
+                    raise AcpError(f'Execution mode activation did not confirm mode={execution_mode}')
+            else:
+                activation = client.request(activation_method, {'sessionId': session, 'enabled': ultracode})
+                if activation.get('enabled') is not ultracode:
+                    raise AcpError(f'UltraCode activation did not confirm enabled={ultracode}')
             result['setup_confirmed'] = True
             response = client.request('session/prompt', {'sessionId': session,
                 'prompt': [{'type': 'text', 'text': prompt}], '_meta': {'screenMode': 'headless'}})
@@ -417,8 +434,10 @@ def run_acp(command, *, cwd, environment, prompt, model, effort, ultracode, time
                     except (OSError, TimeoutError, subprocess.SubprocessError):
                         pass
                 result['model_receipt'] = client.receipts.get('session/set_model')
-                result['activation_receipt'] = client.receipts.get(ULTRACODE_METHOD)
+                result['activation_receipt'] = client.receipts.get(activation_method)
                 result['prompt_receipt'] = client.receipts.get('session/prompt')
+                result['observed_subagent_attempts'] = len(client.observed_subagents)
+                result['observed_peak_live_subagents'] = client.peak_live_subagents
             if stop_feedback is not None:
                 result['stop_hook_receipts'] = client.stop_hook_receipts if client is not None else []
                 result['stop_feedback_sent'] = client.stop_feedback_sent if client is not None else False

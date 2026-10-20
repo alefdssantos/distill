@@ -209,7 +209,7 @@ pub enum ModelOverrideProvenance {
 #[derive(Debug, Clone, Default)]
 pub struct SubagentRuntimeOverrides {
     /// Host-owned recursive policy; never accepted from model JSON.
-    pub ultracode: Option<UltracodePolicy>,
+    pub execution_policy: Option<ExecutionPolicy>,
     /// Coordinator-owned immediate-spawner defaults, separate from caller pins.
     pub inherited_model: Option<String>,
     pub inherited_reasoning_effort: Option<String>,
@@ -258,20 +258,29 @@ pub fn intersect_capability_modes(
 /// Eligible Task descendants share the root switch and depth ceiling. Fresh
 /// ordinary roots keep a disabled switch; harness roles never inherit it.
 #[derive(Debug, Clone)]
-pub struct UltracodePolicy {
-    pub enabled: Arc<std::sync::atomic::AtomicBool>,
+pub struct ExecutionPolicy {
+    pub mode: Arc<distill_tool_types::AtomicExecutionMode>,
     pub max_depth: u32,
     pub off_max_depth: u32,
     pub capability_ceiling: Option<SubagentCapabilityMode>,
     pub allowed_subagent_types: Option<Vec<String>>,
 }
 
-impl UltracodePolicy {
+impl ExecutionPolicy {
     pub fn is_enabled(&self) -> bool {
-        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+        self.mode.load() != distill_tool_types::ExecutionMode::Normal
+    }
+
+    pub fn effective_max_depth(&self) -> u32 {
+        use distill_tool_types::ExecutionMode;
+        match self.mode.load() {
+            ExecutionMode::Normal => self.off_max_depth,
+            ExecutionMode::Ultrafast => self.max_depth.min(self.off_max_depth).min(1),
+            ExecutionMode::Ultracode => self.max_depth,
+        }
     }
 }
-register_resource!("distill", "UltracodePolicy", UltracodePolicy);
+register_resource!("distill", "ExecutionPolicy", ExecutionPolicy);
 
 /// Re-export of [`distill_tool_types::is_not_sentinel`] for existing call sites.
 pub use distill_tool_types::is_not_sentinel;

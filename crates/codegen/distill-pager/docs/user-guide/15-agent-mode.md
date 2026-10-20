@@ -261,23 +261,25 @@ The response is the effective worker after the change:
 
 `modelId` is `null` when no worker runs. `source` is `"session"` for a session choice and `"config"` when it was cleared and the config applies. An unknown `sessionId` returns a resource-not-found error.
 
-### Ultracode
+### Execution modes
 
-Ultracode is a session-level flag. While on, every user turn of the main agent carries an extra `<system-reminder>` that tells it to plan, fan the work out to parallel subagents and integrate the results. While off, requests are unchanged. It never changes the reasoning effort. `initialize` advertises this as `"sessionUltracode": true` in `agentCapabilities._meta["x.ai/capabilities"]`.
+Each session has one execution mode: `normal`, `ultrafast`, or `ultracode`. Selecting a mode replaces the previous one. UltraFast prioritizes direct execution and parallel independent tasks; its child agents execute locally. UltraCode retains its existing decomposition policy. Both preserve explicit model and effort choices and required verification.
 
-Send the extension request `x.ai/session/ultracode/set` (on the JSON-RPC wire, `_x.ai/session/ultracode/set`):
-
-```json
-{ "sessionId": "…", "enabled": true }
-```
-
-`enabled` is optional; omitted toggles the current state. The response is the new state:
+Send `x.ai/session/execution_mode/set` (on the JSON-RPC wire, `_x.ai/session/execution_mode/set`):
 
 ```json
-{ "enabled": true }
+{ "sessionId": "…", "mode": "ultrafast" }
 ```
 
-The flag lives in memory for the session and is not written to `config.toml`. An unknown `sessionId` returns a resource-not-found error.
+The response confirms the effective mode:
+
+```json
+{ "mode": "ultrafast" }
+```
+
+The mode is saved with the session and restored when it loads. Session creation and load responses expose `executionMode` in `_meta`. It is not a global `config.toml` setting. Only the root session can change it; child agents share that selection. An unknown `sessionId` returns a resource-not-found error.
+
+The legacy `x.ai/session/ultracode/set` endpoint remains supported. `{ "sessionId": "…", "enabled": true }` selects UltraCode; `false` returns an active UltraCode session to Normal and leaves other modes unchanged. Omitting `enabled` toggles UltraCode. Its response remains `{ "enabled": true }` or `{ "enabled": false }`.
 
 ---
 

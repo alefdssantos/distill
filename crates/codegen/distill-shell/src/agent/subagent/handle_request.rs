@@ -692,7 +692,7 @@ pub(crate) async fn run_shell_child(
         );
         return child_run_output(failure_result(&request, &error), completion_data, None);
     }
-    if request.runtime_overrides.ultracode.is_some()
+    if request.runtime_overrides.execution_policy.is_some()
         && let Some(source) = resume_source.as_ref()
         && source.worktree_path.is_none()
         && !std::path::Path::new(&source.child_cwd).is_dir()
@@ -937,33 +937,33 @@ pub(crate) async fn run_shell_child(
         ctx.parent_depth,
         request.runtime_overrides.spawn_depth,
     );
-    let parent_ultracode = ctx
-        .parent_ultracode_policy
+    let parent_mode_active = ctx
+        .parent_execution_policy
         .as_ref()
         .is_some_and(|policy| policy.is_enabled());
-    let inherited_ultracode = request.runtime_overrides.ultracode.is_some();
-    let mut ultracode_policy = request.runtime_overrides.ultracode.clone().filter(|_| {
-        parent_ultracode
+    let inherited_mode_active = request.runtime_overrides.execution_policy.as_ref().is_some_and(|policy| policy.is_enabled());
+    let mut execution_policy = request.runtime_overrides.execution_policy.clone().filter(|_| {
+        ctx.parent_execution_policy.is_some()
             && !request.owner.is_workflow()
             && request.runtime_overrides.harness_agent_type.is_none()
             && request.runtime_overrides.model_override_provenance
                 == distill::task::types::ModelOverrideProvenance::Tool
     });
     if let (Some(policy), Some(root)) = (
-        ultracode_policy.as_mut(),
-        ctx.parent_ultracode_policy.as_ref(),
+        execution_policy.as_mut(),
+        ctx.parent_execution_policy.as_ref(),
     ) {
         // Wake requests may hold an old switch after the root was reloaded.
         // Current root state and configuration remain the authority.
-        policy.enabled = root.enabled.clone();
+        policy.mode = root.mode.clone();
         policy.max_depth = policy.max_depth.min(root.max_depth);
         policy.off_max_depth = policy.off_max_depth.min(root.off_max_depth);
     }
     let output_budgeted = request.runtime_overrides.output_token_budget.is_some();
     let isolated_leaf = worktree_path.is_some();
     let physical_leaf = isolated_leaf
-        || (output_budgeted && inherited_ultracode)
-        || (parent_ultracode && (request.owner.is_workflow() || ultracode_policy.is_none()));
+        || (output_budgeted && inherited_mode_active)
+        || (parent_mode_active && (request.owner.is_workflow() || execution_policy.is_none()));
     let ordinary_max_depth = if physical_leaf {
         child_depth
     } else {
@@ -974,13 +974,13 @@ pub(crate) async fn run_shell_child(
     let installation_max_depth = if physical_leaf {
         child_depth
     } else {
-        ultracode_policy
+        execution_policy
             .as_ref()
             .map_or(ordinary_max_depth, |policy| {
                 policy.max_depth.max(policy.off_max_depth)
             })
     };
-    if let Some(policy) = ultracode_policy.as_mut() {
+    if let Some(policy) = execution_policy.as_mut() {
         if physical_leaf {
             policy.max_depth = policy.max_depth.min(child_depth);
             policy.off_max_depth = policy.off_max_depth.min(child_depth);
@@ -1546,7 +1546,7 @@ pub(crate) async fn run_shell_child(
         .runtime_overrides
         .output_token_budget
         .map(crate::tools::tool_context::TaskOutputTokenBudget::limited);
-    tool_ctx.ultracode_policy = ultracode_policy;
+    tool_ctx.execution_policy = execution_policy;
     tool_ctx.task_output_token_budget = task_output_budget.clone();
     tool_ctx.sampler_retry_only_before_output = task_output_budget.is_some();
     tool_ctx.monitor_event_buffer = Some(MonitorEventBuffer::default());
@@ -1960,7 +1960,7 @@ pub(crate) async fn run_shell_child(
         ctx.managed_mcp_proxy_base_url.clone(),
         effective_model_id.clone(),
         ctx.yolo_mode
-            || (!(parent_ultracode || inherited_ultracode)
+            || (!(parent_mode_active || inherited_mode_active)
                 && matches!(
                     agent_permission_mode,
                     distill_agent::config::PermissionMode::BypassPermissions

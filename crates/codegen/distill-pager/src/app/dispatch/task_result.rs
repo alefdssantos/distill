@@ -459,7 +459,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::WithPinnedMemoryMode {
             agent_id,
             memory_mode,
-            ultracode,
+            execution_mode,
             result,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -478,10 +478,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && session_id.is_some()
                 && agent.session.session_id == session_id
             {
-                let enabled = ultracode.unwrap_or(false);
-                agent.session.models.ultracode = enabled;
+                let mode = execution_mode.unwrap_or_default();
+                agent.session.models.execution_mode = mode;
                 if app.active_view == ActiveView::Agent(agent_id) {
-                    app.models.ultracode = enabled;
+                    app.models.execution_mode = mode;
                 }
             }
             return effects;
@@ -1065,18 +1065,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             super::accounts::activation_finished(app, agent_id, &model_id, &result);
             handle_switch_model_complete(app, agent_id, model_id, effort, result, prev_model_id)
         },
-        TaskResult::UltracodeSet { session_id, result } => {
+        TaskResult::ExecutionModeSet { session_id, result } => {
             if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id.0) {
                 match result {
-                    Ok(enabled) => {
-                        agent.session.models.ultracode = enabled;
+                    Ok(mode) => {
+                        agent.session.models.execution_mode = mode;
                         agent.scrollback.push_block(RenderBlock::system(
-                            if enabled { "Ultracode on" } else { "Ultracode off" }.to_string(),
+                            format!("Execution mode: {}", mode.label()),
                         ));
                     }
                     Err(message) => {
                         agent.scrollback.push_block(RenderBlock::system(format!(
-                            "Couldn't change Ultracode: {message}"
+                            "Couldn't change execution mode: {message}"
                         )));
                     }
                 }

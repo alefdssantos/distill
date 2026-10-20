@@ -1104,14 +1104,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
-        Action::SetUltracode(enabled) => {
+        Action::SetExecutionMode { mode, operation } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
             };
             app.agents
                 .get(&id)
                 .and_then(|agent| agent.session.session_id.clone())
-                .map(|session_id| vec![Effect::SetUltracode { session_id, enabled }])
+                .map(|session_id| vec![Effect::SetExecutionMode { session_id, mode, operation }])
                 .unwrap_or_default()
         }
         Action::OpenFeedbackModal(open) => dispatch_open_feedback_modal(app, open),
@@ -1214,8 +1214,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             main,
             worker,
             utility,
-            ultracode,
-        } => set_tier_editor(app, main, worker, utility, ultracode),
+            execution_mode,
+        } => set_tier_editor(app, main, worker, utility, execution_mode),
         Action::ClearForkSecondaryModel => clear_fork_secondary_model(app),
         Action::SetMaxThoughtsWidth(v) => set_max_thoughts_width(app, v),
         Action::SetShowTips(v) => set_show_tips(app, v),
