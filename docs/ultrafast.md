@@ -111,4 +111,5 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest \
   tools.task_cost_eval.test_ultrafast_verdict
 ```
 
-No measured UltraFast speed or quality result is claimed by this protocol.
+The [initial measured evaluation](ultrafast-results.md) passed all 16 task runs but
+failed the 30% speed target against both Normal and UltraCode.
