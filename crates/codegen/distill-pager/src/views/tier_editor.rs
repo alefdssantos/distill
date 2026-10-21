@@ -446,7 +446,8 @@ impl TierEditorState {
                 self.execution_mode = match self.execution_mode {
                     distill_tool_types::ExecutionMode::Normal => distill_tool_types::ExecutionMode::Ultrafast,
                     distill_tool_types::ExecutionMode::Ultrafast => distill_tool_types::ExecutionMode::Ultracode,
-                    distill_tool_types::ExecutionMode::Ultracode => distill_tool_types::ExecutionMode::Normal,
+                    distill_tool_types::ExecutionMode::Ultracode => distill_tool_types::ExecutionMode::Ultrasave,
+                    distill_tool_types::ExecutionMode::Ultrasave => distill_tool_types::ExecutionMode::Normal,
                 };
                 TierEditorOutcome::Changed
             }
@@ -1531,16 +1532,18 @@ mod tests {
         use distill_tool_types::ExecutionMode;
         let mut state = editor(routes(false, 0));
         state.selected = super::HOME_EXECUTION_MODE;
-        for expected in [ExecutionMode::Ultrafast, ExecutionMode::Ultracode, ExecutionMode::Normal] {
+        for expected in [ExecutionMode::Ultrafast, ExecutionMode::Ultracode, ExecutionMode::Ultrasave, ExecutionMode::Normal] {
             assert_eq!(state.handle_key(&key(KeyCode::Enter)), TierEditorOutcome::Changed);
             assert_eq!(state.execution_mode, expected);
         }
         assert!(!state.dirty(), "returning to Normal restores the initial selection");
         state.handle_key(&key(KeyCode::Enter));
+        state.handle_key(&key(KeyCode::Enter));
+        state.handle_key(&key(KeyCode::Enter));
         let outcome = state.handle_key(&key(KeyCode::Char('s')));
         assert!(matches!(
             outcome,
-            TierEditorOutcome::Submitted { execution_mode: ExecutionMode::Ultrafast, .. }
+            TierEditorOutcome::Submitted { execution_mode: ExecutionMode::Ultrasave, .. }
         ));
     }
 

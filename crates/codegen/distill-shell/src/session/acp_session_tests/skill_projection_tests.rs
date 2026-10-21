@@ -706,3 +706,31 @@ async fn ultrafast_keeps_permitted_tools_and_skills_without_selection_calls() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn ultrasave_narrows_descriptors_but_preserves_pins_and_catalog_recovery() {
+    with_actor(|actor| async move {
+        let mut flags = distill_workspace::jev::JevFlags::harness_default();
+        flags.e_cheap_compress = false;
+        crate::jev::set_test_flags(flags);
+        crate::jev::set_test_decision_answers([None, None, None]);
+        let normal = actor.jev_model_skill_projection(Some("things")).await.unwrap();
+        actor.execution_mode.store(distill_tool_types::ExecutionMode::Ultrasave);
+        let saved = actor.jev_model_skill_projection(Some("things")).await.unwrap();
+        assert_eq!(normal.rows.matches("/skills/").count(), 8);
+        assert_eq!(saved.rows.matches("/skills/").count(), 4);
+        assert!(saved.envelope.len() < normal.envelope.len());
+        assert!(saved.envelope.contains("Full catalog index for recovery"));
+        assert_eq!(actor.tool_bridge_handle().slash_skills().await.len(), SKILLS.len());
+
+        actor.chat_state_handle.replace_conversation(vec![
+            ConversationItem::system("<skill name=\"humanizer\">Required instructions.</skill>"),
+        ]);
+        let pinned = actor.jev_model_skill_projection(Some(
+            "Use /pdf /graphify /seo-audit /blog-write /ads-google /slides",
+        )).await.unwrap();
+        for name in &SKILLS[..7] {
+            assert!(pinned.rows.contains(&format!("/skills/{name}/SKILL.md")));
+        }
+    }).await;
+}

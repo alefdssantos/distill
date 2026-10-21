@@ -12,6 +12,7 @@ pub enum ExecutionMode {
     Normal,
     Ultrafast,
     Ultracode,
+    Ultrasave,
 }
 
 /// Relative commands are resolved against the server's current session mode.
@@ -30,6 +31,7 @@ impl ExecutionMode {
             Self::Normal => "Normal",
             Self::Ultrafast => "UltraFast",
             Self::Ultracode => "UltraCode",
+            Self::Ultrasave => "UltraSave",
         }
     }
 }
@@ -48,6 +50,7 @@ impl AtomicExecutionMode {
             0 => ExecutionMode::Normal,
             1 => ExecutionMode::Ultrafast,
             2 => ExecutionMode::Ultracode,
+            3 => ExecutionMode::Ultrasave,
             _ => unreachable!("only ExecutionMode values can be stored"),
         }
     }

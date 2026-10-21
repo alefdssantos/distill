@@ -3956,6 +3956,7 @@
             (distill_tool_types::ExecutionMode::Normal, "Main: M (auto) | Mode: Normal | change"),
             (distill_tool_types::ExecutionMode::Ultrafast, "Main: M (auto) | Mode: UltraFast | change"),
             (distill_tool_types::ExecutionMode::Ultracode, "Main: M (auto) | Mode: UltraCode | change"),
+            (distill_tool_types::ExecutionMode::Ultrasave, "Main: M (auto) | Mode: UltraSave | change"),
         ] {
             models.execution_mode = mode;
             let tiers = PromptModelTiers::from_model_state(&models).expect("main model");

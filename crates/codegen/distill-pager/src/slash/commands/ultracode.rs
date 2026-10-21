@@ -7,6 +7,7 @@ use distill_tool_types::{ExecutionMode, ExecutionModeOperation};
 
 pub struct UltracodeCommand;
 pub struct UltrafastCommand;
+pub struct UltrasaveCommand;
 
 impl SlashCommand for UltracodeCommand {
     slash_meta! {
@@ -43,6 +44,25 @@ impl SlashCommand for UltrafastCommand {
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         select_mode(args, ExecutionMode::Ultrafast, self.usage())
+    }
+}
+
+impl SlashCommand for UltrasaveCommand {
+    slash_meta! {
+        name: "ultrasave",
+        description: "Select UltraSave: prioritize token economy",
+        usage: "/ultrasave [on|off]",
+        takes_args: true,
+        session_scoped: true,
+        arg_placeholder: "[on|off]",
+    }
+
+    fn takes_args_now(&self, _ctx: &AppCtx) -> bool {
+        false
+    }
+
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        select_mode(args, ExecutionMode::Ultrasave, self.usage())
     }
 }
 
@@ -99,14 +119,19 @@ mod tests {
         use ExecutionModeOperation::*;
         assert_operation("ultrafast", "on", Ultracode, Ultrafast, Set);
         assert_operation("ultracode", "on", Ultrafast, Ultracode, Set);
+        assert_operation("ultrasave", "on", Ultracode, Ultrasave, Set);
         // The client may still show Normal while the previous "on" is pending.
         assert_operation("ultrafast", " OFF ", Normal, Ultrafast, Disable);
         assert_operation("ultracode", "off", Ultrafast, Ultracode, Disable);
+        assert_operation("ultrasave", "off", Normal, Ultrasave, Disable);
         assert_operation("ultrafast", "", Normal, Ultrafast, Toggle);
         assert_operation("ultrafast", "", Ultrafast, Ultrafast, Toggle);
         assert_operation("ultracode", "", Ultracode, Ultracode, Toggle);
+        assert_operation("ultrasave", "", Normal, Ultrasave, Toggle);
+        assert_operation("ultrasave", "", Ultrasave, Ultrasave, Toggle);
         assert!(matches!(run("ultrafast", "bogus", Normal), CommandResult::Error(_)));
         assert!(matches!(run("ultracode", "bogus", Normal), CommandResult::Error(_)));
+        assert!(matches!(run("ultrasave", "bogus", Normal), CommandResult::Error(_)));
     }
 
     #[test]
@@ -126,8 +151,10 @@ mod tests {
         };
         assert!(!UltracodeCommand.takes_args_now(&ctx));
         assert!(!UltrafastCommand.takes_args_now(&ctx));
+        assert!(!UltrasaveCommand.takes_args_now(&ctx));
         let registry = CommandRegistry::new(builtin_commands());
         assert!(crate::slash::is_command_complete("/ultracode", &registry));
         assert!(crate::slash::is_command_complete("/ultrafast", &registry));
+        assert!(crate::slash::is_command_complete("/ultrasave", &registry));
     }
 }

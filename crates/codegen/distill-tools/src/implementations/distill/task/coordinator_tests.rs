@@ -4186,33 +4186,35 @@ fn ultracode_request(id: &str) -> SubagentRequest {
 }
 
 #[tokio::test]
-async fn ultrafast_runs_siblings_concurrently_but_rejects_nested_spawns() {
-    let mut harness = harness_with_config(false, limited(2, LimitBehavior::Queue));
-    let mut tasks = Vec::new();
-    let mode = std::sync::Arc::new(distill_tool_types::AtomicExecutionMode::default());
-    for id in ["first", "second"] {
-        let mut request = ultracode_request(id);
-        request.runtime_overrides.execution_policy.as_mut().unwrap().mode = mode.clone();
-        request.runtime_overrides.execution_policy.as_mut().unwrap().off_max_depth = 3;
-        let backend = harness.backend.clone();
-        tasks.push(tokio::spawn(async move { backend.spawn(request, None).await }));
-        harness.requests.recv().await.expect("sibling observed");
-        harness.started.recv().await.expect("sibling active before either finishes");
-        // The first child started in Normal; a mode change also reaches it.
-        mode.store(distill_tool_types::ExecutionMode::Ultrafast);
+async fn ultra_shallow_modes_run_siblings_concurrently_but_reject_nested_spawns() {
+    for selected_mode in [distill_tool_types::ExecutionMode::Ultrafast, distill_tool_types::ExecutionMode::Ultrasave] {
+        let mut harness = harness_with_config(false, limited(2, LimitBehavior::Queue));
+        let mut tasks = Vec::new();
+        let mode = std::sync::Arc::new(distill_tool_types::AtomicExecutionMode::default());
+        for id in ["first", "second"] {
+            let mut request = ultracode_request(id);
+            request.runtime_overrides.execution_policy.as_mut().unwrap().mode = mode.clone();
+            request.runtime_overrides.execution_policy.as_mut().unwrap().off_max_depth = 3;
+            let backend = harness.backend.clone();
+            tasks.push(tokio::spawn(async move { backend.spawn(request, None).await }));
+            harness.requests.recv().await.expect("sibling observed");
+            harness.started.recv().await.expect("sibling active before either finishes");
+            // The first child started in Normal; a mode change also reaches it.
+            mode.store(selected_mode);
+        }
+        let result = session_backend(&harness, "first").spawn(ultracode_request("nested"), None).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("depth limit"));
+        assert_eq!(harness.backend.registry_counts().await.queued, 0);
+        assert!(harness.requests.try_recv().is_err());
+        for id in ["first", "second"] {
+            harness.backend.cancel(id).await;
+        }
+        for task in tasks {
+            assert!(task.await.unwrap().unwrap().cancelled);
+        }
+        harness.actor.abort();
     }
-    let result = session_backend(&harness, "first").spawn(ultracode_request("nested"), None).await.unwrap();
-    assert!(!result.success);
-    assert!(result.error.unwrap().contains("depth limit"));
-    assert_eq!(harness.backend.registry_counts().await.queued, 0);
-    assert!(harness.requests.try_recv().is_err());
-    for id in ["first", "second"] {
-        harness.backend.cancel(id).await;
-    }
-    for task in tasks {
-        assert!(task.await.unwrap().unwrap().cancelled);
-    }
-    harness.actor.abort();
 }
 
 #[tokio::test]

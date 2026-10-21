@@ -37,6 +37,7 @@ fn session_execution_mode_readback_survives_model_initialization_and_resets_for_
     for (session, execution_mode, fresh) in [
         ("restored-ultrafast", Some(distill_tool_types::ExecutionMode::Ultrafast), false),
         ("restored-ultracode", Some(distill_tool_types::ExecutionMode::Ultracode), false),
+        ("restored-ultrasave", Some(distill_tool_types::ExecutionMode::Ultrasave), false),
         ("fresh-normal", Some(distill_tool_types::ExecutionMode::Normal), true),
         ("older-response", None, false),
     ] {

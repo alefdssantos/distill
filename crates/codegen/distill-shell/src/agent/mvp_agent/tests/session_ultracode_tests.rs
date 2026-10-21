@@ -186,7 +186,7 @@ fn execution_modes_replace_each_other_and_persist_without_changing_pins() {
         let dir = crate::session::persistence::ensure_owner_only_session_dir(&root.info).unwrap();
         std::fs::write(dir.join("ultracode.json"), r#"{"enabled":true}"#).unwrap();
         assert_eq!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap(), ExecutionMode::Ultracode);
-        for mode in [ExecutionMode::Ultrafast, ExecutionMode::Ultracode, ExecutionMode::Normal, ExecutionMode::Ultrafast] {
+        for mode in [ExecutionMode::Ultrafast, ExecutionMode::Ultracode, ExecutionMode::Ultrasave, ExecutionMode::Normal, ExecutionMode::Ultrafast] {
             let params = serde_json::json!({"sessionId": SESSION, "mode": mode});
             let request = acp::ExtRequest::new(
                 crate::extensions::session_ultracode::MODE_SET_METHOD,
@@ -207,6 +207,9 @@ fn execution_modes_replace_each_other_and_persist_without_changing_pins() {
             (ExecutionMode::Ultrafast, "toggle", ExecutionMode::Ultrafast),
             (ExecutionMode::Ultracode, "disable", ExecutionMode::Ultrafast),
             (ExecutionMode::Ultrafast, "disable", ExecutionMode::Normal),
+            (ExecutionMode::Ultrasave, "toggle", ExecutionMode::Ultrasave),
+            (ExecutionMode::Ultrafast, "disable", ExecutionMode::Ultrasave),
+            (ExecutionMode::Ultrasave, "toggle", ExecutionMode::Normal),
         ] {
             let params = serde_json::json!({"sessionId": SESSION, "mode": target, "operation": operation});
             let request = acp::ExtRequest::new(

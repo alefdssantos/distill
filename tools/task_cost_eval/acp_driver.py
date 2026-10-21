@@ -17,7 +17,7 @@ from .runner import _terminate_owned_group
 
 ULTRACODE_METHOD = '_x.ai/session/ultracode/set'
 EXECUTION_MODE_METHOD = '_x.ai/session/execution_mode/set'
-EXECUTION_MODES = ('normal', 'ultrafast', 'ultracode')
+EXECUTION_MODES = ('normal', 'ultrafast', 'ultracode', 'ultrasave')
 HOOK_RUN_METHOD = '_x.ai/hooks/run'
 STOP_CALLBACK_ID = 'benchmark-root-stop'
 SHUTDOWN_GRACE = 2.0

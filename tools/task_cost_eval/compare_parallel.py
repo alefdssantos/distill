@@ -21,6 +21,7 @@ from .evaluate import _sha256_file, _sha256_tree
 from .parallel_verdict import verdict
 from .runner import _terminate_owned_group
 from .ultrafast_verdict import verdict as ultrafast_verdict
+from .ultrasave_verdict import verdict as ultrasave_verdict
 
 ROOT = Path(__file__).resolve().parent
 MODEL = 'chatgpt/gpt-6.1-sol'
@@ -215,7 +216,7 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
     unchanged = frozen_inputs == case_hashes(case)
     binary_unchanged = binary_hash == _sha256_file(binary)
     if acp is None:
-        label = {'ultracode': 'UltraCode', 'ultrafast': 'UltraFast'}.get(mode)
+        label = {'ultracode': 'UltraCode', 'ultrafast': 'UltraFast', 'ultrasave': 'UltraSave'}.get(mode)
         activation_confirmed = (mode == 'normal' or
             f'{label} enabled for session {session}' in (output / 'stderr.txt').read_text())
         exit_code, transport_ok = process.returncode, True
@@ -271,8 +272,8 @@ def main(argv=None):
                         help='[models].worker for both variants')
     parser.add_argument('--utility-effort', default='auto', help='[jev.local].effort for both variants')
     parser.add_argument('--max-concurrent', type=int, help='common task, sampling, and workflow capacity')
-    parser.add_argument('--verdict', choices=('parallel', 'ultrafast'), default='parallel',
-                        help='ultrafast: same binary, ACP, >=30%% median paired savings, no quality regressions')
+    parser.add_argument('--verdict', choices=('parallel', 'ultrafast', 'ultrasave'), default='parallel',
+                        help='paired same-binary ACP gates: ultrafast >=30%% time savings; ultrasave >=20%% token savings')
     for variant in VARIANTS:
         mode = parser.add_mutually_exclusive_group()
         mode.add_argument(f'--{variant}-ultracode', action='store_true',
@@ -300,11 +301,13 @@ def main(argv=None):
         parser.error('--timeout must be finite and greater than zero')
     if args.max_concurrent is not None and args.max_concurrent < 1:
         parser.error('--max-concurrent must be at least 1')
-    if args.verdict == 'ultrafast' and (
-            args.transport != 'acp' or args.candidate_mode != 'ultrafast' or
-            args.baseline_mode not in ('normal', 'ultracode') or args.max_concurrent is None or
+    paired_mode = args.verdict in ('ultrafast', 'ultrasave')
+    baseline_modes = ('normal', 'ultracode') if args.verdict == 'ultrafast' else ('normal',)
+    if paired_mode and (
+            args.transport != 'acp' or args.candidate_mode != args.verdict or
+            args.baseline_mode not in baseline_modes or args.max_concurrent is None or
             args.order_seed is None or args.baseline_max_depth != args.candidate_max_depth):
-        parser.error('ultrafast verdict requires ACP, explicit normal/ultracode vs ultrafast modes, '
+        parser.error(f'{args.verdict} verdict requires ACP, explicit {"/".join(baseline_modes)} vs {args.verdict} modes, '
                      '--max-concurrent, --order-seed, and identical depth overrides')
     for variant in VARIANTS:
         depth = getattr(args, f'{variant}_max_depth')
@@ -338,8 +341,8 @@ def main(argv=None):
             parser.error(f'binary not found: {binary}')
     binaries = {variant: binary.expanduser().resolve() for variant, binary in binaries.items()}
     frozen = comparison_hashes(cohort, binaries, args.cohort)
-    if args.verdict == 'ultrafast' and len(set(frozen['binaries'].values())) != 1:
-        parser.error('ultrafast verdict requires the same binary SHA-256 for both variants')
+    if paired_mode and len(set(frozen['binaries'].values())) != 1:
+        parser.error(f'{args.verdict} verdict requires the same binary SHA-256 for both variants')
     if frozen['support_files'][str(args.cohort.resolve())] != hashlib.sha256(cohort_bytes).hexdigest():
         raise RuntimeError('Frozen cohort changed before execution')
     profile = args.distill_profile.expanduser()
@@ -368,7 +371,8 @@ def main(argv=None):
                'runs': runs, 'aggregates': aggregate(runs),
                'binaries': {v: {'path': str(b), 'sha256': frozen['binaries'][v]}
                             for v, b in binaries.items()}}
-    results['verdict'] = ultrafast_verdict(results) if args.verdict == 'ultrafast' else verdict(results)
+    results['verdict'] = {'parallel': verdict, 'ultrafast': ultrafast_verdict,
+                          'ultrasave': ultrasave_verdict}[args.verdict](results)
     invalid = [f'{r["variant"]} {r["case"]}#{r["repetition"]}: {r["acp"]["error"] or "ACP incomplete"}'
                for r in runs if r.get('acp') is not None
                and (not r['acp']['setup_confirmed'] or not r['acp']['cleanup_complete'])]

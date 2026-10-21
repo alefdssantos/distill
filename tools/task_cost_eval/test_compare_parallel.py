@@ -122,19 +122,21 @@ class VerdictTest(unittest.TestCase):
 
 
 class DryRunTest(unittest.TestCase):
-    def test_ultrafast_plan_uses_explicit_modes_and_common_capacity(self):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.object(compare_parallel, 'run_one') as run_one:
-            code = compare_parallel.main([
-                '--baseline-binary', '/same/distill', '--candidate-binary', '/same/distill',
-                '--baseline-mode', 'normal', '--candidate-mode', 'ultrafast', '--transport', 'acp',
-                '--max-concurrent', '8', '--order-seed', '20261020', '--verdict', 'ultrafast',
-                '--work-root', '/unused', '--output', '/unused.json'])
-        self.assertEqual(code, 0)
-        self.assertIn('"execution_mode": "normal"', out.getvalue())
-        self.assertIn('"execution_mode": "ultrafast"', out.getvalue())
-        self.assertIn('"max_concurrent": 8', out.getvalue())
-        run_one.assert_not_called()
+    def test_mode_comparison_plan_uses_explicit_modes_and_common_capacity(self):
+        for mode in ('ultrafast', 'ultrasave'):
+            out = io.StringIO()
+            with self.subTest(mode=mode), contextlib.redirect_stdout(out), \
+                    mock.patch.object(compare_parallel, 'run_one') as run_one:
+                code = compare_parallel.main([
+                    '--baseline-binary', '/same/distill', '--candidate-binary', '/same/distill',
+                    '--baseline-mode', 'normal', '--candidate-mode', mode, '--transport', 'acp',
+                    '--max-concurrent', '8', '--order-seed', '20261020', '--verdict', mode,
+                    '--work-root', '/unused', '--output', '/unused.json'])
+            self.assertEqual(code, 0)
+            self.assertIn('"execution_mode": "normal"', out.getvalue())
+            self.assertIn(f'"execution_mode": "{mode}"', out.getvalue())
+            self.assertIn('"max_concurrent": 8', out.getvalue())
+            run_one.assert_not_called()
 
     def test_conflicting_mode_flags_are_rejected_before_execution(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit), \

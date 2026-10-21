@@ -1,10 +1,10 @@
 # UltraFast
 
-A session has one execution mode: Normal, UltraFast, or UltraCode. Selecting
-UltraFast replaces UltraCode, and selecting UltraCode replaces UltraFast.
+A session has one execution mode: Normal, UltraFast, UltraCode, or UltraSave.
+Selecting a mode replaces the previous mode.
 Use `/ultrafast on`, `/ultrafast off`, or `/ultrafast` in the interactive UI;
 headless prompts accept `--ultrafast`. The CLI rejects simultaneous
-`--ultrafast --ultracode` flags.
+execution-mode flags.
 
 UltraFast prioritizes direct work, independent parallel tasks, and a shallow
 agent tree. It retains the requested model, explicit reasoning-effort choices,
@@ -14,7 +14,7 @@ do not establish a speed or quality improvement.
 ## Reproducible paired evaluation
 
 The existing comparison runner accepts explicit `--baseline-mode` and
-`--candidate-mode` values: `normal`, `ultrafast`, or `ultracode`. The historical
+`--candidate-mode` values: `normal`, `ultrafast`, `ultracode`, or `ultrasave`. The historical
 `--baseline-ultracode` and `--candidate-ultracode` flags remain available for
 comparisons with older binaries; they cannot be combined with an explicit mode
 for the same arm.

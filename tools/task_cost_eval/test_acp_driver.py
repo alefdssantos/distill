@@ -183,7 +183,7 @@ def drive(root, scenario='success', timeout=3, ultracode=True, effort='medium', 
 
 class AcpDriverTest(unittest.TestCase):
     def test_explicit_mode_receipt_precedes_prompt_and_observes_live_children(self):
-        for mode in ('normal', 'ultrafast', 'ultracode'):
+        for mode in ('normal', 'ultrafast', 'ultracode', 'ultrasave'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 result = drive(root, ultracode=False, execution_mode=mode)
@@ -197,13 +197,14 @@ class AcpDriverTest(unittest.TestCase):
                 self.assertEqual(result['observed_subagent_attempts'], 1)
                 self.assertEqual(result['observed_peak_live_subagents'], 1)
 
-    def test_ultrafast_mode_mismatch_never_sends_prompt(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            result = drive(root, 'wrong-mode', ultracode=False, execution_mode='ultrafast')
-            self.assertFalse(result['setup_confirmed'] or result['completed'])
-            self.assertIn('mode=ultrafast', result['error'])
-            self.assertFalse((root / 'prompt-seen').exists())
+    def test_execution_mode_mismatch_never_sends_prompt(self):
+        for mode in ('ultrafast', 'ultrasave'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = drive(root, 'wrong-mode', ultracode=False, execution_mode=mode)
+                self.assertFalse(result['setup_confirmed'] or result['completed'])
+                self.assertIn(f'mode={mode}', result['error'])
+                self.assertFalse((root / 'prompt-seen').exists())
 
     def test_stop_receipt_tracks_full_write_before_refresh_or_logging_failure(self):
         params = {'sessionId': 'runtime-session', 'hookCallbackId': acp_driver.STOP_CALLBACK_ID,

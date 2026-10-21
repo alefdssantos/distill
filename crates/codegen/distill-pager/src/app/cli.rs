@@ -584,11 +584,14 @@ pub struct PagerArgs {
     )]
     pub reasoning_effort: Option<String>,
     /// Enable session-scoped UltraCode before a headless prompt; independent of effort.
-    #[clap(long, conflicts_with = "ultrafast")]
+    #[clap(long, conflicts_with_all = ["ultrafast", "ultrasave"])]
     pub ultracode: bool,
     /// Enable session-scoped UltraFast before a headless prompt; preserves explicit effort.
-    #[clap(long, conflicts_with = "ultracode")]
+    #[clap(long, conflicts_with_all = ["ultracode", "ultrasave"])]
     pub ultrafast: bool,
+    /// Enable session-scoped UltraSave before a headless prompt; preserves explicit effort.
+    #[clap(long, conflicts_with_all = ["ultracode", "ultrafast"])]
+    pub ultrasave: bool,
     /// Extra rules to append to the system prompt.
     #[clap(long = "rules", alias = "append-system-prompt")]
     pub rules: Option<String>,
@@ -1584,22 +1587,33 @@ mod tests {
         assert!(!args.yolo);
     }
     #[test]
-    fn ultrafast_is_opt_in_and_conflicts_with_ultracode() {
-        assert!(!PagerArgs::try_parse_from(["distill", "-p", "task"]).unwrap().ultrafast);
-        let args = PagerArgs::try_parse_from([
-            "distill", "-p", "task", "--ultrafast", "--model", "chatgpt/gpt-6.1-sol",
-            "--effort", "high", "--permission-mode", "default",
-        ]).unwrap();
-        assert!(args.ultrafast);
-        assert!(!args.ultracode);
-        assert_eq!(args.model.as_deref(), Some("chatgpt/gpt-6.1-sol"));
-        assert_eq!(args.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(args.permission_mode_flag.as_deref(), Some("default"));
-        assert!(!args.yolo);
-        let error = PagerArgs::try_parse_from([
-            "distill", "-p", "task", "--ultrafast", "--ultracode",
-        ]).unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    fn ultrafast_and_ultrasave_are_opt_in_and_execution_modes_conflict() {
+        let defaults = PagerArgs::try_parse_from(["distill", "-p", "task"]).unwrap();
+        assert!(!defaults.ultrafast);
+        assert!(!defaults.ultrasave);
+        for flag in ["--ultrafast", "--ultrasave"] {
+            let args = PagerArgs::try_parse_from([
+                "distill", "-p", "task", flag, "--model", "chatgpt/gpt-6.1-sol",
+                "--effort", "high", "--permission-mode", "default",
+            ]).unwrap();
+            assert_eq!(args.ultrafast, flag == "--ultrafast");
+            assert_eq!(args.ultrasave, flag == "--ultrasave");
+            assert!(!args.ultracode);
+            assert_eq!(args.model.as_deref(), Some("chatgpt/gpt-6.1-sol"));
+            assert_eq!(args.reasoning_effort.as_deref(), Some("high"));
+            assert_eq!(args.permission_mode_flag.as_deref(), Some("default"));
+            assert!(!args.yolo);
+        }
+        for (first, second) in [
+            ("--ultrafast", "--ultracode"),
+            ("--ultrafast", "--ultrasave"),
+            ("--ultracode", "--ultrasave"),
+        ] {
+            let error = PagerArgs::try_parse_from([
+                "distill", "-p", "task", first, second,
+            ]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
     #[test]
     fn accounts_cli_contract() {

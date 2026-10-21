@@ -13,6 +13,7 @@ async fn execution_mode_reminder_supersedes_previous_modes_without_changing_effo
             (ExecutionMode::Normal, "Normal execution mode is active"),
             (ExecutionMode::Ultracode, "Ultracode mode is ON"),
             (ExecutionMode::Ultrafast, "UltraFast mode is active"),
+            (ExecutionMode::Ultrasave, "UltraSave mode is active"),
             (ExecutionMode::Normal, "Normal execution mode is active"),
         ] {
             actor.execution_mode.store(mode);

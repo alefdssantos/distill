@@ -275,7 +275,9 @@ impl ExecutionPolicy {
         use distill_tool_types::ExecutionMode;
         match self.mode.load() {
             ExecutionMode::Normal => self.off_max_depth,
-            ExecutionMode::Ultrafast => self.max_depth.min(self.off_max_depth).min(1),
+            ExecutionMode::Ultrafast | ExecutionMode::Ultrasave => {
+                self.max_depth.min(self.off_max_depth).min(1)
+            }
             ExecutionMode::Ultracode => self.max_depth,
         }
     }

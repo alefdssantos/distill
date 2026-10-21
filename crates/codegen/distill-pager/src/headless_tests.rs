@@ -173,6 +173,7 @@ async fn execution_mode_activation_is_confirmed_before_prompt_and_default_sends_
     for mode in [
         distill_tool_types::ExecutionMode::Ultrafast,
         distill_tool_types::ExecutionMode::Ultracode,
+        distill_tool_types::ExecutionMode::Ultrasave,
         distill_tool_types::ExecutionMode::Normal,
     ] {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
@@ -226,7 +227,7 @@ async fn execution_mode_activation_failure_prevents_prompt() {
         send_headless_prompt(
             &tx,
             acp::PromptRequest::new(acp::SessionId::new("sess-ultra"), vec![]),
-            distill_tool_types::ExecutionMode::Ultrafast,
+            distill_tool_types::ExecutionMode::Ultrasave,
         )
         .await
     });

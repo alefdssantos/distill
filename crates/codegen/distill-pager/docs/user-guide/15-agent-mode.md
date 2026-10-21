@@ -263,7 +263,7 @@ The response is the effective worker after the change:
 
 ### Execution modes
 
-Each session has one execution mode: `normal`, `ultrafast`, or `ultracode`. Selecting a mode replaces the previous one. UltraFast prioritizes direct execution and parallel independent tasks; its child agents execute locally. UltraCode retains its existing decomposition policy. Both preserve explicit model and effort choices and required verification.
+Each session has one execution mode: `normal`, `ultrafast`, `ultracode`, or `ultrasave`. Selecting a mode replaces the previous one. UltraFast prioritizes direct execution and parallel independent tasks; its child agents execute locally. UltraCode retains its existing decomposition policy. UltraSave prioritizes token economy. All modes preserve explicit model and effort choices and required verification.
 
 Send `x.ai/session/execution_mode/set` (on the JSON-RPC wire, `_x.ai/session/execution_mode/set`):
 

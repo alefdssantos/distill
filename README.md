@@ -96,4 +96,5 @@ its subagents, and neither has an off switch:
 - [How Jev routes work](docs/jev-routing.md)
 - [UltraCode activation, hierarchy limits and paired comparisons](docs/ultracode.md)
 - [UltraFast execution mode and paired speed/quality evaluation](docs/ultrafast.md)
+- [UltraSave execution mode and paired token/quality evaluation](docs/ultrasave.md)
 - [Where the token savings come from](docs/token-saver.md)

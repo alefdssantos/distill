@@ -5,7 +5,8 @@ import math
 import statistics
 
 
-def verdict(results):
+def validated_pairs(results, *, candidate_mode, baseline_modes):
+    """Check the shared frozen-input, ACP and accounting evidence for paired modes."""
     reasons, pairs = [], {}
     expected = {(case, rep) for case in results['cases']
                 for rep in range(1, results['repetitions'] + 1)}
@@ -24,7 +25,7 @@ def verdict(results):
             'configured_main_effort_auto', 'max_concurrent', 'capacity_env', 'max_depth',
             'depth_env', 'timeout_s', 'order_seed', 'tools', 'permissions')})
         mode = settings.get('execution_mode')
-        expected_mode = ('ultrafast',) if variant == 'candidate' else ('normal', 'ultracode')
+        expected_mode = (candidate_mode,) if variant == 'candidate' else baseline_modes
         acp = row.get('acp') or {}
         activation = (acp.get('activation_receipt') or {}).get('result') or {}
         if (settings.get('transport') != 'acp' or mode not in expected_mode or
@@ -46,6 +47,11 @@ def verdict(results):
         reasons.append('missing declared case/repetition pairs')
     if not profiles or any(profile != profiles[0] for profile in profiles):
         reasons.append('binary/model/effort/capacity/timeout settings differ between runs')
+    return reasons, pairs
+
+
+def verdict(results):
+    reasons, pairs = validated_pairs(results, candidate_mode='ultrafast', baseline_modes=('normal', 'ultracode'))
     report = {'verdict': 'INCOMPLETE', 'reasons': reasons,
               'target': {'maximum_median_paired_completion_ratio': 0.70,
                          'maximum_quality_regressions': 0},

@@ -9,9 +9,9 @@ changes and evidence before accepting the result.
 ## Activate the real mode
 
 In the interactive UI, use `/ultracode on`, `/ultracode off`, or `/ultracode`
-to toggle. Normal, UltraCode and UltraFast are mutually exclusive session modes;
-activating one replaces the other, and disabling the active mode returns to Normal.
-For UltraFast, see [UltraFast](ultrafast.md). For a headless prompt:
+to toggle. Normal, UltraCode, UltraFast and UltraSave are mutually exclusive session modes;
+activating one replaces the previous mode, and disabling the active mode returns to Normal.
+See also [UltraFast](ultrafast.md) and [UltraSave](ultrasave.md). For a headless prompt:
 
 ```sh
 GROK_SUBAGENTS_MAX_DEPTH=2 distill --ultracode -p 'Implement the requested change and verify it.'
@@ -48,7 +48,7 @@ Ordinary shared-workspace sessions retain their existing behavior.
 
 Task children share the root's exclusive mode, including when launched in
 Normal, so later mode changes apply to the existing tree. Normal retains its
-configured depth; UltraFast caps delegation at one child level and UltraCode
+configured depth; UltraFast and UltraSave cap delegation at one child level and UltraCode
 uses its resolved ceiling. Internal planner/verifier agents, workflow children
 and children with an explicit output-token budget remain leaves. Normal UltraCode
 children can delegate within shared root concurrency, depth, cancellation and usage accounting.

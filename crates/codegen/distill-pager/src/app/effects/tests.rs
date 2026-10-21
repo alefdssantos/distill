@@ -9,6 +9,10 @@ fn execution_mode_metadata_prefers_exclusive_mode_and_reads_legacy_sessions() {
         parse(serde_json::json!({"executionMode": "ultrafast", "ultracode": true})),
         Some(ExecutionMode::Ultrafast)
     );
+    assert_eq!(
+        parse(serde_json::json!({"executionMode": "ultrasave", "ultracode": true})),
+        Some(ExecutionMode::Ultrasave)
+    );
     assert_eq!(parse(serde_json::json!({"ultracode": true})), Some(ExecutionMode::Ultracode));
     assert_eq!(parse(serde_json::json!({"ultracode": false})), Some(ExecutionMode::Normal));
     assert_eq!(parse_session_execution_mode(None), None);

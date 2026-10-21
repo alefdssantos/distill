@@ -1089,6 +1089,8 @@ fn ultracode_agent_ticks_slow_and_redraws() {
     assert_eq!(app.tick_demand(), TickDemand::None);
     app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Ultrafast;
     assert_eq!(app.tick_demand(), TickDemand::None, "UltraFast needs no idle animation");
+    app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Ultrasave;
+    assert_eq!(app.tick_demand(), TickDemand::None, "UltraSave needs no idle animation");
 }
 #[test]
 fn needs_animation_gates_mode_switch_banner_countdown() {
