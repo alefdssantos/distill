@@ -5,7 +5,7 @@ cohort, median paired completion time fell **38.87%** (ratio 0.611), above the
 required 30%. All eight executions passed the unchanged external graders and
 completion checks, with zero additional failed pairs.
 
-[Protocol](ultrafast.md) · [Machine-readable results](../tools/task_cost_eval/results/ultrafast-20261020-stage2.json) ·
+[Protocol](ultrafast.md) · [20-case follow-up cohort](benchmark-v2-results.md) · [Machine-readable results](../tools/task_cost_eval/results/ultrafast-20261020-stage2.json) ·
 [UltraSave results](ultrasave-results.md) · [Earlier failed stage](#prior-stage--2026-10-20-failed)
 
 | Comparison | Median paired time saved | Total completion time, Normal → UltraFast | Accepted, Normal / UltraFast | Gate |

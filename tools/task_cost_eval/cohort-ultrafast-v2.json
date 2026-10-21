@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "cohort_id": "ultrafast-v2",
+  "repetitions": 1,
+  "cases": [
+    {"id": "bench-semver", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-semver.txt", "fixture_ref": "fixtures/bench_semver", "grader": {"script_ref": "graders/grade_bench_semver.py"}, "reference_ref": "reference/bench_semver"},
+    {"id": "bench-duration", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-duration.txt", "fixture_ref": "fixtures/bench_duration", "grader": {"script_ref": "graders/grade_bench_duration.py"}, "reference_ref": "reference/bench_duration"},
+    {"id": "bench-intervals", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-intervals.txt", "fixture_ref": "fixtures/bench_intervals", "grader": {"script_ref": "graders/grade_bench_intervals.py"}, "reference_ref": "reference/bench_intervals"},
+    {"id": "bench-money", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-money.txt", "fixture_ref": "fixtures/bench_money", "grader": {"script_ref": "graders/grade_bench_money.py"}, "reference_ref": "reference/bench_money"},
+    {"id": "bench-bytes", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-bytes.txt", "fixture_ref": "fixtures/bench_bytes", "grader": {"script_ref": "graders/grade_bench_bytes.py"}, "reference_ref": "reference/bench_bytes"},
+    {"id": "bench-csv", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-csv.txt", "fixture_ref": "fixtures/bench_csv", "grader": {"script_ref": "graders/grade_bench_csv.py"}, "reference_ref": "reference/bench_csv"},
+    {"id": "bench-paths", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-paths.txt", "fixture_ref": "fixtures/bench_paths", "grader": {"script_ref": "graders/grade_bench_paths.py"}, "reference_ref": "reference/bench_paths"},
+    {"id": "bench-wrap", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-wrap.txt", "fixture_ref": "fixtures/bench_wrap", "grader": {"script_ref": "graders/grade_bench_wrap.py"}, "reference_ref": "reference/bench_wrap"},
+    {"id": "bench-dedupe", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-dedupe.txt", "fixture_ref": "fixtures/bench_dedupe", "grader": {"script_ref": "graders/grade_bench_dedupe.py"}, "reference_ref": "reference/bench_dedupe"},
+    {"id": "bench-cursor", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-cursor.txt", "fixture_ref": "fixtures/bench_cursor", "grader": {"script_ref": "graders/grade_bench_cursor.py"}, "reference_ref": "reference/bench_cursor"},
+    {"id": "bench-configmerge", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-configmerge.txt", "fixture_ref": "fixtures/bench_configmerge", "grader": {"script_ref": "graders/grade_bench_configmerge.py"}, "reference_ref": "reference/bench_configmerge"},
+    {"id": "bench-toposort", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-toposort.txt", "fixture_ref": "fixtures/bench_toposort", "grader": {"script_ref": "graders/grade_bench_toposort.py"}, "reference_ref": "reference/bench_toposort"},
+    {"id": "bench-tokenbucket", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-tokenbucket.txt", "fixture_ref": "fixtures/bench_tokenbucket", "grader": {"script_ref": "graders/grade_bench_tokenbucket.py"}, "reference_ref": "reference/bench_tokenbucket"},
+    {"id": "bench-backoff", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-backoff.txt", "fixture_ref": "fixtures/bench_backoff", "grader": {"script_ref": "graders/grade_bench_backoff.py"}, "reference_ref": "reference/bench_backoff"},
+    {"id": "bench-tree", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-tree.txt", "fixture_ref": "fixtures/bench_tree", "grader": {"script_ref": "graders/grade_bench_tree.py"}, "reference_ref": "reference/bench_tree"},
+    {"id": "bench-matrix", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-matrix.txt", "fixture_ref": "fixtures/bench_matrix", "grader": {"script_ref": "graders/grade_bench_matrix.py"}, "reference_ref": "reference/bench_matrix"},
+    {"id": "bench-clock", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-clock.txt", "fixture_ref": "fixtures/bench_clock", "grader": {"script_ref": "graders/grade_bench_clock.py"}, "reference_ref": "reference/bench_clock"},
+    {"id": "bench-stats", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-stats.txt", "fixture_ref": "fixtures/bench_stats", "grader": {"script_ref": "graders/grade_bench_stats.py"}, "reference_ref": "reference/bench_stats"},
+    {"id": "bench-lru", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-lru.txt", "fixture_ref": "fixtures/bench_lru", "grader": {"script_ref": "graders/grade_bench_lru.py"}, "reference_ref": "reference/bench_lru"},
+    {"id": "bench-template", "kind": "divisible", "size": "small", "prompt_ref": "prompts/bench-template.txt", "fixture_ref": "fixtures/bench_template", "grader": {"script_ref": "graders/grade_bench_template.py"}, "reference_ref": "reference/bench_template"}
+  ]
+}

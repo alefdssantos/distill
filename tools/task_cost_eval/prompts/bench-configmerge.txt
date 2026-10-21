@@ -1,0 +1,6 @@
+Implement tools/task_cost_eval/fixtures/bench_configmerge/config_merge.py using only the Python standard library. Keep the exact public signatures below.
+
+deep_merge(base, override) returns a new deeply detached dict. Both arguments must be dicts or raise ValueError. For each shared key, dict+dict recurses; every other override replaces the base, including None and lists (never concatenate). Preserve base-only and override-only keys. Arbitrary deepcopy-compatible values and dict keys are allowed; inputs are finite acyclic data. Never mutate either input, including when a caller later mutates the result. Empty dicts are valid. Duplicate keys have already been resolved by Python dict construction; override wins. Output dict insertion order is not part of the contract.
+get_path(config, path) requires a dict config and a nonempty string path split on literal dots; reject non-string/empty paths and empty components with ValueError. Look up each component as an exact dict key, never a list index. Missing keys or traversal through a non-dict raise KeyError. Return the stored value, including None, without copying. Unicode and case are preserved and compared exactly; no normalization or case folding. Neither function mutates inputs.
+
+Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from this slice. No CLI or dependencies are needed.
