@@ -269,17 +269,22 @@ impl SessionActor {
     /// [`super::jev_ledger::JevTurnLedger::kept_turn_route`]). A redo floor
     /// still applies on top; the next round returns to the kept route.
     pub(super) fn jev_keep_turn_effort(&self, cfg: &mut SamplingConfig) -> bool {
+        let reuse_small_prompt = matches!(
+            self.execution_mode.load(),
+            distill_tool_types::ExecutionMode::Ultrafast | distill_tool_types::ExecutionMode::Ultrasave
+        );
         if !self
             .jev_effort_auto
             .load(std::sync::atomic::Ordering::Relaxed)
-            || !effort_keys_cached_prefix(&cfg.api_backend, &cfg.model)
+            || (!reuse_small_prompt
+                && !effort_keys_cached_prefix(&cfg.api_backend, &cfg.model))
         {
             return false;
         }
         let Some(route) = self
             .jev_ledger
             .borrow()
-            .kept_turn_route(self.current_turn_number.get(), &cfg.model)
+            .kept_turn_route(self.current_turn_number.get(), &cfg.model, reuse_small_prompt)
         else {
             return false;
         };
@@ -343,6 +348,15 @@ impl SessionActor {
             state["candidate_facts"] = serde_json::Value::Array(facts);
         }
         state["reasoning_effort_policy"] = serde_json::json!("auto");
+        if self.execution_mode.load() == distill_tool_types::ExecutionMode::Ultrafast {
+            state["execution_policy"] = serde_json::json!(
+                "Minimize time to a correct verified result. Prefer low effort for clear mechanical work; preserve higher effort for ambiguity, diagnosis, sensitive decisions and complex review."
+            );
+        } else if self.execution_mode.load() == distill_tool_types::ExecutionMode::Ultrasave {
+            state["execution_policy"] = serde_json::json!(
+                "Minimize total input and output tokens to a correct verified result, including auxiliary calls and rework. Prefer low effort for clear mechanical work; retain higher effort for ambiguity, diagnosis, sensitive decisions and complex review."
+            );
+        }
         state["previous_dispatch"] = serde_json::json!(self.jev_ledger.borrow().last_execution);
         state["effort_switch_cost"] = effort_switch_cost_json(
             effort_keys_cached_prefix(&cfg.api_backend, &cfg.model),
@@ -544,6 +558,14 @@ impl SessionActor {
     /// Applied to the per-turn [`distill_sampling_types::SamplingConfig`] the
     /// sampler receives, so the downgrade never sticks to the session.
     pub(super) async fn jev_apply_model_tier(&self, cfg: &mut SamplingConfig) {
+        // These modes already chose effort above; a second downgrade decision
+        // adds another request and could undo that quality decision.
+        if matches!(
+            self.execution_mode.load(),
+            distill_tool_types::ExecutionMode::Ultrafast | distill_tool_types::ExecutionMode::Ultrasave
+        ) {
+            return;
+        }
         if self.child_model_routing_locked()
             || self.child_jev_routing_locked()
             || !self
@@ -684,6 +706,11 @@ impl SessionActor {
             MODEL_SKILL_DESCRIPTOR_LIMIT, select_model_skills, select_ranked_skills,
         };
         let active = self.jev_active_skill_names().await;
+        let limit = if self.execution_mode.load() == distill_tool_types::ExecutionMode::Ultrasave {
+            4
+        } else {
+            MODEL_SKILL_DESCRIPTOR_LIMIT
+        };
         // Explicit names are a deterministic user constraint, so inspect the
         // complete request locally even though the Jev state below stays small.
         let pinned = self.jev_request_skill_pins(full_request, announced);
@@ -695,7 +722,7 @@ impl SessionActor {
                 &pinned,
                 &active,
                 &ranked,
-                MODEL_SKILL_DESCRIPTOR_LIMIT,
+                limit,
             );
         }
         select_model_skills(
@@ -703,7 +730,7 @@ impl SessionActor {
             announced,
             &pinned,
             &active,
-            MODEL_SKILL_DESCRIPTOR_LIMIT,
+            limit,
         )
     }
 
@@ -776,6 +803,10 @@ impl SessionActor {
         &self,
         request: Option<&str>,
     ) -> Option<ModelSkillProjection> {
+        if self.execution_mode.load() == distill_tool_types::ExecutionMode::Ultrafast {
+            self.log_skill_projection_skipped("ultrafast_full_catalog");
+            return None;
+        }
         if !crate::jev::lever_active(JevLever::P6SkillSuggestion) {
             self.log_skill_projection_skipped("lever_off");
             return None;
@@ -1501,6 +1532,34 @@ mod tests {
         distill_tools::types::output::ToolOutput::SearchReplace(
             distill_tools::types::output::SearchReplaceOutput::FileNotFound("a.rs".to_owned()),
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ultra_modes_reuse_effort_but_reconsider_failure_and_preserve_pins() {
+        tokio::task::LocalSet::new().run_until(async {
+            for mode in [distill_tool_types::ExecutionMode::Ultrafast, distill_tool_types::ExecutionMode::Ultrasave] {
+                let actor = super::super::support::plain_actor().await;
+                actor.execution_mode.store(mode);
+                actor.jev_effort_auto.store(true, std::sync::atomic::Ordering::Relaxed);
+                let mut cfg = SamplingConfig { model: "main".into(), reasoning_effort: Some(ReasoningEffort::Low), ..Default::default() };
+                actor.jev_anchor_turn_effort("main", &cfg);
+                cfg.reasoning_effort = Some(ReasoningEffort::High);
+                assert!(actor.jev_keep_turn_effort(&mut cfg));
+                assert_eq!(cfg.reasoning_effort, Some(ReasoningEffort::Low));
+                assert_eq!(cfg.model, "main");
+                actor.jev_effort_auto.store(false, std::sync::atomic::Ordering::Relaxed);
+                cfg.reasoning_effort = Some(ReasoningEffort::High);
+                assert!(!actor.jev_keep_turn_effort(&mut cfg));
+                assert_eq!(cfg.reasoning_effort, Some(ReasoningEffort::High));
+                actor.jev_effort_auto.store(true, std::sync::atomic::Ordering::Relaxed);
+                actor.jev_ledger.borrow_mut().facts.note_tool_result("failed", &failed());
+                actor.jev_ledger.borrow_mut().facts.note_tool_result("parallel-success", &succeeded());
+                assert!(!actor.jev_keep_turn_effort(&mut cfg));
+                assert_eq!(cfg.reasoning_effort, Some(ReasoningEffort::High));
+                actor.jev_anchor_turn_effort("main", &cfg);
+                assert!(actor.jev_keep_turn_effort(&mut cfg), "a failure is reconsidered only once");
+            }
+        }).await;
     }
 
     /// A session whose main model is `main`, served by `server`.

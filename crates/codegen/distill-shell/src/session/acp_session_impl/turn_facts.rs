@@ -38,6 +38,7 @@ pub(crate) struct TestEvidence {
 pub(crate) struct TurnFacts {
     /// `(call id, failed)` of each finished call, oldest first.
     events: Vec<(String, bool)>,
+    failed_tool_count: u64,
     checks: Vec<TestEvidence>,
 }
 
@@ -47,11 +48,10 @@ impl TurnFacts {
         if self.events.len() == MAX_EVENTS {
             self.events.remove(0);
         }
-        self.events.push((
-            call_id.to_owned(),
-            output.is_error()
-                || matches!(output, ToolOutput::Bash(bash) if bash.timed_out || bash.signal.is_some()),
-        ));
+        let failed = output.is_error()
+            || matches!(output, ToolOutput::Bash(bash) if bash.timed_out || bash.signal.is_some());
+        self.failed_tool_count = self.failed_tool_count.saturating_add(u64::from(failed));
+        self.events.push((call_id.to_owned(), failed));
         match output {
             ToolOutput::Bash(bash) if looks_like_check_command(&bash.command) => {
                 let failed = bash.exit_code != 0 || bash.timed_out || bash.signal.is_some();
@@ -113,6 +113,10 @@ impl TurnFacts {
             .rev()
             .find(|(id, _)| !call_id.is_empty() && id == call_id)
             .map(|(_, failed)| *failed)
+    }
+
+    pub(crate) fn failed_tool_count(&self) -> u64 {
+        self.failed_tool_count
     }
 
     /// The build, test and lint outcomes this request recorded.

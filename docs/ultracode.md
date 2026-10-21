@@ -9,15 +9,18 @@ changes and evidence before accepting the result.
 ## Activate the real mode
 
 In the interactive UI, use `/ultracode on`, `/ultracode off`, or `/ultracode`
-to toggle. For a headless prompt:
+to toggle. Normal, UltraCode, UltraFast and UltraSave are mutually exclusive session modes;
+activating one replaces the previous mode, and disabling the active mode returns to Normal.
+See also [UltraFast](ultrafast.md) and [UltraSave](ultrasave.md). For a headless prompt:
 
 ```sh
 GROK_SUBAGENTS_MAX_DEPTH=2 distill --ultracode -p 'Implement the requested change and verify it.'
 ```
 
 `--ultracode` also works with `--prompt-file` and `--prompt-json`. It sends
-`x.ai/session/ultracode/set` with the actual session ID and `enabled: true`,
-awaits an `enabled: true` acknowledgement, then sends the prompt. A rejected,
+`x.ai/session/execution_mode/set` with the actual session ID and
+`mode: "ultracode"`, awaits a matching mode acknowledgement, then sends the prompt.
+The older `x.ai/session/ultracode/set` endpoint remains available to existing clients. A rejected,
 malformed, or negative acknowledgement fails the run before the prompt is sent.
 The confirmed activation is written to stderr as
 `UltraCode enabled for session <id>`.
@@ -43,9 +46,10 @@ remote setting. The runtime clamps values below one to one and ignores invalid
 environment values; the comparison runner rejects requested depths below one.
 Ordinary shared-workspace sessions retain their existing behavior.
 
-UltraCode task children share the tree's mode and resolved ceiling. Ordinary
-shared-workspace sessions do not inherit UltraCode and retain their existing
-configured depth behavior. Internal planner/verifier agents, workflow children
+Task children share the root's exclusive mode, including when launched in
+Normal, so later mode changes apply to the existing tree. Normal retains its
+configured depth; UltraFast and UltraSave advertise no delegation tool and UltraCode
+uses its resolved ceiling. Internal planner/verifier agents, workflow children
 and children with an explicit output-token budget remain leaves. Normal UltraCode
 children can delegate within shared root concurrency, depth, cancellation and usage accounting.
 Subagents running in isolated worktrees are leaves and cannot delegate, with

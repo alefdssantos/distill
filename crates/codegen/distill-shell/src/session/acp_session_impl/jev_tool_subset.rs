@@ -38,7 +38,16 @@ impl SessionActor {
         defs: Vec<ToolDefinition>,
         plan_active: bool,
     ) -> Vec<ToolDefinition> {
-        if plan_active || defs.is_empty() {
+        if plan_active
+            || defs.is_empty()
+            || matches!(
+                self.execution_mode.load(),
+                distill_tool_types::ExecutionMode::Ultrafast
+                    | distill_tool_types::ExecutionMode::Ultrasave
+            )
+        {
+            // UltraFast and UltraSave have a fixed execution tool set; asking a
+            // utility model which families to keep costs a blocking model round.
             self.jev_ledger.borrow_mut().deferred_tools.clear();
             return defs;
         }

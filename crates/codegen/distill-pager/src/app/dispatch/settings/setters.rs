@@ -2133,7 +2133,7 @@ pub(in crate::app::dispatch) fn set_tier_editor(
     main: String,
     worker: String,
     utility: String,
-    ultracode: bool,
+    execution_mode: distill_tool_types::ExecutionMode,
 ) -> Vec<Effect> {
     use crate::slash::commands::model::parse_tier_selection;
     let models = match app.active_view {
@@ -2155,7 +2155,21 @@ pub(in crate::app::dispatch) fn set_tier_editor(
             return vec![];
         }
     };
-    let ultracode_changed = models.ultracode != ultracode;
+    let execution_mode_changed = models.execution_mode != execution_mode;
+    if execution_mode_changed && app.active_session_id().is_none() {
+        let message = "Start a session before changing its execution mode.";
+        let modal = match app.active_view {
+            ActiveView::Agent(id) => app.agents.get_mut(&id).and_then(|agent| agent.active_modal.as_mut()),
+            ActiveView::Welcome => app.welcome_doc_viewer.as_mut(),
+            _ => None,
+        };
+        if let Some(crate::views::modal::ActiveModal::DocViewer { tier_editor: Some(editor), .. }) = modal {
+            editor.status = Some((message.to_owned(), true));
+        } else {
+            app.show_toast(message);
+        }
+        return vec![];
+    }
     let current_main = models.current.clone();
     let current_main_effort = if models.effort_auto {
         None
@@ -2229,9 +2243,12 @@ pub(in crate::app::dispatch) fn set_tier_editor(
         _ => vec![],
     });
     effects.extend(set_cheap_model(app, utility, None));
-    if ultracode_changed {
+    if execution_mode_changed {
         effects.extend(super::super::router::dispatch(
-            crate::app::actions::Action::SetUltracode(Some(ultracode)),
+            crate::app::actions::Action::SetExecutionMode {
+                mode: execution_mode,
+                operation: distill_tool_types::ExecutionModeOperation::Set,
+            },
             app,
         ));
     }

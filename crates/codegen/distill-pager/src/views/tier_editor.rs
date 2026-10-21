@@ -23,7 +23,7 @@ const HOME_ACCOUNTS: usize = 1;
 const HOME_MAIN: usize = 2;
 const HOME_WORKER: usize = 3;
 const HOME_UTILITY: usize = 4;
-const HOME_ULTRACODE: usize = 5;
+const HOME_EXECUTION_MODE: usize = 5;
 const HOME_SAVE: usize = 6;
 const HOME_ROWS: usize = 7;
 
@@ -63,7 +63,7 @@ pub enum TierEditorOutcome {
         main: String,
         worker: String,
         utility: String,
-        ultracode: bool,
+        execution_mode: distill_tool_types::ExecutionMode,
     },
     Cancelled,
     Changed,
@@ -82,14 +82,14 @@ impl TierEditorOutcome {
                 main,
                 worker,
                 utility,
-                ultracode,
+                execution_mode,
             } => (
                 false,
                 Some(Action::SetTierEditor {
                     main,
                     worker,
                     utility,
-                    ultracode,
+                    execution_mode,
                 }),
                 true,
             ),
@@ -157,7 +157,7 @@ impl AutoSummary {
     }
 }
 
-type Submission = (String, String, String, bool);
+type Submission = (String, String, String, distill_tool_types::ExecutionMode);
 
 #[derive(Debug)]
 pub struct TierEditorState {
@@ -168,7 +168,7 @@ pub struct TierEditorState {
     pub worker: Option<String>,
     pub worker_effort: Option<ReasoningEffort>,
     pub utility: LineEditor,
-    pub ultracode: bool,
+    pub execution_mode: distill_tool_types::ExecutionMode,
     pub auto: AutoSummary,
     pub auto_pending: bool,
     /// Display names of the pair Auto chose for this session.
@@ -232,7 +232,7 @@ impl TierEditorState {
             worker: models.worker_model.as_ref().map(|id| id.0.to_string()),
             worker_effort: models.worker_effort,
             utility: LineEditor::default(),
-            ultracode: models.ultracode,
+            execution_mode: models.execution_mode,
             auto,
             auto_pending: false,
             routed: models
@@ -275,7 +275,7 @@ impl TierEditorState {
             pick(&self.main, self.main_effort),
             pick(&self.worker, self.worker_effort),
             self.utility.text().trim().to_owned(),
-            self.ultracode,
+            self.execution_mode,
         )
     }
 
@@ -370,12 +370,12 @@ impl TierEditorState {
         if !self.dirty() {
             return TierEditorOutcome::Cancelled;
         }
-        let (main, worker, utility, ultracode) = self.submission();
+        let (main, worker, utility, execution_mode) = self.submission();
         TierEditorOutcome::Submitted {
             main,
             worker,
             utility,
-            ultracode,
+            execution_mode,
         }
     }
 
@@ -442,8 +442,13 @@ impl TierEditorState {
                 self.go(Step::Utility, selected);
                 TierEditorOutcome::Changed
             }
-            HOME_ULTRACODE => {
-                self.ultracode = !self.ultracode;
+            HOME_EXECUTION_MODE => {
+                self.execution_mode = match self.execution_mode {
+                    distill_tool_types::ExecutionMode::Normal => distill_tool_types::ExecutionMode::Ultrafast,
+                    distill_tool_types::ExecutionMode::Ultrafast => distill_tool_types::ExecutionMode::Ultracode,
+                    distill_tool_types::ExecutionMode::Ultracode => distill_tool_types::ExecutionMode::Ultrasave,
+                    distill_tool_types::ExecutionMode::Ultrasave => distill_tool_types::ExecutionMode::Normal,
+                };
                 TierEditorOutcome::Changed
             }
             _ => self.save(),
@@ -1005,9 +1010,13 @@ fn list(state: &TierEditorState, theme: &Theme) -> (String, Vec<ListLine>) {
             utility_value.extend(changed(HOME_UTILITY));
             lines.push(row(HOME_UTILITY, "Utility", utility_value));
             lines.push(heading("Mode", theme));
-            let mut ultracode = on_off(state.ultracode, theme.accent_thinking, theme);
-            ultracode.extend(changed(HOME_ULTRACODE));
-            lines.push(row(HOME_ULTRACODE, "Ultracode", ultracode));
+            let mut execution_mode = vec![Span::styled(
+                state.execution_mode.label(),
+                Style::default().fg(theme.accent_thinking),
+            )];
+            execution_mode.extend(changed(HOME_EXECUTION_MODE));
+            execution_mode.push(dim("  (Enter to change)", theme));
+            lines.push(row(HOME_EXECUTION_MODE, "Execution", execution_mode));
             lines.push(ListLine {
                 index: None,
                 label: vec![],
@@ -1513,9 +1522,29 @@ mod tests {
                 main: "claude/claude-opus-5-5 high".into(),
                 worker: "chatgpt/gpt-6-luna medium".into(),
                 utility: String::new(),
-                ultracode: false,
+                execution_mode: distill_tool_types::ExecutionMode::Normal,
             }
         );
+    }
+
+    #[test]
+    fn execution_mode_cycles_exclusively_and_saves_the_selected_mode() {
+        use distill_tool_types::ExecutionMode;
+        let mut state = editor(routes(false, 0));
+        state.selected = super::HOME_EXECUTION_MODE;
+        for expected in [ExecutionMode::Ultrafast, ExecutionMode::Ultracode, ExecutionMode::Ultrasave, ExecutionMode::Normal] {
+            assert_eq!(state.handle_key(&key(KeyCode::Enter)), TierEditorOutcome::Changed);
+            assert_eq!(state.execution_mode, expected);
+        }
+        assert!(!state.dirty(), "returning to Normal restores the initial selection");
+        state.handle_key(&key(KeyCode::Enter));
+        state.handle_key(&key(KeyCode::Enter));
+        state.handle_key(&key(KeyCode::Enter));
+        let outcome = state.handle_key(&key(KeyCode::Char('s')));
+        assert!(matches!(
+            outcome,
+            TierEditorOutcome::Submitted { execution_mode: ExecutionMode::Ultrasave, .. }
+        ));
     }
 
     /// The Worker list starts with None, which hands all work to Main.
@@ -1570,7 +1599,7 @@ mod tests {
             "nothing changed, so one Esc closes"
         );
 
-        state.activate_home(super::HOME_ULTRACODE);
+        state.activate_home(super::HOME_EXECUTION_MODE);
         assert_eq!(
             state.handle_key(&key(KeyCode::Esc)),
             TierEditorOutcome::Changed
@@ -1593,7 +1622,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::render_tier_editor_overlay(&mut buf, area, &mut window, &mut state, false, &theme);
         let text: String = buf.content().iter().map(|cell| cell.symbol()).collect();
-        for expected in ["Auto routing is on", "Accounts & routes", "+2 more", "Ultracode"] {
+        for expected in ["Auto routing is on", "Accounts & routes", "+2 more", "Execution", "Normal"] {
             assert!(text.contains(expected), "missing {expected}");
         }
         assert_eq!(state.hit_rows.len(), super::HOME_ROWS);

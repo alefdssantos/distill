@@ -1,0 +1,1 @@
+Implement clock.py in tools/task_cost_eval/fixtures/bench_clock with Python's standard library. Retain public signatures. Parse strict ASCII 12-hour/24-hour strings, format canonical HH:MM, and add signed integer minutes with day wraparound; reject malformed times and bool arguments. Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from this directory.

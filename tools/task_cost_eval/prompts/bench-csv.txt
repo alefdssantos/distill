@@ -1,0 +1,19 @@
+Implement the CSV utilities in tools/task_cost_eval/fixtures/bench_csv/csvparse.py with only the Python standard library (Python 3.11+). Keep the two public signatures:
+
+parse_csv(text)
+- text must be a str; otherwise raise ValueError.
+- Parse RFC 4180 style CSV using the stdlib csv module or equivalent behavior: comma separators, double-quoted fields, doubled quotes ("") inside quoted fields, embedded newlines inside quoted fields, and both LF and CRLF record separators.
+- An empty string returns []. A single trailing record separator does not create an extra row. Blank records (zero fields) are skipped.
+- The first record is the header. Every header name must be a non-empty str and header names must be unique; otherwise raise ValueError.
+- Every following record must have exactly as many fields as the header; otherwise raise ValueError.
+- Return a new list of new dicts, one per data row, mapping header name to the field string in header order. Field contents are preserved exactly, including leading/trailing spaces and embedded CRLF.
+
+select_rows(rows, columns, filters)
+- rows is an iterable of dicts. A rows value that is not iterable raises ValueError. columns must be a list of unique str values; otherwise raise ValueError. filters must be a dict whose keys and values are all str; otherwise raise ValueError.
+- Validate requested columns and filter keys against each row. If a selected column or filter key is absent from a row, raise ValueError.
+- Keep a row only when, for every filter key, row[key] equals the filter value by exact, case-sensitive string equality. No trimming, case folding, or other normalization.
+- For each kept row, return a new dict containing only the requested columns, inserted in the order given by columns. Filters may reference columns that are not selected.
+- An empty rows iterable returns []. Do not mutate rows, columns, or filters. Accept generators for rows.
+- Invalid row entries (anything other than dict) raise ValueError.
+
+These are pure functions; no CLI or dependencies. Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from this slice.

@@ -450,7 +450,7 @@ pub struct PromptInfo<'a> {
 pub struct PromptModelTiers {
     pub main: String,
     pub worker: Option<String>,
-    pub ultracode: bool,
+    pub execution_mode: distill_tool_types::ExecutionMode,
 }
 
 impl PromptModelTiers {
@@ -459,14 +459,14 @@ impl PromptModelTiers {
             return Some(Self {
                 main: format!("Auto → {}", models.effort_label(&models.display_name(main))),
                 worker: Some(format!("Auto → {} (auto)", models.display_name(worker))),
-                ultracode: models.ultracode,
+                execution_mode: models.execution_mode,
             });
         }
         let main = models.current_model_name()?;
         Some(Self {
             main: models.effort_label(&main),
             worker: models.worker_label(),
-            ultracode: models.ultracode,
+            execution_mode: models.execution_mode,
         })
     }
 }
@@ -3628,14 +3628,14 @@ impl PromptWidget {
                 left_spans.push(Span::styled(worker.as_str(), worker_style));
             }
             left_spans.push(Span::styled(" | ", sep_style));
-            let ultracode_style = if tiers.ultracode {
+            let execution_mode_style = if tiers.execution_mode != distill_tool_types::ExecutionMode::Normal {
                 Style::default().fg(theme.accent_thinking).bg(bg)
             } else {
                 theme.muted().bg(bg)
             };
             left_spans.push(Span::styled(
-                if tiers.ultracode { "Ultracode: on" } else { "Ultracode: off" },
-                ultracode_style,
+                format!("Mode: {}", tiers.execution_mode.label()),
+                execution_mode_style,
             ));
             left_spans.push(Span::styled(" | ", sep_style));
             change_start = Some(Line::from(left_spans.clone()).width() as u16);

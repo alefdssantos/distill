@@ -738,10 +738,7 @@ impl AgentView {
             } else {
                 None
             },
-            ultracode_phase: self
-                .session
-                .models
-                .ultracode
+            ultracode_phase: (self.session.models.execution_mode == distill_tool_types::ExecutionMode::Ultracode)
                 .then(crate::views::prompt_widget::ultracode_phase_now),
             side_phase: self
                 .side_parent

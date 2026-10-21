@@ -168,28 +168,33 @@ fn s(v: &str) -> String {
 }
 
 #[tokio::test]
-async fn ultracode_activation_is_confirmed_before_prompt_and_default_sends_only_prompt() {
+async fn execution_mode_activation_is_confirmed_before_prompt_and_default_sends_only_prompt() {
     use distill_acp_lib::AcpAgentMessage;
-    for enabled in [true, false] {
+    for mode in [
+        distill_tool_types::ExecutionMode::Ultrafast,
+        distill_tool_types::ExecutionMode::Ultracode,
+        distill_tool_types::ExecutionMode::Ultrasave,
+        distill_tool_types::ExecutionMode::Normal,
+    ] {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
         let sending = tokio::spawn(async move {
             send_headless_prompt(
                 &tx,
                 acp::PromptRequest::new(acp::SessionId::new("sess-ultra"), vec![]),
-                enabled,
+                mode,
             )
             .await
         });
-        if enabled {
+        if mode != distill_tool_types::ExecutionMode::Normal {
             let AcpAgentMessage::ExtMethod(args) = rx.recv().await.unwrap() else {
                 panic!("activation must be the first request");
             };
-            assert_eq!(args.request.method.as_ref(), "x.ai/session/ultracode/set");
+            assert_eq!(args.request.method.as_ref(), "x.ai/session/execution_mode/set");
             let params: serde_json::Value =
                 serde_json::from_str(args.request.params.get()).unwrap();
             assert_eq!(
                 params,
-                serde_json::json!({"sessionId": "sess-ultra", "enabled": true})
+                serde_json::json!({"sessionId": "sess-ultra", "mode": mode})
             );
             assert!(
                 rx.try_recv().is_err(),
@@ -197,7 +202,7 @@ async fn ultracode_activation_is_confirmed_before_prompt_and_default_sends_only_
             );
             args.response_tx
                 .send(Ok(acp::ExtResponse::new(
-                    serde_json::value::to_raw_value(&serde_json::json!({"enabled": true}))
+                    serde_json::value::to_raw_value(&serde_json::json!({"mode": mode}))
                         .unwrap()
                         .into(),
                 )))
@@ -215,14 +220,14 @@ async fn ultracode_activation_is_confirmed_before_prompt_and_default_sends_only_
 }
 
 #[tokio::test]
-async fn ultracode_activation_failure_prevents_prompt() {
+async fn execution_mode_activation_failure_prevents_prompt() {
     use distill_acp_lib::AcpAgentMessage;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
     let sending = tokio::spawn(async move {
         send_headless_prompt(
             &tx,
             acp::PromptRequest::new(acp::SessionId::new("sess-ultra"), vec![]),
-            true,
+            distill_tool_types::ExecutionMode::Ultrasave,
         )
         .await
     });
@@ -231,7 +236,7 @@ async fn ultracode_activation_failure_prevents_prompt() {
     };
     args.response_tx
         .send(Ok(acp::ExtResponse::new(
-            serde_json::value::to_raw_value(&serde_json::json!({"enabled": false}))
+            serde_json::value::to_raw_value(&serde_json::json!({"mode": "ultracode"}))
                 .unwrap()
                 .into(),
         )))

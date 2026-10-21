@@ -1,0 +1,17 @@
+Implement wrap_text(text, width) in tools/task_cost_eval/fixtures/bench_wrap/wrapping.py with only the Python standard library (Python 3.11+). Keep the public signature wrap_text(text, width) -> str.
+
+Validation:
+- text must be a str; otherwise raise ValueError.
+- width must be an int that is not a bool and is at least 1; otherwise raise ValueError (includes 0, negative values, bools, floats, and strings).
+
+Wrapping semantics:
+- Split text on explicit '\n' only. Wrap each resulting logical line independently and join the wrapped lines back with '\n'. Therefore blank lines are preserved, including leading, interior, and trailing ones; text ending in '\n' produces output ending in '\n'; the empty string produces ''.
+- Within one logical line, split into words on runs of whitespace using Python's default str.split() behavior (this includes spaces, tabs, '\r', '\v', '\f', and other Unicode whitespace). Runs collapse to a single space between words. Lines containing only whitespace yield an empty line.
+- Fill greedily: if the current output line is empty, the word starts it. Otherwise append the word preceded by exactly one space when len(current) + 1 + len(word) <= width. Otherwise emit the current line and start a new line with the word.
+- If a word is longer than width, first emit any current line. Then emit consecutive pieces of exactly width characters, each on its own line, continuing while the remaining word is longer than width. The final remainder (length <= width) becomes the new current line, which following words may join if they fit.
+- Every emitted line has length <= width; width is at least 1. Never emit leading spaces or trailing spaces on any line. Never emit an empty line as a result of hard-splitting.
+- Length is measured with Python len, i.e. Unicode code points, not display width or bytes.
+
+Whitespace-insensitive reconstruction holds: joining the output with single spaces and collapsing whitespace yields the same word sequence as the input.
+
+No CLI or dependencies. Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from this slice.

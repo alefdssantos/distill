@@ -1,0 +1,22 @@
+Implement dedupe_records(records, key, *, casefold=False) in tools/task_cost_eval/fixtures/bench_dedupe/dedupe.py with only the Python standard library (Python 3.11+). Keep the public signature exactly: records and key are positional, casefold is keyword-only with default False.
+
+Inputs and validation (raise ValueError in every failure case):
+- key must be callable; otherwise raise ValueError.
+- casefold must be an actual bool (True or False); otherwise raise ValueError.
+- records must be iterable; otherwise raise ValueError. Generators are accepted.
+- Every element produced by records must be a dict; otherwise raise ValueError.
+- key(record) must return a str; otherwise raise ValueError. The empty string is a valid key.
+- Call key exactly once per input record, in input order, including records that are later discarded as duplicates.
+
+Deduplication semantics:
+- Keep the first record seen for a given key and discard all later records with the same key.
+- The output preserves first-occurrence order; do not sort.
+- When casefold is False, compare the returned key strings exactly (case-sensitive, no trimming or Unicode normalization).
+- When casefold is True, compare value.casefold() for each returned key. This is Unicode case folding, so e.g. 'Straße' and 'STRASSE' collide and 'Token' and 'token' collide.
+- The same key-normalization rule applies uniformly; do not special-case ASCII.
+
+Result and mutation semantics:
+- Return a new list. Each kept record becomes a new shallow dict copy (dict(record)): top-level mutation of a returned dict must not change the input record. Nested values are shared, not deep-copied.
+- Never mutate the input records, the records iterable, or the key function's behavior. Do not add, remove, or reorder keys inside the copied dicts.
+- Empty input returns [].
+- No CLI or dependencies. Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from this slice.

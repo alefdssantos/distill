@@ -19,7 +19,7 @@ use distill_shell::session::helpers::session_compact::COMPACT_CANCELLED_MSG;
 use distill_shell::session::unified_list::ListScope;
 
 #[test]
-fn session_ultracode_readback_survives_model_initialization_and_resets_for_new_or_old_server() {
+fn session_execution_mode_readback_survives_model_initialization_and_resets_for_new_or_old_server() {
     use distill_shell::sampling::types::ReasoningEffort;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -34,15 +34,17 @@ fn session_ultracode_readback_survives_model_initialization_and_resets_for_new_o
             ),
         ],
     ));
-    for (session, ultracode, fresh) in [
-        ("restored-on", Some(true), false),
-        ("fresh-off", Some(false), true),
+    for (session, execution_mode, fresh) in [
+        ("restored-ultrafast", Some(distill_tool_types::ExecutionMode::Ultrafast), false),
+        ("restored-ultracode", Some(distill_tool_types::ExecutionMode::Ultracode), false),
+        ("restored-ultrasave", Some(distill_tool_types::ExecutionMode::Ultrasave), false),
+        ("fresh-normal", Some(distill_tool_types::ExecutionMode::Normal), true),
         ("older-response", None, false),
     ] {
-        // A missing/false response must clear a previous session's on selection,
+        // A missing/Normal response must clear a previous session's selection,
         // including when the server omits a replacement model catalog.
-        app.models.ultracode = true;
-        app.agents.get_mut(&id).unwrap().session.models.ultracode = true;
+        app.models.execution_mode = distill_tool_types::ExecutionMode::Ultracode;
+        app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Ultracode;
         let models = catalog.take();
         let result = if fresh {
             TaskResult::SessionCreated {
@@ -67,20 +69,20 @@ fn session_ultracode_readback_survives_model_initialization_and_resets_for_new_o
             Action::TaskComplete(TaskResult::WithPinnedMemoryMode {
                 agent_id: id,
                 memory_mode: None,
-                ultracode,
+                execution_mode,
                 result: Box::new(result),
             }),
             &mut app,
         );
         let agent = expect_agent(&app, id);
         assert_eq!(
-            agent.session.models.ultracode,
-            ultracode.unwrap_or(false),
+            agent.session.models.execution_mode,
+            execution_mode.unwrap_or_default(),
             "{session}"
         );
         assert_eq!(
-            app.models.ultracode,
-            ultracode.unwrap_or(false),
+            app.models.execution_mode,
+            execution_mode.unwrap_or_default(),
             "{session}"
         );
         assert_eq!(agent.session.models.current.as_ref(), Some(&model_id));

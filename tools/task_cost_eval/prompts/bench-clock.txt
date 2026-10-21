@@ -1,0 +1,5 @@
+Implement tools/task_cost_eval/fixtures/bench_clock/clock.py with Python's standard library. Retain these exact public signatures: def parse_time(text):; def format_time(minutes):; def add_minutes(text, delta):
+
+parse_time(text) returns int minutes since midnight. Accept exactly ASCII H:MM or HH:MM in 24-hour mode (hours 0..23), or the same followed by one ASCII space and AM/PM in any ASCII letter case (hours 1..12). Minutes must have exactly two ASCII digits 00..59. Examples: "9:05 am", "23:59", "12:00 AM". No outer whitespace, seconds, Unicode digits, or other separators. Non-string or malformed/out-of-range text raises ValueError. format_time(minutes) accepts int 0..1439, not bool, returns zero-padded HH:MM; otherwise ValueError. add_minutes(text, delta) parses text, accepts an arbitrary signed int delta (not bool), wraps modulo 1440 and returns canonical HH:MM. Invalid delta raises ValueError. All functions are pure; inputs never change. There is no locale, timezone, ordering, or duplicate handling; repeated calls are independent.
+
+No CLI or dependencies. Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from the fixture directory.

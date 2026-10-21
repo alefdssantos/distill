@@ -110,7 +110,7 @@ Switch models. Accepts a model ID or display name (case-insensitive), and for re
 
 ### `/worker-model <name> [effort|auto] [variant]|clear`
 
-Choose the optional worker model and its effort. The main model gives the worker every assignment a precise spec fully determines and keeps planning, judgment and review for itself. The effort is a level the model offers, or `auto` (the default), which lets the decision layer pick it for every call. `clear` removes the worker, so the main model does all the work. The optional `variant` applies to OpenRouter models only: `floor` (default, cheapest provider first), `nitro`, `exacto` or `none`; it is saved as `[models].worker_variant`. Alias: `/worker`. `/tiers worker <name> [effort|auto]` does the same, and bare `/tiers` (or `change` in the prompt footer) opens the Models screen. There, Auto routing comes first: `a` turns it on or off, and Accounts & routes opens `/accounts`. Below it, pick the Main, Worker and Utility models from searchable lists, choose each effort (`auto` is recommended), toggle Ultracode, then press `s` to save. While Auto routing is on, the Main and Worker you pick run only when Auto is off.
+Choose the optional worker model and its effort. The main model gives the worker every assignment a precise spec fully determines and keeps planning, judgment and review for itself. The effort is a level the model offers, or `auto` (the default), which lets the decision layer pick it for every call. `clear` removes the worker, so the main model does all the work. The optional `variant` applies to OpenRouter models only: `floor` (default, cheapest provider first), `nitro`, `exacto` or `none`; it is saved as `[models].worker_variant`. Alias: `/worker`. `/tiers worker <name> [effort|auto]` does the same, and bare `/tiers` (or `change` in the prompt footer) opens the Models screen. There, Auto routing comes first: `a` turns it on or off, and Accounts & routes opens `/accounts`. Below it, pick the Main, Worker and Utility models from searchable lists, choose each effort (`auto` is recommended), choose the execution mode, then press `s` to save. While Auto routing is on, the Main and Worker you pick run only when Auto is off.
 
 ```
 /worker-model gpt-6-luna auto
@@ -126,15 +126,23 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
-### `/ultracode [on|off]`
+### `/ultrafast [on|off]`, `/ultracode [on|off]`, and `/ultrasave [on|off]`
 
-Toggle Ultracode for the current session. While on, every request you send is treated as a dynamic workflow: the main agent plans briefly, fans the independent parts out to parallel subagents, then integrates the results and runs the verification itself. Trivial single-step requests are still done directly. Ultracode is independent of the reasoning effort and never changes it. The prompt status line shows `Ultracode: on` or `Ultracode: off`, and the Models screen has an Ultracode toggle. `/ultracode` with no argument flips the current state.
+Each session has one execution mode: **Normal**, **UltraFast**, **UltraCode**, or **UltraSave**. Selecting a mode replaces the previous one. With no argument, the command toggles its mode; `off` returns to Normal only when that command's mode is active.
+
+UltraFast prioritizes direct execution and parallel independent tasks, with one level of executors and the same required verification. UltraCode keeps its existing task decomposition policy. UltraSave prioritizes token economy. All modes preserve an explicitly selected model and reasoning effort.
+
+The prompt footer shows `Mode: Normal`, `Mode: UltraFast`, `Mode: UltraCode`, or `Mode: UltraSave`. In the Models screen, select **Execution** and press Enter to cycle through Normal → UltraFast → UltraCode → UltraSave → Normal, then save.
 
 ```
-/ultracode
+/ultrafast on
 /ultracode on
 /ultracode off
+/ultrasave on
+/ultrasave off
 ```
+
+For headless prompts, use `--ultrafast`, `--ultracode`, or `--ultrasave`. The flags cannot be combined, and the prompt is sent only after the agent confirms the requested mode.
 
 ### `/always-approve`
 

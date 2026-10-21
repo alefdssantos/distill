@@ -15,16 +15,20 @@ import tomllib
 import uuid
 from pathlib import Path
 
-from .acp_driver import OwnedTree, run_acp
+from .acp_driver import EXECUTION_MODES, OwnedTree, run_acp
 from .compare_codex import LOCAL_TOOLS, distill_accounting, distill_config, subscription_account
 from .evaluate import _sha256_file, _sha256_tree
 from .parallel_verdict import verdict
 from .runner import _terminate_owned_group
+from .ultrafast_verdict import verdict as ultrafast_verdict
+from .ultrasave_verdict import verdict as ultrasave_verdict
 
 ROOT = Path(__file__).resolve().parent
 MODEL = 'chatgpt/gpt-6.1-sol'
 VARIANTS = ('baseline', 'candidate')
 TOKEN_FIELDS = ('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_tokens')
+CAPACITY_ENV = ('GROK_MAX_CONCURRENT_SUBAGENTS', 'GROK_SUBAGENT_SAMPLING_LIMIT',
+                'GROK_WORKFLOW_MAX_CONCURRENT_AGENTS')
 
 
 def plan_runs(cohort, repetitions, order_seed=None):
@@ -80,7 +84,11 @@ def run_grader(script, worktree, output, timeout=30):
 def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
             frozen_inputs, binary_hash,
             ultracode=False, max_depth=None, model=MODEL, effort=None, transport='cli',
-            worker_model='chatgpt/gpt-6-luna', worker_effort='auto', utility_effort='auto', order_seed=None):
+            worker_model='chatgpt/gpt-6-luna', worker_effort='auto', utility_effort='auto', order_seed=None,
+            execution_mode=None, max_concurrent=None):
+    if execution_mode is not None and (execution_mode not in EXECUTION_MODES or ultracode):
+        raise ValueError('Use one execution_mode or the legacy ultracode flag')
+    mode = execution_mode or ('ultracode' if ultracode else 'normal')
     output = work_root / f'{variant}-{case["id"]}-{repetition}'
     output.mkdir(parents=True, exist_ok=False)
     worktree = output / 'worktree'
@@ -107,18 +115,20 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
                    if not k.endswith('_API_KEY') and k != 'DISTILL_BENCH_NO_EXTERNAL_MODEL_KEY'}
     environment.update(GROK_MANAGED_MCPS_ENABLED='false', GROK_MANAGED_MCP_GATEWAY_TOOLS_ENABLED='false',
                        DISTILL_HOME=str(home), GROK_HOME=str(home))
-    sanitize = (transport == 'acp' or order_seed is not None
+    sanitize = (transport == 'acp' or order_seed is not None or execution_mode is not None or max_concurrent is not None
                 or (worker_effort, utility_effort) != ('auto', 'auto')
                 or worker_model != 'chatgpt/gpt-6-luna')
     removed = []
     if sanitize:
-        removed = sorted(k for k in environment if k == 'GROK_AGENT' or (
+        removed = sorted(k for k in environment if k == 'GROK_AGENT' or (max_concurrent is not None and k in CAPACITY_ENV) or (
             k.startswith(('GROK_', 'DISTILL_', 'JEV_', 'CODEX_', 'OPENAI_'))
             and any(token in k for token in ('DEPTH', 'MODEL', 'EFFORT'))))
         for key in removed:
             environment.pop(key)
     if max_depth is not None:
         environment['GROK_SUBAGENTS_MAX_DEPTH'] = str(max_depth)
+    if max_concurrent is not None:
+        environment.update({key: str(max_concurrent) for key in CAPACITY_ENV})
     command = [str(binary), '--no-leader', '--always-approve', '--disable-web-search',
                '--cwd', str(worktree), '--session-id', session, '--prompt-file', str(output / 'prompt.txt'),
                '--output-format', 'streaming-json', '--model', model, '--tools', LOCAL_TOOLS]
@@ -129,12 +139,14 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
         if effort not in (None, 'auto'):
             command.extend(['--effort', effort])
         command.append('stdio')
-    elif ultracode:
-        command.append('--ultracode')
+    elif mode != 'normal':
+        command.append(f'--{mode}')
     if transport == 'cli' and effort is not None:
         command.extend(['--effort', effort])
     (output / 'command.json').write_text(json.dumps(command, indent=2) + '\n')
-    settings = {'transport': transport, 'ultracode': ultracode, 'max_depth': max_depth,
+    settings = {'transport': transport, 'ultracode': mode == 'ultracode', 'execution_mode': mode,
+                'max_depth': max_depth, 'max_concurrent': max_concurrent,
+                'capacity_env': {key: environment.get(key) for key in CAPACITY_ENV},
                 'launch_command': command,
                 'depth_env': environment.get('GROK_SUBAGENTS_MAX_DEPTH'),
                 'model': model, 'effort': effort or 'auto',
@@ -160,7 +172,8 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
         auth.chmod(0o600)
         if transport == 'acp':
             acp = run_acp(command, cwd=worktree, environment=environment, prompt=prompt,
-                          model=model, effort=effort, ultracode=ultracode, timeout=timeout, output=output)
+                          model=model, effort=effort, ultracode=ultracode, execution_mode=execution_mode,
+                          timeout=timeout, output=output)
             session, timed_out = acp['session'], acp['timed_out']
             settings['model_receipt'] = acp.get('model_receipt')
             settings['activation_receipt'] = acp.get('activation_receipt')
@@ -203,15 +216,19 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
     unchanged = frozen_inputs == case_hashes(case)
     binary_unchanged = binary_hash == _sha256_file(binary)
     if acp is None:
-        activation_confirmed = f'UltraCode enabled for session {session}' in (output / 'stderr.txt').read_text()
+        label = {'ultracode': 'UltraCode', 'ultrafast': 'UltraFast', 'ultrasave': 'UltraSave'}.get(mode)
+        activation_confirmed = (mode == 'normal' or
+            f'{label} enabled for session {session}' in (output / 'stderr.txt').read_text())
         exit_code, transport_ok = process.returncode, True
     else:
         activation = (acp.get('activation_receipt') or {}).get('result')
-        activation_confirmed = isinstance(activation, dict) and activation.get('enabled') is True
+        activation_confirmed = isinstance(activation, dict) and (
+            activation.get('mode') == execution_mode if execution_mode is not None
+            else activation.get('enabled') is ultracode)
         exit_code, transport_ok = acp['exit_code'], acp['completed']
     return {'variant': variant, 'case': case['id'], 'kind': case['kind'], 'repetition': repetition,
             'passed': grade['exit_code'] == 0 and not grade['timed_out'] and unchanged and binary_unchanged and not timed_out
-                      and exit_code == 0 and transport_ok and (not ultracode or activation_confirmed),
+                      and exit_code == 0 and transport_ok and activation_confirmed,
             'wall_time_s': round(wall, 6), 'credits': accounting.get('credit_estimate'),
             **{f: accounting.get(f) for f in TOKEN_FIELDS}, 'model_calls': accounting.get('calls'),
             'accounting_complete': bool(accounting['accounting_complete'] and (not sanitize or evidence['complete'])),
@@ -219,7 +236,8 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
             'call_usage': accounting.get('call_usage', []),
             'exit_code': exit_code, 'timed_out': timed_out, 'session': session, 'grader': grade,
             'acp': acp, 'accounting_reason': accounting.get('reason'),
-            'settings': settings, 'ultracode_activation_confirmed': activation_confirmed,
+            'settings': settings, 'ultracode_activation_confirmed': mode == 'ultracode' and activation_confirmed,
+            'execution_mode_activation_confirmed': activation_confirmed,
             'frozen_inputs_unchanged': unchanged, 'binary_unchanged': binary_unchanged,
             'output_dir': str(output)}
 
@@ -237,8 +255,8 @@ def aggregate(runs):
         out[name] = {'runs': len(rows), 'accepted': accepted, 'accounting_complete': complete,
                      'credits': credits, 'credits_per_accepted': credits / accepted if credits is not None and accepted else None,
                      'wall_time_s': sum(r['wall_time_s'] for r in rows),
-                     'model_calls': sum(r['model_calls'] or 0 for r in rows),
-                     **{f: sum(r[f] or 0 for r in rows) for f in TOKEN_FIELDS}}
+                     **{f: sum(r[f] for r in rows) if all(r.get(f) is not None for r in rows) else None
+                        for f in ('model_calls', *TOKEN_FIELDS)}}
     return out
 
 
@@ -253,9 +271,15 @@ def main(argv=None):
     parser.add_argument('--worker-model', default='chatgpt/gpt-6-luna',
                         help='[models].worker for both variants')
     parser.add_argument('--utility-effort', default='auto', help='[jev.local].effort for both variants')
+    parser.add_argument('--max-concurrent', type=int, help='common task, sampling, and workflow capacity')
+    parser.add_argument('--verdict', choices=('parallel', 'ultrafast', 'ultrasave'), default='parallel',
+                        help='paired same-binary ACP gates: ultrafast >=30%% time savings; ultrasave >=20%% token savings')
     for variant in VARIANTS:
-        parser.add_argument(f'--{variant}-ultracode', action='store_true',
+        mode = parser.add_mutually_exclusive_group()
+        mode.add_argument(f'--{variant}-ultracode', action='store_true',
                             help=f'enable the real session mode for {variant}; default off')
+        mode.add_argument(f'--{variant}-mode', choices=EXECUTION_MODES,
+                          help='explicit mutually exclusive mode; ACP requires the new mode endpoint')
         parser.add_argument(f'--{variant}-max-depth', type=int,
                             help='set GROK_SUBAGENTS_MAX_DEPTH (1 = flat, 2+ = nested); default inherits runtime')
     parser.add_argument('--model', default=MODEL)
@@ -275,6 +299,16 @@ def main(argv=None):
         parser.error('--repetitions must be at least 1')
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('--timeout must be finite and greater than zero')
+    if args.max_concurrent is not None and args.max_concurrent < 1:
+        parser.error('--max-concurrent must be at least 1')
+    paired_mode = args.verdict in ('ultrafast', 'ultrasave')
+    baseline_modes = ('normal', 'ultracode') if args.verdict == 'ultrafast' else ('normal',)
+    if paired_mode and (
+            args.transport != 'acp' or args.candidate_mode != args.verdict or
+            args.baseline_mode not in baseline_modes or args.max_concurrent is None or
+            args.order_seed is None or args.baseline_max_depth != args.candidate_max_depth):
+        parser.error(f'{args.verdict} verdict requires ACP, explicit {"/".join(baseline_modes)} vs {args.verdict} modes, '
+                     '--max-concurrent, --order-seed, and identical depth overrides')
     for variant in VARIANTS:
         depth = getattr(args, f'{variant}_max_depth')
         if depth is not None and depth < 1:
@@ -287,7 +321,9 @@ def main(argv=None):
             parser.error(f'unknown case IDs: {", ".join(sorted(unknown))}')
         cohort = {**cohort, 'cases': [c for c in cohort['cases'] if c['id'] in args.cases]}
     settings = {variant: {'ultracode': getattr(args, f'{variant}_ultracode'),
+                          'execution_mode': getattr(args, f'{variant}_mode'),
                           'max_depth': getattr(args, f'{variant}_max_depth'),
+                          'max_concurrent': args.max_concurrent,
                           'model': args.model, 'effort': args.effort, 'transport': args.transport,
                           'worker_model': args.worker_model, 'worker_effort': args.worker_effort,
                           'utility_effort': args.utility_effort,
@@ -305,6 +341,8 @@ def main(argv=None):
             parser.error(f'binary not found: {binary}')
     binaries = {variant: binary.expanduser().resolve() for variant, binary in binaries.items()}
     frozen = comparison_hashes(cohort, binaries, args.cohort)
+    if paired_mode and len(set(frozen['binaries'].values())) != 1:
+        parser.error(f'{args.verdict} verdict requires the same binary SHA-256 for both variants')
     if frozen['support_files'][str(args.cohort.resolve())] != hashlib.sha256(cohort_bytes).hexdigest():
         raise RuntimeError('Frozen cohort changed before execution')
     profile = args.distill_profile.expanduser()
@@ -321,17 +359,20 @@ def main(argv=None):
         if comparison_hashes(cohort, binaries, args.cohort) != frozen:
             raise RuntimeError('Frozen comparison inputs or binaries changed after execution')
         runs.append(run)
-        print(json.dumps({k: run[k] for k in ('variant', 'case', 'repetition', 'passed', 'credits')}), flush=True)
+        print(json.dumps({k: run[k] for k in ('variant', 'case', 'repetition', 'passed', 'wall_time_s',
+                                             'credits', 'accounting_complete')}), flush=True)
         if run.get('acp') is not None and not run['acp']['cleanup_complete']:
             break  # Never start another model while teardown remains unverified.
     results = {'cohort_id': cohort['cohort_id'], 'model': args.model, 'effort': args.effort or 'auto',
                'variant_settings': settings, 'cases': [c['id'] for c in cohort['cases']],
                'frozen_input_hashes': frozen['inputs'], 'frozen_support_hashes': frozen['support_files'],
-               'transport': args.transport, 'order_seed': args.order_seed,
+               'transport': args.transport, 'order_seed': args.order_seed, 'repetitions': args.repetitions,
+               'verdict_policy': args.verdict,
                'runs': runs, 'aggregates': aggregate(runs),
                'binaries': {v: {'path': str(b), 'sha256': frozen['binaries'][v]}
                             for v, b in binaries.items()}}
-    results['verdict'] = verdict(results)
+    results['verdict'] = {'parallel': verdict, 'ultrafast': ultrafast_verdict,
+                          'ultrasave': ultrasave_verdict}[args.verdict](results)
     invalid = [f'{r["variant"]} {r["case"]}#{r["repetition"]}: {r["acp"]["error"] or "ACP incomplete"}'
                for r in runs if r.get('acp') is not None
                and (not r['acp']['setup_confirmed'] or not r['acp']['cleanup_complete'])]

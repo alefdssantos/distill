@@ -267,7 +267,7 @@ fn wedged_child_handle() -> (
         reasoning_effort: None,
         worker_override: crate::session::handle::new_session_worker_state(),
         jev_effort_auto: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        ultracode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        execution_mode: std::sync::Arc::new(distill_tool_types::AtomicExecutionMode::default()),
         yolo_mode: false,
         origin_client: None,
         code_nav_enabled: false,

@@ -3873,7 +3873,7 @@
         let tiers = PromptModelTiers {
             main: "gpt-6-sol (auto)".to_owned(),
             worker: Some("gpt-6-luna".to_owned()),
-            ultracode: true,
+            execution_mode: distill_tool_types::ExecutionMode::Ultracode,
         };
         let info = PromptInfo {
             model_tiers: Some(&tiers),
@@ -3891,7 +3891,7 @@
             .map(|y| buf_text_at(&buf, 0, area.width, y))
             .find(|line| line.contains("Worker:"))
             .expect("model tier footer row");
-        assert!(row.contains("Main: gpt-6-sol (auto) | Worker: gpt-6-luna | Ultracode: on | change"));
+        assert!(row.contains("Main: gpt-6-sol (auto) | Worker: gpt-6-luna | Mode: UltraCode | change"));
 
         let style_at = |needle: &str| {
             let byte_x = row.find(needle).expect("footer text") as usize;
@@ -3904,7 +3904,7 @@
         let theme = Theme::current();
         assert_eq!(style_at("Main:").fg, Some(theme.accent_skill));
         assert_eq!(style_at("Worker:").fg, Some(theme.accent_success));
-        assert_eq!(style_at("Ultracode:").fg, Some(theme.accent_thinking));
+        assert_eq!(style_at("Mode:").fg, Some(theme.accent_thinking));
         let change_style = style_at("change");
         assert_eq!(change_style.fg, Some(theme.accent_system));
         assert!(change_style.add_modifier.contains(Modifier::UNDERLINED));
@@ -3941,9 +3941,9 @@
         assert_eq!(summary.worker.as_deref(), Some("GPT-6-Luna (medium)"));
     }
 
-    /// The status line names the Ultracode state after the worker segment, and `from_model_state` carries it from the session.
+    /// The status line names the exclusive execution mode after the worker segment, and `from_model_state` carries it from the session.
     #[test]
-    fn model_tier_footer_text_shows_ultracode_on_and_off() {
+    fn model_tier_footer_text_shows_each_execution_mode() {
         let mut models = crate::acp::ModelState::default();
         let main = agent_client_protocol::ModelId::new("m");
         models.available.insert(
@@ -3952,8 +3952,13 @@
         );
         models.current = Some(main);
         models.effort_auto = true;
-        for (on, expected) in [(true, "Main: M (auto) | Ultracode: on | change"), (false, "Main: M (auto) | Ultracode: off | change")] {
-            models.ultracode = on;
+        for (mode, expected) in [
+            (distill_tool_types::ExecutionMode::Normal, "Main: M (auto) | Mode: Normal | change"),
+            (distill_tool_types::ExecutionMode::Ultrafast, "Main: M (auto) | Mode: UltraFast | change"),
+            (distill_tool_types::ExecutionMode::Ultracode, "Main: M (auto) | Mode: UltraCode | change"),
+            (distill_tool_types::ExecutionMode::Ultrasave, "Main: M (auto) | Mode: UltraSave | change"),
+        ] {
+            models.execution_mode = mode;
             let tiers = PromptModelTiers::from_model_state(&models).expect("main model");
             let info = PromptInfo {
                 model_tiers: Some(&tiers),
@@ -3980,7 +3985,7 @@
         let tiers = PromptModelTiers {
             main: "gpt-6-astra (auto)".to_owned(),
             worker: None,
-            ultracode: false,
+            execution_mode: distill_tool_types::ExecutionMode::Normal,
         };
         let info = PromptInfo {
             model_tiers: Some(&tiers),
@@ -3998,7 +4003,7 @@
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("Main: gpt-6-astra (auto) | Ultracode: off | change"));
+        assert!(text.contains("Main: gpt-6-astra (auto) | Mode: Normal | change"));
         assert!(!text.contains("Reasoning:"));
         assert!(result.change_rect.is_some());
     }

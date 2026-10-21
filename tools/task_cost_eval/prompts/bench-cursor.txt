@@ -1,0 +1,27 @@
+Implement the cursor utilities in tools/task_cost_eval/fixtures/bench_cursor/cursors.py with only the Python standard library (Python 3.11+). Keep exactly these public signatures:
+
+encode_cursor(created_at, id) -> str
+decode_cursor(token) -> tuple[int, str]
+paginate(records, limit, cursor=None) -> tuple[list[dict], str | None]
+
+Cursor token format:
+- Validate created_at is an int and not a bool; validate id is a str. Raise ValueError otherwise.
+- Build the payload with json.dumps([created_at, id], ensure_ascii=False, separators=(',', ':')), encode it as UTF-8, encode with URL-safe base64, and strip all '=' padding. The result contains only A-Z, a-z, 0-9, '-', and '_'. Examples: (1700000000, 'abc') -> 'WzE3MDAwMDAwMDAsImFiYyJd'; (1, 'é雪') -> 'WzEsIsOp6ZuqIl0'.
+
+Strict decoding (raise ValueError for every failure):
+- token must be a non-empty str.
+- token must contain only the base64url alphabet and no '=' padding; a length whose remainder modulo 4 is 1 is invalid.
+- The decoded bytes must be valid UTF-8 and valid JSON.
+- The JSON value must be a list of exactly two elements: index 0 an int that is not a bool, index 1 a str. Negative created_at values and empty id strings are allowed.
+- The token must be canonical: re-encoding the decoded pair with encode_cursor must reproduce the token byte-for-byte. Reject alternate JSON spellings (extra spaces, '\\u' escapes where plain UTF-8 is canonical, floats, booleans, nulls, objects, or arrays of the wrong length).
+
+Pagination:
+- limit must be an int that is not a bool and is at least 1; otherwise raise ValueError.
+- records must be an iterable of dicts; otherwise raise ValueError (a non-iterable, a non-dict element, or a dict missing 'created_at' or 'id' each raise ValueError). Each record's created_at/id must satisfy the same type rules as the cursor pair. The (created_at, id) pair must be unique across records; duplicates raise ValueError. Extra record keys are allowed.
+- cursor must be None or a str; a str is decoded with decode_cursor and must be valid.
+- Order records deterministically by (created_at, id) in descending order: larger created_at first, and for equal created_at larger id first (ordinary Python string order). Do not rely on input order for ties.
+- If a cursor is supplied, keep only records whose (created_at, id) is strictly less than the decoded cursor pair in that ordering. This is offset-free: the cursor identifies the last record of the previous page.
+- Return a tuple: the first element is a new list containing at most limit record dicts (shallow copies detached from the input), in the computed order; the second element is the cursor of the last returned record when further matching records remain after the page, otherwise None. An empty result page returns ([], None).
+- Do not mutate records or the cursor. Accept generators for records.
+
+No CLI or dependencies. Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from this slice.

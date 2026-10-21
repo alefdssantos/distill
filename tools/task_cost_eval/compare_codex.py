@@ -121,7 +121,7 @@ hooks = false
 '''
 
 
-def distill_accounting(home, session, *, strict=False):
+def distill_accounting(home, session, *, strict=False, zero_usage_attempts=frozenset()):
     if strict:
         # Independent persisted evidence, not assistant-message counts: a single
         # response can contain multiple messages, and side calls have no history.
@@ -141,8 +141,30 @@ def distill_accounting(home, session, *, strict=False):
                 reasons.append(f'{path}: {error}')
                 return [] if lines else {}
 
+        directories = {p.parent.name: p.parent for name in ('usage.json', 'events.jsonl', 'updates.jsonl')
+                       for p in sorted((home / 'sessions').rglob(name))}
+        logs = read(home / 'logs/unified.jsonl', lines=True)
+        # A retry the runtime observed before any channel emitted output cannot
+        # have produced billable output; the provider failed before generation.
+        # Only those attempts, each corroborated by its own retry log line, may
+        # be reconciled as known zero-usage calls. An attempt that had already
+        # started streaming keeps its unknown usage and the ledger stays
+        # incomplete.
+        corroborated = set()
+        for row in logs:
+            if row.get('msg') != 'shell.turn.inference_retry':
+                continue
+            ctx = row.get('ctx', {})
+            if ctx.get('output_started') is not False:
+                continue
+            request = ctx.get('sampler_request_id')
+            if request:
+                corroborated.add(
+                    f'sampler:{request}:retry:{ctx.get("kind")}:{ctx.get("attempt")}')
+        zero_usage_attempts = frozenset(zero_usage_attempts) | corroborated
         try:
-            result = distill_accounting(home, session)
+            result = distill_accounting(
+                home, session, zero_usage_attempts=zero_usage_attempts)
         except (OSError, ValueError, KeyError, TypeError) as error:
             result = {'accounting_complete': False, 'reason': f'invalid usage ledger: {error}'}
         if not result['accounting_complete']:
@@ -150,13 +172,10 @@ def distill_accounting(home, session, *, strict=False):
         for row in result.get('call_usage', []):
             if row['owner'] is None:
                 reasons.append(f'{row["attempt"]}: ambiguous owning session in usage ledgers')
-        directories = {p.parent.name: p.parent for name in ('usage.json', 'events.jsonl', 'updates.jsonl')
-                       for p in sorted((home / 'sessions').rglob(name))}
         ledgers = {sid: read(path / 'usage.json').get('session', {}) for sid, path in directories.items()}
         attempts = {sid: {row['attempt_id']: row for row in ledger.get('attributions', [])}
                     for sid, ledger in ledgers.items()}
         canonical = attempts.get(session, {})
-        logs = read(home / 'logs/unified.jsonl', lines=True)
         logged_sessions = {row.get('sid') for row in logs
                            if str(row.get('msg', '')).startswith('shell.turn.inference_') and row.get('sid')}
         for sid in sorted(logged_sessions - directories.keys()):
@@ -275,6 +294,7 @@ def distill_accounting(home, session, *, strict=False):
                          'omitted auxiliary attempts cannot be ruled out.']
         evidence = {'complete': not reasons, 'reasons': reasons,
                     'available_evidence_matches': not reasons, 'coverage_gaps': coverage_gaps,
+                    'zero_usage_attempts': sorted(zero_usage_attempts),
                     'logged_session_ids': sorted(logged_sessions),
                     'canonical_attempt_ids': sorted(canonical), 'sessions': sessions,
                     'descendants': descendants, 'artifacts': artifacts,
@@ -403,7 +423,12 @@ def distill_accounting(home, session, *, strict=False):
                     'requested_effort': attribution.get('requested_effort'),
                     'effort': attribution.get('applied_effort')}
         if not usage:
-            rows.append({**identity, 'complete': False})
+            if attribution['attempt_id'] in zero_usage_attempts:
+                rows.append({**identity, 'complete': True, 'imputed_zero_usage': True,
+                             'input_tokens': 0, 'cached_input_tokens': 0,
+                             'output_tokens': 0, 'reasoning_tokens': 0, 'credits': 0.0})
+            else:
+                rows.append({**identity, 'complete': False})
             continue
         incoming = usage['prompt_tokens']
         outgoing = usage['completion_tokens']
@@ -419,7 +444,13 @@ def distill_accounting(home, session, *, strict=False):
                        for key, value in total_fields.items())
     subscription_only = all(row.get('endpoint') == 'https://chatgpt.com/backend-api/codex/responses'
                             for row in rows)
-    complete = (bool(rows) and totals_match and subscription_only and not ledger.get('usageIsIncomplete', False)
+    zeroed = {row['attempt'] for row in rows if row.get('imputed_zero_usage')}
+    corroborated = zero_usage_attempts & {row['attempt'] for row in rows}
+    explained_incomplete = (bool(corroborated) and zeroed == corroborated
+                            and not (ledger.get('pendingAttemptIds') or ledger.get('pending_attempt_ids'))
+                            and all(r['complete'] and r.get('credits') is not None for r in rows))
+    complete = (bool(rows) and totals_match and subscription_only
+                and (not ledger.get('usageIsIncomplete', False) or explained_incomplete)
                 and len(root_ids) == len(rows) == ledger['modelCalls']
                 and child_ids <= root_ids and all(r['complete'] and r.get('credits') is not None for r in rows))
     return {'accounting_complete': complete, 'calls': len(rows), 'call_usage': rows,

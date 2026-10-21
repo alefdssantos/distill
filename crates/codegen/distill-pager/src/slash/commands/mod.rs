@@ -110,6 +110,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(loop_cmd::LoopCommand),
         Arc::new(plan::PlanCommand),
         Arc::new(ultracode::UltracodeCommand),
+        Arc::new(ultracode::UltrafastCommand),
+        Arc::new(ultracode::UltrasaveCommand),
         Arc::new(view_plan::ViewPlanCommand),
         Arc::new(remember::RememberCommand),
         Arc::new(memory::MemoryCommand),

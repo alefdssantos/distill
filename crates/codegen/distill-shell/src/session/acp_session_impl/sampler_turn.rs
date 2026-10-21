@@ -9,6 +9,37 @@ use distill_telemetry::region;
 use distill_telemetry::region::Parent;
 
 const CLASSIFIER_REQUEST_TOKEN_RESERVE: u64 = 16_384;
+/// Tools UltraFast and UltraSave offer: direct inspection, editing, shell access
+/// and MCP lookup. Everything else is a whole-round detour from the objective.
+pub(crate) const EXECUTION_MODE_TOOLS: &[&str] = &[
+    "ask_stored_output",
+    "get_command_or_subagent_output",
+    "grep",
+    "kill_command_or_subagent",
+    "list_dir",
+    "read_file",
+    "run_terminal_command",
+    "search_replace",
+    "search_tool",
+    "use_tool",
+    "write",
+];
+
+/// The tool list a mode sends. Modes without a fixed set (Normal, UltraCode)
+/// keep the harness selection unchanged.
+pub(crate) fn execution_mode_tool_definitions(
+    mode: distill_tool_types::ExecutionMode,
+    defs: Vec<ToolDefinition>,
+) -> Vec<ToolDefinition> {
+    use distill_tool_types::ExecutionMode;
+    if !matches!(mode, ExecutionMode::Ultrafast | ExecutionMode::Ultrasave) {
+        return defs;
+    }
+    defs.into_iter()
+        .filter(|def| EXECUTION_MODE_TOOLS.contains(&def.function.name.as_str()))
+        .collect()
+}
+
 const COMPACT_SKILL_TOOL_DESCRIPTION: &str = "Load a specialized skill that provides domain-specific instructions and workflows.\n\nWhen a task matches a skill named in the current session prompt, invoke this tool with that exact name. The tool reads the authoritative AvailableSkills resource and injects the full SKILL.md content plus bundled-file access into the conversation via a <skill_content name=\"...\"> block. If the name is not present in the compact prompt announcement, use its recovery/resource instructions before invoking it.";
 
 fn compact_skill_tool_definition(
@@ -561,7 +592,14 @@ impl SessionActor {
         // and, with a worker model, delegation (B6: always recorded; its hint
         // joins the turn's next model request only with the flag on). Plan mode
         // is left untouched inside the pass.
-        self.jev_filter_tool_definitions(defs, plan_active).await
+        let defs = self.jev_filter_tool_definitions(defs, plan_active).await;
+        // Plan mode owns its tool contract; the execution-mode projection never
+        // removes a tool the plan workflow requires.
+        if plan_active {
+            defs
+        } else {
+            execution_mode_tool_definitions(self.execution_mode.load(), defs)
+        }
     }
 
     pub(super) fn model_auth_facts(&self, model_id: &str) -> crate::agent::config::ModelAuthFacts {
@@ -2730,6 +2768,7 @@ impl SessionActor {
                     generation: self.turn_phases.current_generation(),
                     waiter: Some(tx),
                     usage_context: Some(usage_context.clone()),
+                    emitted_output: false,
                 },
             );
             rx

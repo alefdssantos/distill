@@ -52,7 +52,7 @@ for line in sys.stdin:
             result['_meta']['canonicalModelId'] = 'other-model'
         if scenario == 'wrong-effort':
             result['_meta']['reasoningEffort'] = 'high'
-    elif method == '_x.ai/session/ultracode/set':
+    elif method in ('_x.ai/session/ultracode/set', '_x.ai/session/execution_mode/set'):
         if scenario == 'activation-error':
             send({'id': request['id'], 'error': {'code': -32601, 'message': 'unsupported'}})
             continue
@@ -70,7 +70,10 @@ for line in sys.stdin:
             if scenario != 'stop-feedback-failure':
                 # Consume cancellation but never answer the activation request.
                 continue
-        result = {'enabled': request['params']['enabled']}
+        result = ({'mode': request['params']['mode']} if method.endswith('/execution_mode/set')
+                  else {'enabled': request['params']['enabled']})
+        if scenario == 'wrong-mode':
+            result = {'mode': 'ultracode'}
         if scenario == 'activation-false':
             result = {'enabled': False}
         if scenario == 'activation-missing':
@@ -169,15 +172,40 @@ def fake_peer(root, scenario='success'):
 
 
 def drive(root, scenario='success', timeout=3, ultracode=True, effort='medium', stop_feedback=None,
-          before_stop_feedback=None):
+          before_stop_feedback=None, execution_mode=None):
     peer = fake_peer(root, scenario)
     return acp_driver.run_acp([str(peer)], cwd=root, environment=os.environ.copy(), prompt='Change fixture',
                              model='chatgpt/gpt-6.1-sol', effort=effort, ultracode=ultracode,
+                             execution_mode=execution_mode,
                              timeout=timeout, output=root, stop_feedback=stop_feedback,
                              before_stop_feedback=before_stop_feedback)
 
 
 class AcpDriverTest(unittest.TestCase):
+    def test_explicit_mode_receipt_precedes_prompt_and_observes_live_children(self):
+        for mode in ('normal', 'ultrafast', 'ultracode', 'ultrasave'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = drive(root, ultracode=False, execution_mode=mode)
+                self.assertTrue(result['completed'], result)
+                self.assertEqual(result['activation_receipt']['result'], {'mode': mode})
+                sent = [json.loads(line)['message'] for line in (root / 'acp-transcript.jsonl').read_text().splitlines()
+                        if json.loads(line)['direction'] == 'sent']
+                methods = [message.get('method') for message in sent]
+                self.assertLess(methods.index(acp_driver.EXECUTION_MODE_METHOD), methods.index('session/prompt'))
+                self.assertNotIn(acp_driver.ULTRACODE_METHOD, methods)
+                self.assertEqual(result['observed_subagent_attempts'], 1)
+                self.assertEqual(result['observed_peak_live_subagents'], 1)
+
+    def test_execution_mode_mismatch_never_sends_prompt(self):
+        for mode in ('ultrafast', 'ultrasave'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = drive(root, 'wrong-mode', ultracode=False, execution_mode=mode)
+                self.assertFalse(result['setup_confirmed'] or result['completed'])
+                self.assertIn(f'mode={mode}', result['error'])
+                self.assertFalse((root / 'prompt-seen').exists())
+
     def test_stop_receipt_tracks_full_write_before_refresh_or_logging_failure(self):
         params = {'sessionId': 'runtime-session', 'hookCallbackId': acp_driver.STOP_CALLBACK_ID,
                   'hookEventName': 'stop', 'reason': 'end_turn'}

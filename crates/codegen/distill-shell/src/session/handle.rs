@@ -125,8 +125,8 @@ pub struct SessionHandle {
     /// Whether Jev may choose effort/model routing for this session. This is
     /// session-local even though the remote model catalog is shared.
     pub jev_effort_auto: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Ultracode mode flag, shared with the session actor.
-    pub ultracode: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Exclusive execution mode, shared with the session actor.
+    pub execution_mode: std::sync::Arc<distill_tool_types::AtomicExecutionMode>,
     /// YOLO (auto-approve) mode for this session.
     /// Per-session tracking prevents cross-client contamination in leader mode where one client enabling YOLO could affect another client's sessions.
     pub yolo_mode: bool,

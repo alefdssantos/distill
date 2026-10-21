@@ -128,8 +128,8 @@ pub struct ModelState {
     /// picks the effort for each model call, and the footer shows `(auto)`.
     /// A fixed level chosen afterwards clears it.
     pub effort_auto: bool,
-    /// Session Ultracode mode (`/ultracode`); the prompt status line shows `Ultracode: on|off`.
-    pub ultracode: bool,
+    /// The session's exclusive mode, shown in the prompt footer and Models screen.
+    pub execution_mode: distill_tool_types::ExecutionMode,
     /// The `(main, worker)` models Auto routing chose for this session; `None`
     /// when the selected Main and Worker run as configured.
     pub auto_route: Option<(acp::ModelId, acp::ModelId)>,
@@ -484,7 +484,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     // metadata: the mode is live client-side state, and an
                     // explicit level (`/effort <level>`, `--effort`) clears it.
                     effort_auto: distill_shell::jev::effort_auto_cached(),
-                    ultracode: false,
+                    execution_mode: distill_tool_types::ExecutionMode::Normal,
                     auto_route,
                     context_window_override: None,
                 }
@@ -499,11 +499,11 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn effort_label_ignores_ultracode() {
+    fn effort_label_ignores_execution_mode() {
         let mut state = ModelState::default();
         state.reasoning_effort = Some(ReasoningEffort::High);
         let off = state.effort_label("Model A");
-        state.ultracode = true;
+        state.execution_mode = distill_tool_types::ExecutionMode::Ultracode;
         assert_eq!(state.effort_label("Model A"), off);
         state.effort_auto = true;
         assert_eq!(state.effort_label("Model A"), "Model A (auto)");

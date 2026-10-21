@@ -53,8 +53,18 @@ impl SessionActor {
 
     /// Stamp ttft on the first token of any channel (reasoning, text, or tool call).
     pub(crate) fn record_turn_first_token(&self, request_id: Option<&distill_sampler::RequestId>) {
-        let Some(generation) = self.turn_generation(request_id) else {
-            return;
+        let generation = match request_id {
+            Some(id) => {
+                let mut streams = self.turn_stream_drained.lock();
+                match streams.get_mut(id) {
+                    Some(ownership) => {
+                        ownership.emitted_output = true;
+                        ownership.generation
+                    }
+                    None => return,
+                }
+            }
+            None => self.turn_phases.current_generation(),
         };
         self.turn_phases.record_first_token(generation);
     }
@@ -450,14 +460,13 @@ impl SessionActor {
                 doom_loop_triggers,
                 doom_loop_aborted_at_chunk,
             } => {
-                if !self.turn_stream_drained.lock().contains_key(&request_id) {
-                    return;
-                }
-                let captured = self
-                    .turn_stream_drained
-                    .lock()
-                    .get(&request_id)
-                    .and_then(|ownership| ownership.usage_context.clone());
+                let (captured, output_started) = {
+                    let streams = self.turn_stream_drained.lock();
+                    match streams.get(&request_id) {
+                        Some(ownership) => (ownership.usage_context.clone(), ownership.emitted_output),
+                        None => return,
+                    }
+                };
                 self.record_sampler_retry_usage(&request_id, attempt, kind, captured)
                     .await;
                 if kind == distill_sampler::SamplingErrorKind::DoomLoopDetected {
@@ -498,6 +507,7 @@ impl SessionActor {
                         "max_retries": max_retries,
                         "kind": kind.as_ref(),
                         "reason": crate::util::truncate(&reason, 300),
+                        "output_started": output_started,
                     })),
                 );
                 self.send_xai_notification(XaiSessionUpdate::RetryState(

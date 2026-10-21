@@ -2493,9 +2493,19 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
         args.prompt_json.as_deref(),
         args.prompt_file.as_deref(),
     )?;
-    if args.ultracode && headless_prompt.is_none() {
+    let execution_mode = if args.ultrafast {
+        distill_tool_types::ExecutionMode::Ultrafast
+    } else if args.ultracode {
+        distill_tool_types::ExecutionMode::Ultracode
+    } else if args.ultrasave {
+        distill_tool_types::ExecutionMode::Ultrasave
+    } else {
+        distill_tool_types::ExecutionMode::Normal
+    };
+    if execution_mode != distill_tool_types::ExecutionMode::Normal && headless_prompt.is_none() {
+        let mode = execution_mode.label().to_ascii_lowercase();
         anyhow::bail!(
-            "--ultracode requires -p/--single, --prompt-file or --prompt-json; use /ultracode on in the interactive UI"
+            "--{mode} requires -p/--single, --prompt-file or --prompt-json; use /{mode} on in the interactive UI"
         );
     }
     if headless_prompt.is_some() || args.memory_flush {
@@ -2561,7 +2571,7 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
                 max_turns: args.max_turns,
                 permission_mode_flag: args.permission_mode_flag.clone(),
                 reasoning_effort: args.reasoning_effort.clone(),
-                ultracode: args.ultracode,
+                execution_mode,
                 wait_for_background: !args.no_wait_for_background,
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,

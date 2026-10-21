@@ -458,6 +458,9 @@ async fn route_preflight_keeps_mid_salvage_terminal_without_rewrite_or_usage() {
 
     LocalSet::new()
         .run_until(async {
+            let account_home = tempfile::tempdir().expect("test account home");
+            let _accounts =
+                crate::accounts::test_home::TestHomeGuard::new(account_home.path());
             crate::jev::set_test_decision_answers([]);
             crate::jev::set_test_local_config(Default::default());
 
@@ -497,7 +500,10 @@ async fn route_preflight_keeps_mid_salvage_terminal_without_rewrite_or_usage() {
                 Err(error) => error,
                 Ok(_) => panic!("oversize salvage must terminate before dispatch"),
             };
-            assert!(crate::sampling::error::is_max_tokens_turn_error(&error));
+            assert!(
+                crate::sampling::error::is_max_tokens_turn_error(&error),
+                "mid-salvage refusal must keep the max-tokens classification: {error:?}"
+            );
             assert_eq!(
                 error
                     .data
@@ -544,6 +550,9 @@ async fn route_preflight_keeps_budgeted_children_local_without_compaction_or_usa
 
     LocalSet::new()
         .run_until(async {
+            let account_home = tempfile::tempdir().expect("test account home");
+            let _accounts =
+                crate::accounts::test_home::TestHomeGuard::new(account_home.path());
             crate::jev::set_test_decision_answers([]);
             crate::jev::set_test_local_config(Default::default());
 
@@ -628,6 +637,9 @@ fn learned_route_cap_bounds_catalogue_output_on_the_real_builder_path() {
                 .build()
                 .expect("test runtime");
             LocalSet::new().block_on(&runtime, async {
+                let account_home = tempfile::tempdir().expect("test account home");
+                let _accounts =
+                    crate::accounts::test_home::TestHomeGuard::new(account_home.path());
                 crate::jev::set_test_decision_answers([]);
                 crate::jev::set_test_local_config(Default::default());
 
@@ -875,6 +887,9 @@ fn deepinfra_overflow_compacts_rebuilds_once_and_allows_later_growth() {
                 .build()
                 .expect("test runtime");
             LocalSet::new().block_on(&runtime, async {
+            let account_home = tempfile::tempdir().expect("test account home");
+            let _accounts =
+                crate::accounts::test_home::TestHomeGuard::new(account_home.path());
             // The real Jev chooser must not run from this sampler seam test:
             // an exhausted test queue returns None without a provider call.
             crate::jev::set_test_decision_answers([]);

@@ -115,6 +115,7 @@ struct TurnRouteAnchor {
     /// Session model the round started from, so a model switch chooses again.
     session_model: String,
     route: TurnRoute,
+    failed_tool_count: u64,
 }
 
 impl JevTurnLedger {
@@ -175,12 +176,14 @@ impl JevTurnLedger {
     /// choose: a new turn, another session model, no round chosen yet (or a
     /// compaction since), or a prompt still small enough that a cache miss is
     /// cheap.
-    pub(crate) fn kept_turn_route(&self, turn: u64, session_model: &str) -> Option<TurnRoute> {
+    pub(crate) fn kept_turn_route(&self, turn: u64, session_model: &str, reuse_small_prompt: bool) -> Option<TurnRoute> {
         let anchor = self.turn_route.as_ref()?;
-        if anchor.turn != turn || anchor.session_model != session_model {
+        if anchor.turn != turn || anchor.session_model != session_model
+            || (reuse_small_prompt && anchor.failed_tool_count != self.facts.failed_tool_count())
+        {
             return None;
         }
-        if self
+        if !reuse_small_prompt && self
             .last_main_prompt_tokens
             .is_none_or(|tokens| tokens < EFFORT_SWITCH_FREE_PROMPT_TOKENS)
         {
@@ -200,6 +203,7 @@ impl JevTurnLedger {
             turn,
             session_model: session_model.into(),
             route,
+            failed_tool_count: self.facts.failed_tool_count(),
         });
     }
 
@@ -408,45 +412,45 @@ mod tests {
         };
         let mut ledger = JevTurnLedger::default();
         assert_eq!(
-            ledger.kept_turn_route(3, "sol"),
+            ledger.kept_turn_route(3, "sol", false),
             None,
             "the turn's first round chooses"
         );
         ledger.anchor_turn_route(3, "sol", high.clone());
         assert_eq!(
-            ledger.kept_turn_route(3, "sol"),
+            ledger.kept_turn_route(3, "sol", false),
             None,
             "without a reported prompt size the round behaves as before"
         );
         ledger.note_round("sol", Some("high".to_owned()));
         ledger.add_usage(EFFORT_SWITCH_FREE_PROMPT_TOKENS - 1, 10);
         assert_eq!(
-            ledger.kept_turn_route(3, "sol"),
+            ledger.kept_turn_route(3, "sol", false),
             None,
             "a miss on a small prompt is cheap, so the round may still choose"
         );
         ledger.add_usage(80_000, 10);
-        assert_eq!(ledger.kept_turn_route(3, "sol"), Some(high.clone()));
+        assert_eq!(ledger.kept_turn_route(3, "sol", false), Some(high.clone()));
         assert_eq!(
-            ledger.kept_turn_route(4, "sol"),
+            ledger.kept_turn_route(4, "sol", false),
             None,
             "a new prompt turn chooses again"
         );
         assert_eq!(
-            ledger.kept_turn_route(3, "luna"),
+            ledger.kept_turn_route(3, "luna", false),
             None,
             "after a model switch the old route's cache is not this model's"
         );
         ledger.note_compaction();
         assert_eq!(
-            ledger.kept_turn_route(3, "sol"),
+            ledger.kept_turn_route(3, "sol", false),
             None,
             "a compaction rewrote the prompt, so its cache is gone anyway"
         );
         ledger.anchor_turn_route(3, "sol", high);
         let _ = ledger.take_rows();
         assert_eq!(
-            ledger.kept_turn_route(3, "sol"),
+            ledger.kept_turn_route(3, "sol", false),
             None,
             "the drain ends the turn"
         );

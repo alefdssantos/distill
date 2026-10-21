@@ -1082,11 +1082,15 @@ fn ultracode_agent_ticks_slow_and_redraws() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
     assert_eq!(app.tick_demand(), TickDemand::None, "idle agent parks");
-    app.agents.get_mut(&id).unwrap().session.models.ultracode = true;
+    app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Ultracode;
     assert_eq!(app.tick_demand(), TickDemand::Slow);
     assert!(app.tick(), "border animation needs a redraw each tick");
-    app.agents.get_mut(&id).unwrap().session.models.ultracode = false;
+    app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Normal;
     assert_eq!(app.tick_demand(), TickDemand::None);
+    app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Ultrafast;
+    assert_eq!(app.tick_demand(), TickDemand::None, "UltraFast needs no idle animation");
+    app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Ultrasave;
+    assert_eq!(app.tick_demand(), TickDemand::None, "UltraSave needs no idle animation");
 }
 #[test]
 fn needs_animation_gates_mode_switch_banner_countdown() {

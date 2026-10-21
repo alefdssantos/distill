@@ -3863,6 +3863,7 @@ dependencies = [
  "distill-sandbox",
  "distill-shell",
  "distill-telemetry",
+ "distill-tool-types",
  "distill-tty-utils",
  "distill-update",
  "distill-version",

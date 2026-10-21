@@ -1,0 +1,20 @@
+Implement normalize_path(path) in tools/task_cost_eval/fixtures/bench_paths/paths.py with only the Python standard library (Python 3.11+). Keep the public signature normalize_path(path) -> str.
+
+Validation:
+- path must be a str; otherwise raise ValueError.
+- path must not be empty; raise ValueError for ''.
+- path must not contain a NUL character ('\x00') anywhere; raise ValueError.
+- path must start with '/'; relative paths raise ValueError.
+- Validation happens before any normalization.
+
+Normalization is purely lexical; do not touch the filesystem:
+- Split the path on '/'. Empty segments and segments equal to '.' are discarded, so repeated slashes collapse.
+- A segment equal to '..' removes the most recently accumulated ordinary segment. If no ordinary segment is accumulated, '..' is a no-op: normalization can never rise above the root '/'.
+- Every other segment, including '...', '.hidden', spaces, and Unicode, is preserved verbatim (no decoding, case folding, or percent handling).
+- Determine trailing slash semantics from the original input: if the input ends with '/', the normalized result must end with '/' unless the result is the root. The root is always returned as '/', never '//'.
+- Otherwise, the normalized result has no trailing slash.
+- The result begins with '/' and contains no empty, '.' or '..' segments.
+
+Examples: '/a//b/./c' -> '/a/b/c'; '/a/b/../' -> '/a/'; '/../../' -> '/'; '/' -> '/'; '/a/./' -> '/a/'.
+
+The function must be deterministic, must not mutate anything, and must not perform I/O. No CLI or dependencies. Run PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -v from this slice.
