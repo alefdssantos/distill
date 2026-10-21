@@ -27,6 +27,75 @@ async fn execution_mode_reminder_supersedes_previous_modes_without_changing_effo
     }).await;
 }
 
+/// UltraFast and UltraSave send only direct-work tools, so planning, feedback,
+/// scheduling and orchestration schemas stop costing tokens and whole rounds.
+#[test]
+fn execution_modes_prune_tool_definitions_to_direct_work() {
+    use crate::sampling::types::ToolDefinition;
+    use distill_tool_types::ExecutionMode;
+    let offered = [
+        "ask_stored_output",
+        "ask_user_question",
+        "enter_plan_mode",
+        "get_command_or_subagent_output",
+        "grep",
+        "jev_decide",
+        "list_dir",
+        "monitor",
+        "read_file",
+        "run_terminal_command",
+        "scheduler_create",
+        "search_replace",
+        "search_tool",
+        "send_feedback",
+        "spawn_subagent",
+        "todo_write",
+        "use_tool",
+        "workflow",
+        "write",
+    ];
+    let defs: Vec<ToolDefinition> = offered
+        .iter()
+        .map(|name| ToolDefinition::function(*name, None::<&str>, serde_json::json!({})))
+        .collect();
+    let names = |defs: &[ToolDefinition]| {
+        defs.iter()
+            .map(|def| def.function.name.clone())
+            .collect::<Vec<_>>()
+    };
+    let all: Vec<String> = offered.iter().map(|name| name.to_string()).collect();
+    for mode in [ExecutionMode::Normal, ExecutionMode::Ultracode] {
+        assert_eq!(
+            names(&super::execution_mode_tool_definitions(mode, defs.clone())),
+            all
+        );
+    }
+    for mode in [ExecutionMode::Ultrafast, ExecutionMode::Ultrasave] {
+        let kept = names(&super::execution_mode_tool_definitions(mode, defs.clone()));
+        for name in &kept {
+            assert!(
+                super::EXECUTION_MODE_TOOLS.contains(&name.as_str()),
+                "{mode:?} kept {name}"
+            );
+        }
+        for required in ["read_file", "write", "search_replace", "run_terminal_command"] {
+            assert!(kept.iter().any(|name| name == required), "{mode:?}: {kept:?}");
+        }
+        for dropped in [
+            "todo_write",
+            "spawn_subagent",
+            "workflow",
+            "scheduler_create",
+            "send_feedback",
+        ] {
+            assert!(
+                !kept.iter().any(|name| name == dropped),
+                "{mode:?} kept {dropped}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn execution_policy_survives_agent_rebuild_and_shared_off() {
     use distill_tools::implementations::distill::task::types::ExecutionPolicy;

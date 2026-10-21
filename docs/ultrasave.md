@@ -10,12 +10,15 @@ is not the token-saving policy evaluated here.
 ## Execution policy
 
 The mode directive favors direct execution, narrow searches and reads, reuse of
-unchanged evidence, and concise reports. Delegation must justify its total
-context and output cost or supply required independent review; children are
-leaves and cannot delegate further. Required checks and error evidence remain
-part of completion.
+unchanged evidence, and concise reports. Required checks and error evidence
+remain part of completion.
 
-UltraSave keeps normal tool-family selection. It reduces the default selected
+UltraSave advertises only direct-work tools: file inspection and editing,
+search, shell and background-task output, and MCP lookup. Planning, todo,
+delegation, workflow, feedback and scheduling schemas are not sent, so their
+schemas are not repeated on every model call and cannot spend a whole round.
+This replaces the earlier utility-model tool-family selection for the mode. It
+reduces the default selected
 skill-descriptor limit from eight to four while preserving explicitly requested
 and active skills and access to the recoverable full catalog. It reuses an
 automatic effort decision within the turn, invalidates that reuse after a tool

@@ -48,7 +48,7 @@ Ordinary shared-workspace sessions retain their existing behavior.
 
 Task children share the root's exclusive mode, including when launched in
 Normal, so later mode changes apply to the existing tree. Normal retains its
-configured depth; UltraFast and UltraSave cap delegation at one child level and UltraCode
+configured depth; UltraFast and UltraSave advertise no delegation tool and UltraCode
 uses its resolved ceiling. Internal planner/verifier agents, workflow children
 and children with an explicit output-token budget remain leaves. Normal UltraCode
 children can delegate within shared root concurrency, depth, cancellation and usage accounting.

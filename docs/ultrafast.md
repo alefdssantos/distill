@@ -6,10 +6,12 @@ Use `/ultrafast on`, `/ultrafast off`, or `/ultrafast` in the interactive UI;
 headless prompts accept `--ultrafast`. The CLI rejects simultaneous
 execution-mode flags.
 
-UltraFast prioritizes direct work, independent parallel tasks, and a shallow
-agent tree. It retains the requested model, explicit reasoning-effort choices,
-permissions, task requirements, and verification obligations. More agents alone
-do not establish a speed or quality improvement.
+UltraFast prioritizes direct work. It advertises only direct-work tools: file
+inspection and editing, search, shell and background-task output, and MCP
+lookup. Planning, todo, delegation, workflow, feedback and scheduling schemas
+are not sent, so they cannot spend a model round. It retains the requested model, explicit
+reasoning-effort choices, permissions, task requirements, and verification
+obligations. More agents alone do not establish a speed or quality improvement.
 
 ## Reproducible paired evaluation
 

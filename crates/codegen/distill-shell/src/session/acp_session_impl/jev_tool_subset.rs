@@ -38,7 +38,16 @@ impl SessionActor {
         defs: Vec<ToolDefinition>,
         plan_active: bool,
     ) -> Vec<ToolDefinition> {
-        if plan_active || defs.is_empty() {
+        if plan_active
+            || defs.is_empty()
+            || matches!(
+                self.execution_mode.load(),
+                distill_tool_types::ExecutionMode::Ultrafast
+                    | distill_tool_types::ExecutionMode::Ultrasave
+            )
+        {
+            // UltraFast and UltraSave have a fixed execution tool set; asking a
+            // utility model which families to keep costs a blocking model round.
             self.jev_ledger.borrow_mut().deferred_tools.clear();
             return defs;
         }
@@ -113,13 +122,6 @@ impl SessionActor {
         names: &[String],
         pending: &[&'static str],
     ) {
-        if self.execution_mode.load() == distill_tool_types::ExecutionMode::Ultrafast {
-            // Optional selection costs another model round. Keep every permitted
-            // family and let the executing model choose its tools directly.
-            self.jev_ledger.borrow_mut().tool_families.record(request, pending, None);
-            self.jev_offer_joined_tools(names, pending).await;
-            return;
-        }
         let pending_names: Vec<String> = names
             .iter()
             .filter(|name| {
