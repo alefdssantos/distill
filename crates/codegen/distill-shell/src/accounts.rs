@@ -188,7 +188,48 @@ pub struct AccountStore {
 }
 impl Default for AccountStore {
     fn default() -> Self {
+        #[cfg(test)]
+        if let Some(home) = test_home::current() {
+            return Self::new(home);
+        }
         Self::new(crate::util::distill_home::distill_home())
+    }
+}
+
+/// Tests that do not exercise account routing must not read the developer's
+/// real registry: an enabled Auto route would refuse their session. The
+/// override is process-wide because `AccountStore::default()` is, and the
+/// guard restores the real store when dropped.
+#[cfg(test)]
+pub(crate) mod test_home {
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard};
+
+    static HOME: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    pub(crate) fn current() -> Option<PathBuf> {
+        HOME.lock().expect("account test home lock").clone()
+    }
+
+    pub(crate) struct TestHomeGuard {
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    impl TestHomeGuard {
+        pub(crate) fn new(home: &std::path::Path) -> Self {
+            let serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+            *HOME.lock().unwrap_or_else(|poison| poison.into_inner()) =
+                Some(home.to_path_buf());
+            Self { _serial: serial }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            *HOME.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
     }
 }
 fn valid_id(id: &str) -> bool {
