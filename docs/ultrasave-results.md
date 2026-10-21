@@ -5,7 +5,7 @@ median paired total token use fell **74.12%** (ratio 0.259), well below the
 required 0.80 ratio. All eight executions passed the unchanged external graders
 and completion checks, with zero additional failed pairs.
 
-[Protocol](ultrasave.md) · [20-case follow-up cohort](benchmark-v2-results.md) · [Machine-readable results](../tools/task_cost_eval/results/ultrasave-20261020-stage2.json) ·
+[Protocol](ultrasave.md) · [20-case follow-up cohort: PASS, 70.45% fewer tokens](benchmark-v2-results.md) · [Machine-readable results](../tools/task_cost_eval/results/ultrasave-20261020-stage2.json) ·
 [UltraFast results](ultrafast-results.md) · [Earlier failed stage](#prior-stage--2026-10-21-failed)
 
 Across all four tasks, total tokens fell **74.86%**: 939,497 → 236,166. The
