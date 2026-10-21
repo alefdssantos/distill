@@ -108,3 +108,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest \
 No measured UltraSave token-saving or quality result is claimed by this
 protocol. One repetition does not establish provider variability; any
 follow-up must repeat the full cohort and retain the initial stage.
+
+## Measured result
+
+The [initial live evaluation](ultrasave-results.md) passed all eight executions but failed the 20% token-reduction target: median paired total token use increased 2.11%. Aggregate token use decreased 1.14%; modeled credits decreased 17.47%, alongside higher cache use. These are separate metrics.
