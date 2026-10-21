@@ -735,6 +735,9 @@ pub(crate) struct StreamOwnership {
     pub(crate) generation: u64,
     pub(crate) waiter: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) usage_context: Option<UsageAttemptContext>,
+    /// True once any channel emitted output for this request. Billing audits
+    /// use it to separate a retry that never generated from one that did.
+    pub(crate) emitted_output: bool,
 }
 #[cfg(test)]
 impl StreamOwnership {
@@ -743,6 +746,7 @@ impl StreamOwnership {
             generation: 0,
             waiter,
             usage_context: None,
+            emitted_output: false,
         }
     }
 }

@@ -9,7 +9,7 @@ parse_csv(text)
 - Return a new list of new dicts, one per data row, mapping header name to the field string in header order. Field contents are preserved exactly, including leading/trailing spaces and embedded CRLF.
 
 select_rows(rows, columns, filters)
-- rows is an iterable of dicts. columns must be a list of unique str values; otherwise raise ValueError. filters must be a dict whose keys and values are all str; otherwise raise ValueError.
+- rows is an iterable of dicts. A rows value that is not iterable raises ValueError. columns must be a list of unique str values; otherwise raise ValueError. filters must be a dict whose keys and values are all str; otherwise raise ValueError.
 - Validate requested columns and filter keys against each row. If a selected column or filter key is absent from a row, raise ValueError.
 - Keep a row only when, for every filter key, row[key] equals the filter value by exact, case-sensitive string equality. No trimming, case folding, or other normalization.
 - For each kept row, return a new dict containing only the requested columns, inserted in the order given by columns. Filters may reference columns that are not selected.

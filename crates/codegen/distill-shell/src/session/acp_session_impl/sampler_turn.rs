@@ -2768,6 +2768,7 @@ impl SessionActor {
                     generation: self.turn_phases.current_generation(),
                     waiter: Some(tx),
                     usage_context: Some(usage_context.clone()),
+                    emitted_output: false,
                 },
             );
             rx

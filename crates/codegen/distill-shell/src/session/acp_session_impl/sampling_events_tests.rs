@@ -1414,3 +1414,49 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
         })
         .await;
 }
+
+/// A retry before any channel emitted output has known zero usage; the audit
+/// reads this per-request flag from the retry log line.
+#[tokio::test(flavor = "current_thread")]
+async fn channel_output_marks_request_output_started_for_retry_audit() {
+    use distill_sampler::{RequestId, SamplingChannel, SamplingEvent};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let fixture = make_replay_send_update_fixture().await;
+            let actor = Arc::new(fixture.actor);
+            let req = RequestId::random();
+            own_request(&actor, &req);
+            actor
+                .handle_sampling_event(SamplingEvent::StreamStarted {
+                    request_id: req.clone(),
+                    timestamp_ms: 0,
+                })
+                .await;
+            assert!(
+                !actor
+                    .turn_stream_drained
+                    .lock()
+                    .get(&req)
+                    .expect("request ownership")
+                    .emitted_output
+            );
+            actor
+                .handle_sampling_event(SamplingEvent::ChannelToken {
+                    request_id: req.clone(),
+                    channel: SamplingChannel::Reasoning,
+                    text: "x".to_string(),
+                    chunk_index: 0,
+                })
+                .await;
+            assert!(
+                actor
+                    .turn_stream_drained
+                    .lock()
+                    .get(&req)
+                    .expect("request ownership")
+                    .emitted_output
+            );
+        })
+        .await;
+}

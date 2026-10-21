@@ -4,7 +4,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from .compare_codex import codex_accounting, distill_accounting, distill_config
+from .compare_codex import codex_accounting, credits, distill_accounting, distill_config
 
 
 class ProfileConfigTest(unittest.TestCase):
@@ -287,6 +287,61 @@ class StrictDistillAccountingTest(unittest.TestCase):
             self.assertEqual(calls['sampler:a']['effort'], 'effort:medium')
             self.assertEqual(calls['initial-title:t']['task_id'], 'select_units')
             self.assertEqual(calls['initial-title:t']['source_kind'], 'tool_families')
+
+    def retry_fixture(self, root, *, output_started):
+        endpoint = 'https://chatgpt.com/backend-api/codex/responses'
+        usage = {'prompt_tokens': 10, 'completion_tokens': 1,
+                 'cached_prompt_tokens': 0, 'reasoning_tokens': 0}
+        main = {'attempt_id': 'sampler:a', 'request_id': 'resp_a', 'model_id': 'gpt-6.1-sol',
+                'role': 'main', 'status': 'completed', 'usage_complete': True,
+                'endpoint': endpoint, 'usage': usage}
+        retry = {'attempt_id': 'sampler:r:retry:api:1', 'request_id': 'resp_r',
+                 'model_id': 'gpt-6.1-sol', 'role': 'main_retry', 'status': 'failed',
+                 'usage_complete': False, 'endpoint': endpoint}
+        path = root / 'sessions/main'
+        path.mkdir(parents=True)
+        (path / 'events.jsonl').write_text(
+            json.dumps({'type': 'turn_started'}) + '\n' + json.dumps({'type': 'turn_ended'}) + '\n')
+        (path / 'updates.jsonl').write_text('')
+        (path / 'usage.json').write_text(json.dumps({'session': {
+            'attributions': [main, retry], 'modelCalls': 2, 'inputTokens': 10,
+            'outputTokens': 1, 'cachedReadTokens': 0, 'reasoningTokens': 0,
+            'usageIsIncomplete': True, 'permanentIncomplete': True}}))
+        ctx = {'sampler_request_id': 'r', 'kind': 'api', 'attempt': 1}
+        if output_started is not None:
+            ctx['output_started'] = output_started
+        logs = [{'sid': 'main', 'msg': 'shell.turn.inference_start', 'ctx': {}},
+                {'sid': 'main', 'msg': 'shell.turn.inference_done', 'ctx': {'attempts': 2, **usage}},
+                {'sid': 'main', 'msg': 'shell.turn.inference_retry', 'ctx': ctx}]
+        (root / 'logs').mkdir()
+        (root / 'logs/unified.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in logs))
+
+    def test_retry_before_any_output_reconciles_as_known_zero_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.retry_fixture(root, output_started=False)
+            # Without independent corroboration the conservative ledger stands.
+            self.assertFalse(distill_accounting(root, 'main')['accounting_complete'])
+            result = distill_accounting(root, 'main', strict=True)
+            evidence = result['accounting_evidence']
+            self.assertTrue(result['accounting_complete'], evidence)
+            self.assertEqual(evidence['reasons'], [])
+            self.assertEqual(evidence['zero_usage_attempts'], ['sampler:r:retry:api:1'])
+            calls = {row['attempt']: row for row in result['call_usage']}
+            self.assertTrue(calls['sampler:r:retry:api:1']['complete'])
+            self.assertTrue(calls['sampler:r:retry:api:1']['imputed_zero_usage'])
+            self.assertEqual(calls['sampler:r:retry:api:1']['credits'], 0.0)
+            self.assertEqual(result['credit_estimate'], credits('gpt-6.1-sol', 10, 0, 1))
+
+    def test_retry_after_output_keeps_accounting_incomplete(self):
+        for started in (True, None):
+            with self.subTest(output_started=started), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.retry_fixture(root, output_started=started)
+                result = distill_accounting(root, 'main', strict=True)
+                self.assertFalse(result['accounting_complete'])
+                self.assertIsNone(result['credit_estimate'])
+                self.assertTrue(result['accounting_evidence']['reasons'])
 
     def test_call_owner_uses_deepest_ledger_and_durable_child_type_without_model_relabeling(self):
         with tempfile.TemporaryDirectory() as directory:
