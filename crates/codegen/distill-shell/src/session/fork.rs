@@ -88,39 +88,9 @@ pub(crate) async fn fork_session_with_storage(
         cwd: request.new_cwd.clone(),
     };
 
-    // Idempotent re-fork: a prior attempt already created this child from the same parent.
-    // Return the existing session instead of erroring or copying a duplicate.
-    match storage.load_summary(&target_info).await {
-        Ok(existing)
-            if existing.parent_session_id.as_deref()
-                == Some(request.source_session_id.as_str()) =>
-        {
-            return Ok(ForkSessionResponse {
-                new_session_id,
-                chat_messages_copied: existing.num_chat_messages,
-                updates_copied: existing.num_messages,
-                // The existing plan file is not re-read; the copy result is not recomputed.
-                plan_state_copied: false,
-                new_cwd: request.new_cwd,
-                parent_session_id: request.source_session_id,
-                new_model_id: request.new_model_id,
-            });
-        }
-        Ok(existing) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "session {new_session_id} already exists (parent {:?})",
-                    existing.parent_session_id
-                ),
-            ));
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-
     // Copy session data with parent tracking.
-    // Runs on the blocking thread pool so concurrent fork copies can execute truly in parallel
+    // Runs on the blocking thread pool so concurrent fork copies can execute truly in parallel.
+    // The copy takes the target's OS lock, so forks of different sessions still overlap while same-target forks serialize.
     // On a LocalSet, async copy_session_data serializes because the sync disk I/O blocks the single-threaded runtime
     let options = CopySessionOptions {
         mint_session_identity: true,

@@ -40,6 +40,8 @@ pub(super) fn x_ai_capabilities() -> serde_json::Value {
         "toolOverrides": tool_overrides_capability(),
         // `session/new|load|resume` take `_meta.workerModelId` / `_meta.workerEffort`, and `x.ai/session/worker_model/set` exists
         "sessionWorkerModel": true,
+        // Keyed fork completion is atomic and durable; clients reject producers without this
+        "sessionForkDurable": true,
         // `x.ai/session/ultracode/set` toggles the per-turn orchestration reminder
         "sessionUltracode": true,
         "sessionExecutionMode": true,
