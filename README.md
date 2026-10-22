@@ -18,6 +18,56 @@ OpenAI-compatible protocol.
 
 ----
 
+## Modes
+
+Each session runs in one execution mode. Normal is the default. Switch with a
+slash command in the TUI, or pass a flag to headless prompts.
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### UltraSave
+
+# 93% cheaper
+
+UltraSave cost **0.069x the credits of Normal** on our 20-case benchmark,
+and all 20 tasks still passed.
+
+It works directly: narrow searches, small reads, short reports. Required checks
+still run before a task counts as done.
+
+`/ultrasave on` or `--ultrasave`
+
+</td>
+<td width="50%" valign="top">
+
+### UltraFast
+
+# ~2x faster
+
+UltraFast finished in **0.509x the wall time of Normal**, about half,
+and all 20 tasks still passed.
+
+It skips planning and delegation rounds and goes straight to the work. Your
+model, effort and verification steps stay the same.
+
+`/ultrafast on` or `--ultrafast`
+
+</td>
+</tr>
+</table>
+
+| Mode | Compared with | You get | Tasks accepted |
+| --- | --- | --- | --- |
+| **UltraSave** | Normal | **93% fewer credits** | 20/20 |
+| **UltraFast** | Normal | **49% less wall time** | 20/20 |
+| **UltraSave** | v2.0.49 | **93% fewer credits** | 19/20 |
+| **UltraFast** | v2.0.49 | **30% less wall time** | 19/20 |
+
+Jev routing decisions cost about US$0.01 per 20-case campaign. Details:
+[UltraSave](docs/ultrasave.md) and [UltraFast](docs/ultrafast.md).
+
 ## Benchmarks
 
 [![Distill benchmarks: same quality at up to 87% lower cost and up to 76% less time versus native GPT-6 Astra, GPT-6.1 Sol, Claude Opus 5.5 and DeepSeek V4.1 max baselines](docs/images/benchmarks.webp)](BENCHMARKS.md)
