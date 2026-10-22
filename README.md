@@ -58,14 +58,7 @@ model, effort and verification steps stay the same.
 </tr>
 </table>
 
-| Mode | Compared with | You get | Tasks accepted |
-| --- | --- | --- | --- |
-| **UltraSave** | Normal | **93% fewer credits** | 20/20 |
-| **UltraFast** | Normal | **49% less wall time** | 20/20 |
-| **UltraSave** | v2.0.49 | **93% fewer credits** | 19/20 |
-| **UltraFast** | v2.0.49 | **30% less wall time** | 19/20 |
-
-Jev routing decisions cost about US$0.01 per 20-case campaign. Details:
+Details:
 [UltraSave](docs/ultrasave.md) and [UltraFast](docs/ultrafast.md).
 
 ## Benchmarks
