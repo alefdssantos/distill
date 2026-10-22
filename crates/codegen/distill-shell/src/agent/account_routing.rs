@@ -397,8 +397,11 @@ pub(crate) async fn load_session_config(
         return Ok(None);
     };
     let store = AccountStore::default();
+    // The xAI proxy rejects a request without `x-grok-client-version` with
+    // 426 "Grok CLI version (none) is outdated", so a restored route keeps it.
     let previous = SamplerConfig {
         reasoning_effort: saved.reasoning_effort,
+        client_version: Some(distill_version::VERSION.to_string()),
         ..Default::default()
     };
     let mut config = model_config_for_route(&store, models, &previous, &saved.route)?;

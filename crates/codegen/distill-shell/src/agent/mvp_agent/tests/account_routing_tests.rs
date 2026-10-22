@@ -113,6 +113,11 @@ fn account_routing_named_only_session_admission_auto_and_cold_route_restore() {
                     .unwrap()
                     .unwrap();
                 assert!(restored.extra_headers.contains_key("x-distill-worker-pin"));
+                assert_eq!(
+                    restored.client_version.as_deref(),
+                    Some(distill_version::VERSION),
+                    "a restored route must keep x-grok-client-version or xAI answers 426"
+                );
 
                 Box::pin(
                     agent.resume_session_inner(
