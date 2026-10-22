@@ -117,34 +117,93 @@ pub(crate) async fn run_auto_update_checker(
 }
 /// Spawn the agent inside a LocalSet and return a handle to the I/O future.
 fn spawn_agent_local(
-    agent_config: AgentConfig,
-    auth_manager: Arc<AuthManager>,
+    mut agent_config: AgentConfig,
     prefetched_models: Option<IndexMap<String, ModelEntry>>,
-    boot: Option<crate::agent::init::BootstrapPrefetch>,
     memory_config: Option<crate::config::MemoryConfig>,
+    cancel: tokio_util::sync::CancellationToken,
     outgoing: impl futures::AsyncWrite + Unpin + 'static,
     incoming: impl futures::AsyncRead + Unpin + 'static,
 ) -> impl std::future::Future<Output = Result<(), acp::Error>> {
-    let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
+    use crate::agent::operation_status::{Operations, StdioAgent};
+    let (gw_tx, mut gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
-    let mut agent = MvpAgent::new(
-        gateway,
-        &agent_config,
-        auth_manager,
-        prefetched_models,
-        boot,
-    )
-    .unwrap_or_else(exit_on_config_error);
-    agent.models_manager.spawn_background_refresh();
-    if let Some(mc) = memory_config {
-        agent.set_memory_config(mc);
-    }
+    let operations = Operations::new(gateway.clone());
+    let observer = operations.clone();
+    let agent = StdioAgent::new(
+        operations,
+        Box::new(move |progress| {
+            Box::pin(async move {
+                let auth_manager = Arc::new(agent_config.create_auth_manager());
+                auth_manager.start_proactive_refresh(cancel.clone());
+                auth_manager.start_system_power_listener();
+                crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
+                progress.phase("waiting_model");
+                let boot = crate::agent::init::resolve_boot_startup_settings(
+                    &mut agent_config,
+                    &cancel,
+                    prefetched_models.is_none(),
+                    auth_manager.current(),
+                )
+                .await
+                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                progress.phase("loading_configuration");
+                apply_otel_config(&auth_manager, &agent_config.grok_com_config);
+                let bootstrap_auth = auth_manager.clone();
+                let (config, models) = tokio::task::spawn_blocking(move || {
+                    bootstrap_with_cancel(
+                        &agent_config,
+                        &bootstrap_auth,
+                        prefetched_models,
+                        &cancel,
+                        Some(boot),
+                    )
+                })
+                .await
+                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?
+                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+                let mut agent = MvpAgent::with_models(gateway, &config, auth_manager, models);
+                agent.models_manager.spawn_background_refresh();
+                if let Some(mc) = memory_config {
+                    agent.set_memory_config(mc);
+                }
+                progress.phase("waiting_model");
+                // The readiness operation remains registered through initialize's account/catalog gate.
+                Ok((agent, progress))
+            })
+        }),
+    );
     let incoming = LineBufferedRead::spawn_local(incoming);
     let (conn, handle_io) = acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
         tokio::task::spawn_local(fut);
     });
+    let (observed_tx, observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = gw_rx.recv().await {
+            observer.observe(&message);
+            let message =
+                if let distill_acp_lib::AcpClientMessage::RequestPermission(mut args) = message {
+                    let session = args.request.session_id.clone();
+                    let tool = args.request.tool_call.tool_call_id.clone();
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let reply = std::mem::replace(&mut args.response_tx, tx);
+                    let observer = observer.clone();
+                    tokio::task::spawn_local(async move {
+                        if let Ok(result) = rx.await {
+                            observer.permission_resolved(&session, &tool);
+                            let _ = reply.send(result);
+                        }
+                    });
+                    distill_acp_lib::AcpClientMessage::RequestPermission(args)
+                } else {
+                    message
+                };
+            if observed_tx.send(message).is_err() {
+                break;
+            }
+        }
+    });
     tokio::task::spawn_local(
-        GatewayReceiver::new(gw_rx, conn)
+        GatewayReceiver::new(observed_rx, conn)
             .with_on_meta(distill_otel::span_from_meta_traceparent)
             .run(),
     );
@@ -159,25 +218,64 @@ fn internal_reload_request_line(
 }
 /// Start a skills file watcher and wire it to inject `x.ai/internal/reload_skills` messages into the shared ACP incoming stream.
 /// The messages fire when SKILL.md files change on disk.
-/// Returns the watcher task, or `None` if no directories could be watched.
+/// Watch registration runs off the async executor so it cannot block ACP startup.
 fn spawn_skills_file_watcher<W>(
     acp_incoming_tx: &Arc<TokioMutex<W>>,
     skills_paths: &[String],
-) -> Option<tokio::task::JoinHandle<()>>
+) -> tokio::task::JoinHandle<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let workspace_user_dir = distill_agent::prompt::workspace_user::optional_workspace_user_dir();
-    let (mut watcher, mut skills_rx) = crate::config::watcher::SkillsFileWatcher::start(
-        Some(cwd.as_path()),
-        workspace_user_dir.as_deref(),
-        skills_paths,
-    )?;
+    let skills_paths = skills_paths.to_vec();
+    spawn_skills_watcher_task(acp_incoming_tx, move || {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let workspace_user_dir =
+            distill_agent::prompt::workspace_user::optional_workspace_user_dir();
+        crate::config::watcher::SkillsFileWatcher::start(
+            Some(cwd.as_path()),
+            workspace_user_dir.as_deref(),
+            &skills_paths,
+        )
+    })
+}
+
+fn spawn_skills_watcher_task<W>(
+    acp_incoming_tx: &Arc<TokioMutex<W>>,
+    start: impl FnOnce() -> Option<(
+        crate::config::watcher::SkillsFileWatcher,
+        tokio::sync::mpsc::UnboundedReceiver<crate::config::watcher::DiscoveryChange>,
+    )> + Send
+    + 'static,
+) -> tokio::task::JoinHandle<()>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let skills_tx = acp_incoming_tx.clone();
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
+        let (mut watcher, mut skills_rx) = match tokio::task::spawn_blocking(start).await {
+            Ok(Some(watcher)) => watcher,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(%error, "skills file watcher failed to start");
+                return;
+            }
+        };
         while let Some(change) = skills_rx.recv().await {
-            let created_discovery_dir = watcher.refresh_new_discovery_dirs();
+            let refreshed = tokio::task::spawn_blocking(move || {
+                let created_discovery_dir = watcher.refresh_new_discovery_dirs();
+                (watcher, created_discovery_dir)
+            })
+            .await;
+            let created_discovery_dir = match refreshed {
+                Ok((refreshed_watcher, created)) => {
+                    watcher = refreshed_watcher;
+                    created
+                }
+                Err(error) => {
+                    warn!(%error, "skills file watcher failed to refresh");
+                    return;
+                }
+            };
             let (id, method) = match change {
                 crate::config::watcher::DiscoveryChange::Skills if !created_discovery_dir => {
                     info!("Skill directory changed on disk, reloading skills for all sessions");
@@ -203,8 +301,7 @@ where
                 );
             }
         }
-    });
-    Some(task)
+    })
 }
 /// Register the process-lifetime runtime for shared filesystem watchers ([`distill_fsnotify::shared`]).
 /// Their event loops then run on a runtime that outlives individual sessions (each session builds its own short-lived runtime).
@@ -240,7 +337,7 @@ pub async fn run_stdio_agent(
     }
     let _total_timer = crate::instrumentation_timer!("startup.stdio_agent_total");
     let outgoing = tokio::io::stdout().compat_write();
-    let mut agent_config = agent_config.clone();
+    let agent_config = agent_config.clone();
     let (acp_incoming_rx, acp_incoming_tx) = simplex(MAX_BUFFER_SIZE);
     let incoming = acp_incoming_rx.compat();
     let acp_incoming_tx = Arc::new(TokioMutex::new(acp_incoming_tx));
@@ -270,26 +367,9 @@ pub async fn run_stdio_agent(
                 let mut tx = simplex_tx.lock().await;
                 let _ = tx.shutdown().await;
             });
-            let auth_manager = Arc::new(agent_config.create_auth_manager());
-            auth_manager.start_proactive_refresh(cancel_for_agent.clone());
-            auth_manager.start_system_power_listener();
-            crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
-            let boot = crate::agent::init::resolve_boot_startup_settings(
-                &mut agent_config,
-                &cancel_for_agent,
-                prefetched_models.is_none(),
-                auth_manager.current(),
-            )
-            .await?;
-            apply_otel_config(&auth_manager, &agent_config.grok_com_config);
             let handle_io = spawn_agent_local(
-                agent_config,
-                auth_manager,
-                prefetched_models,
-                Some(boot),
-                memory_config,
-                outgoing,
-                incoming,
+                agent_config, prefetched_models, memory_config, cancel_for_agent,
+                outgoing, incoming,
             );
             handle_io.await?;
             Ok::<(), anyhow::Error>(())
@@ -1333,6 +1413,32 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use tokio::sync::watch;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_skills_watch_setup_does_not_block_acp_input() {
+        use tokio::io::AsyncReadExt;
+        let (mut incoming, outgoing) = simplex(1024);
+        let outgoing = Arc::new(TokioMutex::new(outgoing));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let watcher = spawn_skills_watcher_task(&outgoing, move || {
+            let _ = started_tx.send(());
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            None
+        });
+        started_rx.await.unwrap();
+        let initialize = b"{\"id\":1,\"method\":\"initialize\"}\n";
+        let delivered = tokio::time::timeout(Duration::from_secs(1), async {
+            outgoing.lock().await.write_all(initialize).await.unwrap();
+            let mut received = vec![0; initialize.len()];
+            incoming.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, initialize);
+        }).await;
+        release_tx.send(()).unwrap();
+        watcher.await.unwrap();
+        assert!(delivered.is_ok(), "ACP input waited for skills watch registration");
+    }
+
     /// Create a throwaway shutdown_tx for tests that don't care about the reason.
     fn dummy_shutdown_tx() -> watch::Sender<crate::leader::ShutdownReason> {
         watch::channel(crate::leader::ShutdownReason::Manual).0
