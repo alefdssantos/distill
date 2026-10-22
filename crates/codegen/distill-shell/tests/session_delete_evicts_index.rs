@@ -175,3 +175,95 @@ fn loading_config_applies_requirement_pins() {
         distill_shell::agent::config::ConfigSource::Requirement
     );
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn explicit_delete_removes_hidden_side_sessions_without_touching_the_parent() {
+    let root = home();
+    let cwd = "/ws-side-delete";
+    seed_session(root, "side-delete-parent", cwd).await;
+    let bucket = distill_shell::util::distill_home::sessions_cwd_dir_in(root, cwd);
+    let parent_summary = bucket.join("side-delete-parent/summary.json");
+    let parent_before = std::fs::read(&parent_summary).unwrap();
+    let auth = Arc::new(AuthManager::new(root, GrokComConfig::default()));
+
+    for (id, scope) in [("side-scoped", Some(cwd)), ("side-global", None)] {
+        seed_session(root, id, cwd).await;
+        let dir = bucket.join(id);
+        let summary_path = dir.join("summary.json");
+        let mut summary: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+        summary["session_kind"] = serde_json::json!("side");
+        std::fs::write(&summary_path, serde_json::to_vec(&summary).unwrap()).unwrap();
+        assert!(
+            JsonlStorageAdapter::with_root(root.to_path_buf())
+                .list_sessions(Some(cwd))
+                .await
+                .unwrap()
+                .iter()
+                .all(|session| session.info.id.to_string() != id),
+            "precondition: side sessions are hidden from normal history"
+        );
+        let wrong_scope =
+            delete_session_history(id, Some("/wrong-workspace"), false, auth.clone(), None)
+                .await
+                .unwrap();
+        assert!(!wrong_scope.local_removed);
+        assert!(summary_path.exists());
+
+        let deletion = delete_session_history(id, scope, false, auth.clone(), None)
+            .await
+            .unwrap();
+        assert!(
+            deletion.local_removed,
+            "an explicitly named hidden session must be deleted"
+        );
+        assert!(
+            !dir.exists(),
+            "a success must remove the actual session files"
+        );
+        assert_eq!(std::fs::read(&parent_summary).unwrap(), parent_before);
+        assert!(
+            !delete_session_history(id, scope, false, auth.clone(), None)
+                .await
+                .unwrap()
+                .local_removed,
+            "repeated deletion is an idempotent absence"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn corrupt_summary_identity_fails_and_preserves_dirs() {
+    let root = home();
+    let cwd = "/ws-corrupt";
+    seed_session(root, "corrupt-session", cwd).await;
+    let bucket = distill_shell::util::distill_home::sessions_cwd_dir_in(root, cwd);
+    let dir = bucket.join("corrupt-session");
+    let summary_path = dir.join("summary.json");
+
+    // Corrupt the summary's cwd to trigger the ID/cwd mismatch guard.
+    let mut summary: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+    summary["info"]["cwd"] = serde_json::json!("/ws-other");
+    std::fs::write(&summary_path, serde_json::to_vec(&summary).unwrap()).unwrap();
+
+    let auth = Arc::new(AuthManager::new(root, GrokComConfig::default()));
+
+    // Deletion must fail because the summary identity doesn't match its destination.
+    let result = delete_session_history("corrupt-session", Some(cwd), false, auth, None).await;
+    match result {
+        Err(distill_shell::session::persistence::DeleteSessionError::List(err)) => {
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        }
+        _ => panic!("expected InvalidData error, got {result:?}"),
+    }
+
+    // Both the target directory and its parent bucket must remain untouched.
+    assert!(dir.exists(), "target directory must be preserved on error");
+    assert!(
+        bucket.exists(),
+        "parent directory must be preserved on error"
+    );
+}

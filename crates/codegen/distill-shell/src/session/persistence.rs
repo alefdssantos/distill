@@ -3300,17 +3300,31 @@ pub async fn delete_session_history(
     auth_manager: Arc<distill_login::AuthManager>,
     search_index: Option<&distill_session_search::SearchIndexManager>,
 ) -> Result<SessionDeletion, DeleteSessionError> {
-    let sid = acp::SessionId::new(Arc::from(session_id));
-
-    // Resolve the local session info, scoping to cwd if provided
-    // A remote-only session won't be found here; that's fine, the remote delete (if applicable) still runs
-    let summaries = list_summaries(cwd)
-        .await
-        .map_err(DeleteSessionError::List)?;
-    let local_info = summaries
-        .iter()
-        .find(|s| s.info.id == sid)
-        .map(|s| s.info.clone());
+    let lookup_id = session_id.to_owned();
+    let lookup_cwd = cwd.map(str::to_owned);
+    // Explicit deletion includes hidden sessions; history listings intentionally exclude them.
+    let local_info = tokio::task::spawn_blocking(move || -> io::Result<Option<Info>> {
+        let view = storage_view(&distill_home().join("sessions")).map_err(io::Error::other)?;
+        let path = view
+            .session_dirs(lookup_cwd.as_deref())
+            .map_err(io::Error::other)?
+            .into_iter()
+            .find(|path| path.file_name() == Some(std::ffi::OsStr::new(&lookup_id)));
+        let Some(path) = path else { return Ok(None) };
+        let summary = read_summary_from_dir(&path).map_err(io::Error::other)?;
+        let expected_dir =
+            crate::util::distill_home::sessions_cwd_dir(&summary.info.cwd).join(&lookup_id);
+        if summary.info.id.to_string() != lookup_id || expected_dir != path {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session identity mismatch",
+            ));
+        }
+        Ok(Some(summary.info))
+    })
+    .await
+    .map_err(|error| DeleteSessionError::List(io::Error::other(error)))?
+    .map_err(DeleteSessionError::List)?;
 
     // Remote delete first (authoritative for cloud history)
     // A genuine failure aborts before any local mutation so the row does not reappear
