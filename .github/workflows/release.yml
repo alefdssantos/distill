@@ -104,6 +104,11 @@ jobs:
           "target/release/${{ matrix.binary }}" --version | grep -F "$version"
           mkdir -p artifacts
           cp "target/release/${{ matrix.binary }}" "artifacts/distill-${{ matrix.platform }}${{ matrix.asset_ext }}"
+      - name: Verify ACP deferred initialization
+        if: runner.os != 'Windows'
+        env:
+          DISTILL_TEST_BINARY: target/release/distill
+        run: python3 tests/test_acp_readiness_lifetime.py
       - uses: actions/upload-artifact@v4
         with:
           name: distill-${{ matrix.platform }}

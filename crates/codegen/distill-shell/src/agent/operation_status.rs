@@ -223,7 +223,7 @@ type Factory =
 
 pub(super) struct StdioAgent {
     factory: RefCell<Option<Factory>>,
-    ready: tokio::sync::OnceCell<Result<(MvpAgent, acp::InitializeResponse), acp::Error>>,
+    ready: tokio::sync::OnceCell<Result<(Box<MvpAgent>, acp::InitializeResponse), acp::Error>>,
     initialize: RefCell<Option<acp::InitializeRequest>>,
     negotiated: Cell<bool>,
     operations: Operations,
@@ -241,7 +241,7 @@ impl StdioAgent {
     async fn ready(
         &self,
         progress: Progress,
-    ) -> Result<&(MvpAgent, acp::InitializeResponse), acp::Error> {
+    ) -> Result<&(Box<MvpAgent>, acp::InitializeResponse), acp::Error> {
         let args = self
             .initialize
             .borrow()
@@ -255,6 +255,9 @@ impl StdioAgent {
                     .take()
                     .ok_or_else(acp::Error::internal_error)?;
                 let (agent, _progress) = factory(progress).await?;
+                // initialize spawns LocalRef tasks: keep their pointee at one address
+                // when the initialized agent is moved into the readiness cell.
+                let agent = Box::new(agent);
                 let response = agent.initialize(args).await?;
                 Ok((agent, response))
             })
@@ -264,7 +267,7 @@ impl StdioAgent {
     }
     async fn agent(&self) -> Result<&MvpAgent, acp::Error> {
         let progress = self.operations.begin(None, None, "loading_configuration");
-        self.ready(progress).await.map(|r| &r.0)
+        self.ready(progress).await.map(|r| r.0.as_ref())
     }
 }
 
