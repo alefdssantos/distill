@@ -11,6 +11,7 @@ use std::ops::ControlFlow;
 use std::path::Path;
 
 use agent_client_protocol as acp;
+use fs2::FileExt;
 
 use crate::sampling::{
     ConversationItem, conversation_truncate_for_prompt, fork_filter_chat,
@@ -297,6 +298,68 @@ fn copy_updates_streaming(
     writer.finish()
 }
 
+/// Exclusive OS lock on one target session's `summary.json.lock`, held across the idempotency check and the copy.
+/// Two forks that resolve to the same target serialize here, so the second sees the first's summary instead of re-copying.
+struct ForkTargetLock(std::fs::File);
+
+impl ForkTargetLock {
+    fn acquire(path: &Path) -> io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        FileExt::lock_exclusive(&file)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ForkTargetLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+/// Fsync every regular file and directory the copy created, so the summary that follows is a durable completion marker.
+/// Symlinks are neither followed nor synced; the copy never creates them.
+fn sync_copied_tree(root: &Path) -> io::Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                let file = std::fs::OpenOptions::new().write(true).open(entry.path())?;
+                crate::session::storage::sync_file_durable(&file)?;
+            }
+        }
+        crate::session::storage::sync_dir_durable(&dir)?;
+    }
+    Ok(())
+}
+
+fn completed_fork(
+    existing: Summary,
+    sync: impl FnOnce() -> io::Result<()>,
+) -> io::Result<CopySessionResult> {
+    sync()?;
+    Ok(CopySessionResult {
+        chat_messages_copied: existing.num_chat_messages,
+        agent_id: existing.agent_id,
+        updates_copied: existing.num_messages,
+        plan_state_copied: false,
+        plan_mode_state_copied: false,
+        signals_copied: false,
+        tool_state_copied: false,
+        announcement_state_copied: false,
+        compaction_segments_copied: 0,
+        compaction_checkpoints_copied: 0,
+    })
+}
+
 impl JsonlStorageAdapter {
     /// Fully synchronous implementation of `copy_session_data`, for use on a blocking thread; every caller reaches it through `spawn_blocking`.
     pub(crate) fn copy_session_data_sync(
@@ -307,6 +370,34 @@ impl JsonlStorageAdapter {
     ) -> io::Result<CopySessionResult> {
         // Canonical creator: the fork target chain is born owner-only.
         let target_dir = self.create_session_dir_owner_only(target_info)?;
+        // Acquired here, on the caller's blocking thread, and held until the summary is published.
+        let _target_lock = ForkTargetLock::acquire(&self.summary_lock_file(target_info))?;
+
+        // A complete child is marked by its summary, which this copy publishes last.
+        // Re-forking onto it returns the existing copy instead of overwriting it.
+        match self.read_summary_sync(target_info) {
+            Ok(existing)
+                if options.parent_session_id.is_some()
+                    && existing.parent_session_id == options.parent_session_id =>
+            {
+                return completed_fork(existing, || {
+                    crate::session::storage::sync_dir_durable(&target_dir)
+                });
+            }
+            Ok(existing) if options.parent_session_id.is_some() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "session {} already exists (parent {:?})",
+                        target_info.id.0, existing.parent_session_id
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            // Malformed or empty: never overwrite data this copy cannot prove it owns.
+            Err(error) => return Err(error),
+        }
 
         let source_summary = self.read_summary_sync(source_info)?;
         let chat_format_version = source_summary.chat_format_version;
@@ -403,8 +494,6 @@ impl JsonlStorageAdapter {
             },
         );
         let minted_agent_id = target_summary.agent_id.clone();
-        let summary_bytes = serde_json::to_vec_pretty(&target_summary).map_err(invalid_data)?;
-        std::fs::write(self.summary_file(target_info), summary_bytes)?;
 
         let plan_copied = copy_sidecar_file(
             options.copy_plan_state,
@@ -468,6 +557,19 @@ impl JsonlStorageAdapter {
             clear_announced_failure_episodes(&self.announcement_state_file(target_info))?;
         }
 
+        if crate::session::helpers::session_summary::load_title_refresh_watermark(
+            &self.session_dir(source_info),
+        )
+        .is_none()
+            && target_dir
+                .join(crate::session::helpers::session_summary::TITLE_REFRESH_WATERMARK_FILE)
+                .try_exists()?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "incomplete fork contains a stale title watermark",
+            ));
+        }
         // Title-refresh watermark: only a managed parent (one with a watermark) passes managed state to the child.
         // So a fork of a pre-feature session stays unmanaged (frozen) rather than being adopted.
         // A full fork inherits the parent's checkpoint (keeping the inherited title frozen).
@@ -487,6 +589,14 @@ impl JsonlStorageAdapter {
             );
         }
 
+        check_archive_retry(
+            &self
+                .session_dir(source_info)
+                .join(distill_compaction_transcript::COMPACTION_DIR),
+            &target_dir.join(distill_compaction_transcript::COMPACTION_DIR),
+            options.copy_compaction_segments,
+            None,
+        )?;
         // Copied verbatim: the archive is immutable, so no cwd rewrite.
         let compaction_segments_copied = if options.copy_compaction_segments {
             let src_dir = self
@@ -519,6 +629,11 @@ impl JsonlStorageAdapter {
         )?;
 
         self.persist_fork_status(source_info, target_info, &target_dir, &options);
+
+        // Publish the summary last: its presence is the completion marker a re-fork trusts.
+        // Every copied file and directory is durable first, so a crash before this point leaves no child to trust.
+        sync_copied_tree(&target_dir)?;
+        self.write_summary_sync(target_info, &target_summary)?;
 
         Ok(CopySessionResult {
             chat_messages_copied: num_chat_messages,
@@ -761,10 +876,16 @@ fn restamp_copied_usage(
 /// Copy one optional sidecar file (plan, signals, tool state, ...) when enabled and present; reports whether a copy happened.
 /// A sidecar that exists but is not a regular file is skipped with a warning rather than failing the fork.
 fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> {
-    if !enabled {
-        return Ok(false);
-    }
-    if !src.is_file() {
+    if !enabled || !src.is_file() {
+        if dst.try_exists()? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "incomplete fork contains a stale sidecar",
+            ));
+        }
+        if !enabled {
+            return Ok(false);
+        }
         if src.exists() {
             tracing::warn!(
                 path = %src.display(),
@@ -777,6 +898,44 @@ fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> 
     Ok(true)
 }
 
+// Conflicting partial state stays intact and uncommitted; retry never deletes unproven files.
+fn check_archive_retry(
+    src: &Path,
+    dst: &Path,
+    enabled: bool,
+    retained: Option<&BTreeSet<String>>,
+) -> io::Result<()> {
+    let entries = match std::fs::read_dir(dst) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let source_is_dir = std::fs::symlink_metadata(src).is_ok_and(|meta| meta.file_type().is_dir());
+    for entry in entries {
+        let entry = entry?;
+        let retained = retained.is_none_or(|names| {
+            names.contains(&format!(
+                "compaction_checkpoints/{}",
+                entry.file_name().to_string_lossy()
+            ))
+        });
+        let source_is_file = std::fs::symlink_metadata(src.join(entry.file_name()))
+            .is_ok_and(|meta| meta.file_type().is_file());
+        if !enabled
+            || !retained
+            || !source_is_dir
+            || !source_is_file
+            || !entry.file_type()?.is_file()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "incomplete fork contains a stale archive",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Copy the `compaction_checkpoints/{uuid}.json` files referenced by the retained records; returns how many copied.
 /// Records are user-editable data, so only the exact path shape this feature writes may resolve and symlinks are never followed.
 /// Dangling references are skipped rather than failing the fork (otherwise every /rewind in the target session would fail).
@@ -786,6 +945,12 @@ fn copy_referenced_checkpoints(
     target_dir: &Path,
     source_id: &acp::SessionId,
 ) -> io::Result<usize> {
+    check_archive_retry(
+        &source_session_dir.join("compaction_checkpoints"),
+        &target_dir.join("compaction_checkpoints"),
+        true,
+        Some(checkpoint_files),
+    )?;
     if checkpoint_files.is_empty() {
         return Ok(0);
     }

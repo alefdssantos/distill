@@ -87,6 +87,13 @@ fn initialize_advertises_session_worker_model() {
     assert!(capabilities.get("toolOverrides").is_some(), "existing capability stays");
 }
 
+/// RemoteCode rejects producers that lack this flag instead of assuming safe fork semantics.
+#[test]
+fn initialize_advertises_session_fork_durable() {
+    let capabilities = crate::agent::mvp_agent::acp_agent::x_ai_capabilities();
+    assert_eq!(capabilities["sessionForkDurable"], serde_json::json!(true));
+}
+
 /// `session/new|load|resume` share this parser: absent keys inherit the config,
 /// `""` disables the worker, and `workerEffort` absent or `auto` is auto.
 #[test]

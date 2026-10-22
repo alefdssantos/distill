@@ -1786,6 +1786,166 @@ async fn fork_truncation_clears_announced_failure_episodes() {
     );
 }
 
+/// The summary is the completion marker, so a copy that fails after writing chat/updates but before the
+/// sidecars must leave no summary. Retrying the same ID then finishes the child.
+#[tokio::test]
+async fn sidecar_copy_failure_leaves_no_summary_and_retry_repairs() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("src-failed-copy"),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    adapter
+        .append_chat_message(&source, &ConversationItem::user("hello"))
+        .await
+        .unwrap();
+    adapter
+        .append_update(&source, &fork_agent_chunk("src-failed-copy", "hi"))
+        .await
+        .unwrap();
+    std::fs::write(adapter.plan_file(&source), b"plan").unwrap();
+
+    let target = Info {
+        id: acp::SessionId::new("fork-failed-copy"),
+        cwd: "/target".to_string(),
+    };
+    // A directory where the plan sidecar must land makes std::fs::copy fail after the transcript is written.
+    std::fs::create_dir_all(adapter.session_dir(&target)).unwrap();
+    std::fs::create_dir(adapter.plan_file(&target)).unwrap();
+    let options = CopySessionOptions {
+        parent_session_id: Some(source.id.to_string()),
+        ..Default::default()
+    };
+
+    adapter
+        .copy_session_data(&source, &target, options.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        !adapter.summary_file(&target).exists(),
+        "a failed copy must not publish a child summary"
+    );
+
+    std::fs::remove_dir(adapter.plan_file(&target)).unwrap();
+    let retried = adapter
+        .copy_session_data(&source, &target, options)
+        .await
+        .unwrap();
+    assert_eq!(retried.updates_copied, 1);
+    let summary = adapter.read_summary_sync(&target).unwrap();
+    assert_eq!(
+        summary.parent_session_id.as_deref(),
+        Some("src-failed-copy")
+    );
+    assert_eq!(std::fs::read(adapter.plan_file(&target)).unwrap(), b"plan");
+}
+
+/// Two forks that resolve to the same target serialize on the target lock: both succeed and produce one child.
+#[tokio::test]
+async fn concurrent_same_target_forks_converge_one_child() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("src-concurrent-fork"),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    for i in 0..20 {
+        adapter
+            .append_update(
+                &source,
+                &fork_agent_chunk("src-concurrent-fork", &format!("a{i}")),
+            )
+            .await
+            .unwrap();
+    }
+    let target = Info {
+        id: acp::SessionId::new("fork-concurrent"),
+        cwd: "/target".to_string(),
+    };
+    let options = CopySessionOptions {
+        parent_session_id: Some(source.id.to_string()),
+        ..Default::default()
+    };
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let adapter = adapter.clone();
+        let source = source.clone();
+        let target = target.clone();
+        let options = options.clone();
+        handles.push(tokio::spawn(async move {
+            adapter.copy_session_data(&source, &target, options).await
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap().unwrap();
+    }
+
+    let summary = adapter.read_summary_sync(&target).unwrap();
+    assert_eq!(
+        summary.parent_session_id.as_deref(),
+        Some("src-concurrent-fork")
+    );
+    assert_eq!(summary.num_messages, 20);
+    assert_eq!(
+        adapter.load_session(&target).await.unwrap().updates.len(),
+        20,
+        "the child must contain the source transcript exactly once"
+    );
+}
+
+/// A completed child is trusted via its summary and never blindly re-copied.
+#[tokio::test]
+async fn completed_child_is_not_recopied() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("src-completed-fork"),
+        cwd: "/src".to_string(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    adapter
+        .append_update(&source, &fork_agent_chunk("src-completed-fork", "a"))
+        .await
+        .unwrap();
+    let target = Info {
+        id: acp::SessionId::new("fork-completed"),
+        cwd: "/target".to_string(),
+    };
+    let options = CopySessionOptions {
+        parent_session_id: Some(source.id.to_string()),
+        ..Default::default()
+    };
+    adapter
+        .copy_session_data(&source, &target, options.clone())
+        .await
+        .unwrap();
+
+    let sentinel = b"not overwritten";
+    std::fs::write(adapter.updates_file(&target), sentinel).unwrap();
+    let second = adapter
+        .copy_session_data(&source, &target, options)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(adapter.updates_file(&target)).unwrap(),
+        sentinel
+    );
+    assert_eq!(second.updates_copied, 1);
+}
+
 /// An overlong line is discarded without consuming an index, so the two copy passes stay aligned.
 #[test]
 fn capped_line_reader_discards_overlong_lines_without_shifting_indexes() {
@@ -1817,5 +1977,98 @@ fn capped_line_reader_discards_overlong_lines_without_shifting_indexes() {
     assert_eq!(
         collect(b"aa\nbb", 4),
         vec![(0, b"aa".to_vec()), (1, b"bb".to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn changed_source_sidecar_cannot_publish_a_mixed_retry() {
+    let temp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("changed-source"),
+        cwd: "/source".into(),
+    };
+    let target = Info {
+        id: acp::SessionId::new("changed-child"),
+        cwd: "/target".into(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    std::fs::write(adapter.plan_file(&source), b"old plan").unwrap();
+    std::fs::write(adapter.signals_file(&source), b"{}").unwrap();
+    std::fs::create_dir_all(adapter.session_dir(&target)).unwrap();
+    std::fs::create_dir(adapter.signals_file(&target)).unwrap();
+    let options = CopySessionOptions {
+        parent_session_id: Some(source.id.to_string()),
+        ..Default::default()
+    };
+    adapter
+        .copy_session_data(&source, &target, options.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        std::fs::read(adapter.plan_file(&target)).unwrap(),
+        b"old plan"
+    );
+    std::fs::remove_dir(adapter.signals_file(&target)).unwrap();
+    std::fs::remove_file(adapter.plan_file(&source)).unwrap();
+    let error = adapter
+        .copy_session_data(&source, &target, options)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(!adapter.summary_file(&target).exists());
+    assert_eq!(
+        std::fs::read(adapter.plan_file(&target)).unwrap(),
+        b"old plan"
+    );
+}
+
+#[tokio::test]
+async fn completed_replay_requires_a_successful_directory_barrier() {
+    let temp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp.path().to_path_buf());
+    let info = Info {
+        id: acp::SessionId::new("completed-barrier"),
+        cwd: "/source".into(),
+    };
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let summary = adapter.read_summary_sync(&info).unwrap();
+    let error = super::completed_fork(summary.clone(), || {
+        Err(std::io::Error::other("directory sync failed"))
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    super::completed_fork(summary, || {
+        crate::session::storage::sync_dir_durable(&adapter.session_dir(&info))
+    })
+    .unwrap();
+}
+
+#[test]
+fn incomplete_retry_rejects_archives_not_in_the_current_source() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("old.json"), b"old checkpoint").unwrap();
+    assert_eq!(
+        super::check_archive_retry(&source, &target, true, None)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    std::fs::write(source.join("old.json"), b"source checkpoint").unwrap();
+    super::check_archive_retry(&source, &target, true, None).unwrap();
+    assert!(super::check_archive_retry(&source, &target, false, None).is_err());
+    assert_eq!(
+        std::fs::read(target.join("old.json")).unwrap(),
+        b"old checkpoint"
     );
 }
