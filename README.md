@@ -25,7 +25,7 @@ slash command in the TUI, or pass a flag to headless prompts.
 
 <table>
 <tr>
-<td width="50%" valign="top">
+<td width="33%" valign="top">
 
 ### UltraSave
 
@@ -40,7 +40,7 @@ still run before a task counts as done.
 `/ultrasave on` or `--ultrasave`
 
 </td>
-<td width="50%" valign="top">
+<td width="33%" valign="top">
 
 ### UltraFast
 
@@ -55,11 +55,27 @@ model, effort and verification steps stay the same.
 `/ultrafast on` or `--ultrafast`
 
 </td>
+<td width="33%" valign="top">
+
+### UltraCode
+
+# Parallel subagents
+
+UltraCode lets the session split work into smaller tasks and hand them to
+subagents, then checks their changes and evidence before accepting the result.
+
+Delegation is optional and has no speed or cost claim yet. Your model, effort
+and permissions stay the same.
+
+`/ultracode on` or `--ultracode`
+
+</td>
 </tr>
 </table>
 
 Details:
-[UltraSave](docs/ultrasave.md) and [UltraFast](docs/ultrafast.md).
+[UltraSave](docs/ultrasave.md), [UltraFast](docs/ultrafast.md) and
+[UltraCode](docs/ultracode.md).
 
 ## Benchmarks
 
