@@ -34,17 +34,21 @@ fn session_execution_mode_readback_survives_model_initialization_and_resets_for_
             ),
         ],
     ));
+    use distill_tool_types::{ExecutionMode as M, ExecutionModeChoice as C};
     for (session, execution_mode, fresh) in [
-        ("restored-ultrafast", Some(distill_tool_types::ExecutionMode::Ultrafast), false),
-        ("restored-ultracode", Some(distill_tool_types::ExecutionMode::Ultracode), false),
-        ("restored-ultrasave", Some(distill_tool_types::ExecutionMode::Ultrasave), false),
-        ("fresh-normal", Some(distill_tool_types::ExecutionMode::Normal), true),
+        ("restored-ultrafast", Some((M::Ultrafast, C::Ultrafast)), false),
+        ("restored-ultracode", Some((M::Ultracode, C::Ultracode)), false),
+        ("restored-ultrasave", Some((M::Ultrasave, C::Ultrasave)), false),
+        ("restored-auto", Some((M::Ultrasave, C::Auto)), false),
+        ("fresh-normal", Some((M::Normal, C::Normal)), true),
         ("older-response", None, false),
     ] {
         // A missing/Normal response must clear a previous session's selection,
         // including when the server omits a replacement model catalog.
-        app.models.execution_mode = distill_tool_types::ExecutionMode::Ultracode;
-        app.agents.get_mut(&id).unwrap().session.models.execution_mode = distill_tool_types::ExecutionMode::Ultracode;
+        app.models.execution_mode = M::Ultracode;
+        app.models.execution_mode_choice = C::Ultracode;
+        app.agents.get_mut(&id).unwrap().session.models.execution_mode = M::Ultracode;
+        app.agents.get_mut(&id).unwrap().session.models.execution_mode_choice = C::Ultracode;
         let models = catalog.take();
         let result = if fresh {
             TaskResult::SessionCreated {
@@ -75,14 +79,19 @@ fn session_execution_mode_readback_survives_model_initialization_and_resets_for_
             &mut app,
         );
         let agent = expect_agent(&app, id);
+        let (expected_mode, expected_choice) = execution_mode.unwrap_or_default();
+        assert_eq!(
+            agent.session.models.execution_mode_choice,
+            expected_choice,
+        );
         assert_eq!(
             agent.session.models.execution_mode,
-            execution_mode.unwrap_or_default(),
+            expected_mode,
             "{session}"
         );
         assert_eq!(
             app.models.execution_mode,
-            execution_mode.unwrap_or_default(),
+            expected_mode,
             "{session}"
         );
         assert_eq!(agent.session.models.current.as_ref(), Some(&model_id));

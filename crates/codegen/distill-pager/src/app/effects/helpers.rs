@@ -428,12 +428,14 @@ pub(crate) fn parse_session_memory_mode(
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
 }
-/// Prefer the exclusive mode; retain readback for sessions from older shells.
+/// Effective mode and user choice. A missing `executionModeChoice` means an older shell: the fixed
+/// `executionMode` is the choice. No mode metadata at all means Auto.
 pub(crate) fn parse_session_execution_mode(
     resp_meta: Option<&acp::Meta>,
-) -> Option<distill_tool_types::ExecutionMode> {
+) -> Option<(distill_tool_types::ExecutionMode, distill_tool_types::ExecutionModeChoice)> {
     let meta = resp_meta?;
-    meta.get("executionMode")
+    let fixed: Option<distill_tool_types::ExecutionMode> = meta
+        .get("executionMode")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .or_else(|| {
             meta.get("ultracode")
@@ -445,7 +447,13 @@ pub(crate) fn parse_session_execution_mode(
                         distill_tool_types::ExecutionMode::Normal
                     }
                 })
-        })
+        });
+    let choice = meta
+        .get("executionModeChoice")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_else(|| fixed.map_or(distill_tool_types::ExecutionModeChoice::Auto, Into::into));
+    let mode = fixed.unwrap_or(distill_tool_types::ExecutionMode::Normal);
+    Some((mode, choice))
 }
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
 pub(crate) fn is_disk_full_error(raw: &str) -> bool {

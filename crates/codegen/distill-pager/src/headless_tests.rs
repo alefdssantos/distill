@@ -170,12 +170,8 @@ fn s(v: &str) -> String {
 #[tokio::test]
 async fn execution_mode_activation_is_confirmed_before_prompt_and_default_sends_only_prompt() {
     use distill_acp_lib::AcpAgentMessage;
-    for mode in [
-        distill_tool_types::ExecutionMode::Ultrafast,
-        distill_tool_types::ExecutionMode::Ultracode,
-        distill_tool_types::ExecutionMode::Ultrasave,
-        distill_tool_types::ExecutionMode::Normal,
-    ] {
+    use distill_tool_types::ExecutionModeChoice as C;
+    for mode in [Some(C::Ultrafast), Some(C::Ultracode), Some(C::Ultrasave), Some(C::Normal), Some(C::Auto), None] {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AcpAgentMessage>();
         let sending = tokio::spawn(async move {
             send_headless_prompt(
@@ -185,7 +181,7 @@ async fn execution_mode_activation_is_confirmed_before_prompt_and_default_sends_
             )
             .await
         });
-        if mode != distill_tool_types::ExecutionMode::Normal {
+        if let Some(mode) = mode {
             let AcpAgentMessage::ExtMethod(args) = rx.recv().await.unwrap() else {
                 panic!("activation must be the first request");
             };
@@ -227,7 +223,7 @@ async fn execution_mode_activation_failure_prevents_prompt() {
         send_headless_prompt(
             &tx,
             acp::PromptRequest::new(acp::SessionId::new("sess-ultra"), vec![]),
-            distill_tool_types::ExecutionMode::Ultrasave,
+            Some(distill_tool_types::ExecutionModeChoice::Ultrasave),
         )
         .await
     });
@@ -236,7 +232,7 @@ async fn execution_mode_activation_failure_prevents_prompt() {
     };
     args.response_tx
         .send(Ok(acp::ExtResponse::new(
-            serde_json::value::to_raw_value(&serde_json::json!({"mode": "ultracode"}))
+            serde_json::value::to_raw_value(&serde_json::json!({"mode": "ultracode", "choice": "ultracode"}))
                 .unwrap()
                 .into(),
         )))

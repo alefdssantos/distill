@@ -82,12 +82,12 @@ fn ultracode_set_toggles_and_sets_without_touching_effort() {
         let sid = acp::SessionId::new(SESSION);
         assert!(!flag(&agent));
         let info = agent.resident_handle(&sid).unwrap().info;
-        assert!(crate::extensions::session_ultracode::load_mode(&info).unwrap() == ExecutionMode::Normal);
+        assert!(crate::extensions::session_ultracode::load_mode(&info).unwrap().1 == ExecutionMode::Normal);
 
         let out = set(&agent, serde_json::json!({ "sessionId": SESSION })).await.unwrap();
         assert_eq!(out, serde_json::json!({ "enabled": true }));
         assert!(flag(&agent));
-        assert!(crate::extensions::session_ultracode::load_mode(&info).unwrap() == ExecutionMode::Ultracode);
+        assert!(crate::extensions::session_ultracode::load_mode(&info).unwrap().1 == ExecutionMode::Ultracode);
 
         let out = set(&agent, serde_json::json!({ "sessionId": SESSION, "enabled": true }))
             .await
@@ -104,7 +104,7 @@ fn ultracode_set_toggles_and_sets_without_touching_effort() {
         assert_eq!(out, serde_json::json!({ "enabled": false }));
 
         assert!(
-            crate::extensions::session_ultracode::load_mode(&info).unwrap() == ExecutionMode::Normal,
+            crate::extensions::session_ultracode::load_mode(&info).unwrap().1 == ExecutionMode::Normal,
             "explicit off must survive reload"
         );
         let handle = agent.resident_handle(&sid).unwrap();
@@ -157,7 +157,7 @@ fn ultracode_child_toggle_cannot_change_or_persist_the_root_switch() {
         .unwrap_err();
         assert_eq!(error.code, acp::Error::invalid_params().code);
         assert!(flag(&agent));
-        assert!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap() == ExecutionMode::Ultracode);
+        assert!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap().1 == ExecutionMode::Ultracode);
         assert!(
             !crate::session::persistence::session_dir(&child_info)
                 .join("execution_mode.json")
@@ -170,7 +170,7 @@ fn ultracode_child_toggle_cannot_change_or_persist_the_root_switch() {
         .await
         .unwrap();
         assert!(root.execution_mode.load() == ExecutionMode::Normal);
-        assert!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap() == ExecutionMode::Normal);
+        assert!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap().1 == ExecutionMode::Normal);
     });
 }
 
@@ -185,7 +185,7 @@ fn execution_modes_replace_each_other_and_persist_without_changing_pins() {
         // Existing saved UltraCode sessions still restore correctly.
         let dir = crate::session::persistence::ensure_owner_only_session_dir(&root.info).unwrap();
         std::fs::write(dir.join("ultracode.json"), r#"{"enabled":true}"#).unwrap();
-        assert_eq!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap(), ExecutionMode::Ultracode);
+        assert_eq!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap().1, ExecutionMode::Ultracode);
         for mode in [ExecutionMode::Ultrafast, ExecutionMode::Ultracode, ExecutionMode::Ultrasave, ExecutionMode::Normal, ExecutionMode::Ultrafast] {
             let params = serde_json::json!({"sessionId": SESSION, "mode": mode});
             let request = acp::ExtRequest::new(
@@ -193,23 +193,28 @@ fn execution_modes_replace_each_other_and_persist_without_changing_pins() {
                 serde_json::value::to_raw_value(&params).unwrap().into(),
             );
             let response = handle(&agent, &request).await.unwrap();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(response.0.get()).unwrap(), serde_json::json!({"mode": mode}));
+            assert_eq!(serde_json::from_str::<serde_json::Value>(response.0.get()).unwrap(), serde_json::json!({"mode": mode, "choice": mode}));
             assert_eq!(root.execution_mode.load(), mode);
-            assert_eq!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap(), mode);
+            assert_eq!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap().1, mode);
         }
         // Disabling an inactive legacy mode must not disable UltraFast.
         set(&agent, serde_json::json!({"sessionId": SESSION, "enabled": false})).await.unwrap();
         assert_eq!(root.execution_mode.load(), ExecutionMode::Ultrafast);
         // Relative commands use server state even when a client has not yet
         // received the preceding acknowledgement.
+        // Turning a fixed mode off returns to Auto, which keeps running the
+        // last effective mode until its next decision.
+        use distill_tool_types::ExecutionModeChoice as Choice;
         for (target, operation, expected) in [
-            (ExecutionMode::Ultrafast, "toggle", ExecutionMode::Normal),
-            (ExecutionMode::Ultrafast, "toggle", ExecutionMode::Ultrafast),
-            (ExecutionMode::Ultracode, "disable", ExecutionMode::Ultrafast),
-            (ExecutionMode::Ultrafast, "disable", ExecutionMode::Normal),
-            (ExecutionMode::Ultrasave, "toggle", ExecutionMode::Ultrasave),
-            (ExecutionMode::Ultrafast, "disable", ExecutionMode::Ultrasave),
-            (ExecutionMode::Ultrasave, "toggle", ExecutionMode::Normal),
+            (Choice::Ultrafast, "toggle", Choice::Auto),
+            (Choice::Ultrafast, "toggle", Choice::Ultrafast),
+            (Choice::Ultracode, "disable", Choice::Ultrafast),
+            (Choice::Ultrafast, "disable", Choice::Auto),
+            (Choice::Ultrasave, "toggle", Choice::Ultrasave),
+            (Choice::Ultrafast, "disable", Choice::Ultrasave),
+            (Choice::Ultrasave, "toggle", Choice::Auto),
+            (Choice::Normal, "set", Choice::Normal),
+            (Choice::Auto, "set", Choice::Auto),
         ] {
             let params = serde_json::json!({"sessionId": SESSION, "mode": target, "operation": operation});
             let request = acp::ExtRequest::new(
@@ -217,8 +222,13 @@ fn execution_modes_replace_each_other_and_persist_without_changing_pins() {
                 serde_json::value::to_raw_value(&params).unwrap().into(),
             );
             let response = handle(&agent, &request).await.unwrap();
-            assert_eq!(serde_json::from_str::<serde_json::Value>(response.0.get()).unwrap(), serde_json::json!({"mode": expected}));
-            assert_eq!(root.execution_mode.load(), expected);
+            let response: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
+            assert_eq!(response["choice"], serde_json::json!(expected));
+            assert_eq!(root.execution_mode.choice(), expected);
+            assert_eq!(crate::extensions::session_ultracode::load_mode(&root.info).unwrap().0, expected);
+            if let Some(fixed) = expected.fixed() {
+                assert_eq!(root.execution_mode.load(), fixed);
+            }
         }
         assert_eq!(root.reasoning_effort, Some(distill_sampling_types::ReasoningEffort::Low));
     });

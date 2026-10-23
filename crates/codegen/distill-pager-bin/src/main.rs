@@ -2493,19 +2493,25 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
         args.prompt_json.as_deref(),
         args.prompt_file.as_deref(),
     )?;
+    // No flag keeps the session's saved choice (Auto for new sessions).
     let execution_mode = if args.ultrafast {
-        distill_tool_types::ExecutionMode::Ultrafast
+        Some(distill_tool_types::ExecutionModeChoice::Ultrafast)
     } else if args.ultracode {
-        distill_tool_types::ExecutionMode::Ultracode
+        Some(distill_tool_types::ExecutionModeChoice::Ultracode)
     } else if args.ultrasave {
-        distill_tool_types::ExecutionMode::Ultrasave
+        Some(distill_tool_types::ExecutionModeChoice::Ultrasave)
     } else {
-        distill_tool_types::ExecutionMode::Normal
+        args.mode.as_deref().and_then(|mode| {
+            serde_json::from_value(serde_json::Value::String(mode.to_owned())).ok()
+        })
     };
-    if execution_mode != distill_tool_types::ExecutionMode::Normal && headless_prompt.is_none() {
-        let mode = execution_mode.label().to_ascii_lowercase();
+    if let Some(choice) = execution_mode
+        && choice != distill_tool_types::ExecutionModeChoice::Auto
+        && headless_prompt.is_none()
+    {
+        let mode = choice.label().to_ascii_lowercase();
         anyhow::bail!(
-            "--{mode} requires -p/--single, --prompt-file or --prompt-json; use /{mode} on in the interactive UI"
+            "--{mode} requires -p/--single, --prompt-file or --prompt-json; use /mode {mode} in the interactive UI"
         );
     }
     if headless_prompt.is_some() || args.memory_flush {

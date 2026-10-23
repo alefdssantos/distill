@@ -126,23 +126,25 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
-### `/ultrafast [on|off]`, `/ultracode [on|off]`, and `/ultrasave [on|off]`
+### `/mode <auto|normal|ultrafast|ultracode|ultrasave>`
 
-Each session has one execution mode: **Normal**, **UltraFast**, **UltraCode**, or **UltraSave**. Selecting a mode replaces the previous one. With no argument, the command toggles its mode; `off` returns to Normal only when that command's mode is active.
+Each session has one execution mode choice. **Auto** is the default: Jev picks the effective mode for each request, and can change it during a turn. The other choices fix the mode: **Normal**, **UltraFast**, **UltraCode**, or **UltraSave**. Selecting a choice replaces the previous one. `/mode` with no argument or an unknown argument shows the usage.
+
+When Auto changes the effective mode, the scrollback shows `Auto mode: UltraSave — <reason>`. The prompt footer always shows the choice and the effective mode, for example `Mode: Auto → UltraSave`, or `Mode: UltraCode` when fixed.
 
 UltraFast prioritizes direct execution and parallel independent tasks, with one level of executors and the same required verification. UltraCode keeps its existing task decomposition policy. UltraSave prioritizes token economy. All modes preserve an explicitly selected model and reasoning effort.
 
-The prompt footer shows `Mode: Normal`, `Mode: UltraFast`, `Mode: UltraCode`, or `Mode: UltraSave`. In the Models screen, select **Execution** and press Enter to cycle through Normal → UltraFast → UltraCode → UltraSave → Normal, then save.
+In the Models screen, select **Execution** and press Enter to cycle through Auto → Normal → UltraFast → UltraCode → UltraSave → Auto, then save.
 
 ```
-/ultrafast on
-/ultracode on
-/ultracode off
-/ultrasave on
-/ultrasave off
+/mode auto
+/mode ultrafast
+/mode ultracode
+/mode ultrasave
+/mode normal
 ```
 
-For headless prompts, use `--ultrafast`, `--ultracode`, or `--ultrasave`. The flags cannot be combined, and the prompt is sent only after the agent confirms the requested mode.
+For headless prompts, use `--mode <auto|normal|ultrafast|ultracode|ultrasave>` (default `auto`). The legacy `--ultrafast`, `--ultracode`, and `--ultrasave` flags still work but cannot be combined with each other or with `--mode`. A fixed choice is sent only after the agent confirms it; Auto sends no activation request. Any choice other than Auto requires a headless prompt.
 
 ### `/always-approve`
 

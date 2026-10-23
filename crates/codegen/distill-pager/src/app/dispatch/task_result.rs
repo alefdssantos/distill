@@ -478,10 +478,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && session_id.is_some()
                 && agent.session.session_id == session_id
             {
-                let mode = execution_mode.unwrap_or_default();
+                let (mode, choice) = execution_mode.unwrap_or_default();
                 agent.session.models.execution_mode = mode;
+                agent.session.models.execution_mode_choice = choice;
                 if app.active_view == ActiveView::Agent(agent_id) {
                     app.models.execution_mode = mode;
+                    app.models.execution_mode_choice = choice;
                 }
             }
             return effects;
@@ -1068,11 +1070,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::ExecutionModeSet { session_id, result } => {
             if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id.0) {
                 match result {
-                    Ok(mode) => {
+                    Ok((mode, choice)) => {
                         agent.session.models.execution_mode = mode;
-                        agent.scrollback.push_block(RenderBlock::system(
-                            format!("Execution mode: {}", mode.label()),
-                        ));
+                        agent.session.models.execution_mode_choice = choice;
+                        let line = match choice.fixed() {
+                            Some(_) => format!("Execution mode: {}", choice.label()),
+                            None => format!("Execution mode: Auto → {}", mode.label()),
+                        };
+                        agent.scrollback.push_block(RenderBlock::system(line));
                     }
                     Err(message) => {
                         agent.scrollback.push_block(RenderBlock::system(format!(

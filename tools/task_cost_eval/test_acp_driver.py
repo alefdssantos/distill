@@ -70,8 +70,11 @@ for line in sys.stdin:
             if scenario != 'stop-feedback-failure':
                 # Consume cancellation but never answer the activation request.
                 continue
-        result = ({'mode': request['params']['mode']} if method.endswith('/execution_mode/set')
-                  else {'enabled': request['params']['enabled']})
+        if method.endswith('/execution_mode/set'):
+            requested = request['params']['mode']
+            result = {'mode': 'normal', 'choice': 'auto'} if requested == 'auto' else {'mode': requested}
+        else:
+            result = {'enabled': request['params']['enabled']}
         if scenario == 'wrong-mode':
             result = {'mode': 'ultracode'}
         if scenario == 'activation-false':
@@ -183,12 +186,13 @@ def drive(root, scenario='success', timeout=3, ultracode=True, effort='medium', 
 
 class AcpDriverTest(unittest.TestCase):
     def test_explicit_mode_receipt_precedes_prompt_and_observes_live_children(self):
-        for mode in ('normal', 'ultrafast', 'ultracode', 'ultrasave'):
+        for mode in ('normal', 'ultrafast', 'ultracode', 'ultrasave', 'auto'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 result = drive(root, ultracode=False, execution_mode=mode)
                 self.assertTrue(result['completed'], result)
-                self.assertEqual(result['activation_receipt']['result'], {'mode': mode})
+                expected = {'mode': 'normal', 'choice': 'auto'} if mode == 'auto' else {'mode': mode}
+                self.assertEqual(result['activation_receipt']['result'], expected)
                 sent = [json.loads(line)['message'] for line in (root / 'acp-transcript.jsonl').read_text().splitlines()
                         if json.loads(line)['direction'] == 'sent']
                 methods = [message.get('method') for message in sent]

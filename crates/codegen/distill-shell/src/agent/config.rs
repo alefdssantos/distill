@@ -1353,6 +1353,7 @@ pub struct JevLadderConfig {
     /// D6 also in warm batches that pay for their cache break (default off).
     pub d6_warm_batches: Option<bool>,
     pub b7_subagent_model: Option<bool>,
+    pub b8_execution_mode: Option<bool>,
 }
 pub use distill_agent::prompt::paths::PathsConfig;
 /// `[permission]` known keys, declared for the unrecognized-key scan only; consumed out-of-band.

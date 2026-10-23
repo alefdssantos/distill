@@ -2130,8 +2130,15 @@ pub(crate) fn execute(
                 let result = match acp_send(request, &tx).await {
                     Ok(resp) => serde_json::from_str::<serde_json::Value>(resp.0.get())
                         .ok()
-                        .and_then(|v| v.get("mode").cloned())
-                        .and_then(|v| serde_json::from_value(v).ok())
+                        .and_then(|v| {
+                            let mode: distill_tool_types::ExecutionMode =
+                                serde_json::from_value(v.get("mode")?.clone()).ok()?;
+                            let choice = match v.get("choice") {
+                                Some(choice) => serde_json::from_value(choice.clone()).ok()?,
+                                None => mode.into(),
+                            };
+                            Some((mode, choice))
+                        })
                         .ok_or_else(|| "unexpected response from agent".to_owned()),
                     Err(e) => Err(sanitize_user_error(&e.to_string())),
                 };

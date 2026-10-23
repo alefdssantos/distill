@@ -22,6 +22,7 @@ from .parallel_verdict import verdict
 from .runner import _terminate_owned_group
 from .ultrafast_verdict import verdict as ultrafast_verdict
 from .ultrasave_verdict import verdict as ultrasave_verdict
+from .auto_verdict import verdict as auto_verdict
 
 ROOT = Path(__file__).resolve().parent
 MODEL = 'chatgpt/gpt-6.1-sol'
@@ -142,6 +143,8 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
         if effort not in (None, 'auto'):
             command.extend(['--effort', effort])
         command.append('stdio')
+    elif mode == 'auto':
+        command.extend(['--mode', 'auto'])
     elif mode != 'normal':
         command.append(f'--{mode}')
     if transport == 'cli' and effort is not None:
@@ -240,7 +243,7 @@ def run_one(binary, variant, case, repetition, work_root, profile, timeout, *,
     else:
         activation = (acp.get('activation_receipt') or {}).get('result')
         activation_confirmed = isinstance(activation, dict) and (
-            activation.get('mode') == execution_mode if execution_mode is not None
+            activation.get('choice', activation.get('mode')) == execution_mode if execution_mode is not None
             else activation.get('enabled') is ultracode)
         exit_code, transport_ok = acp['exit_code'], acp['completed']
     return {'variant': variant, 'case': case['id'], 'kind': case['kind'], 'repetition': repetition,
@@ -300,9 +303,10 @@ def main(argv=None):
                         help='head-to-head release comparison: baseline and candidate may use the same execution '
                              'mode with different binaries; requires an ultrafast/ultrasave verdict')
     parser.add_argument('--max-concurrent', type=int, help='common task, sampling, and workflow capacity')
-    parser.add_argument('--verdict', choices=('parallel', 'ultrafast', 'ultrasave'), default='parallel',
+    parser.add_argument('--verdict', choices=('parallel', 'ultrafast', 'ultrasave', 'auto'), default='parallel',
                         help='paired ACP gates vs Normal: ultrafast median completion ratio <=0.60; ultrasave median credit '
-                             'ratio <=0.45 (both <=0.85 with --compare-versions); at most 1 quality regression')
+                             'ratio <=0.45 (both <=0.85 with --compare-versions); auto median credit and completion '
+                             'ratios <=1.0 with one <=0.85 vs all fixed modes; at most 1 quality regression')
     for variant in VARIANTS:
         mode = parser.add_mutually_exclusive_group()
         mode.add_argument(f'--{variant}-ultracode', action='store_true',
@@ -330,11 +334,12 @@ def main(argv=None):
         parser.error('--timeout must be finite and greater than zero')
     if args.max_concurrent is not None and args.max_concurrent < 1:
         parser.error('--max-concurrent must be at least 1')
-    paired_mode = args.verdict in ('ultrafast', 'ultrasave')
-    baseline_modes = ('normal', 'ultracode') if args.verdict == 'ultrafast' else ('normal',)
+    paired_mode = args.verdict in ('ultrafast', 'ultrasave', 'auto')
+    baseline_modes = {'ultrafast': ('normal', 'ultracode'), 'auto': ('normal', 'ultrafast', 'ultrasave', 'ultracode')}.get(
+        args.verdict, ('normal',))
     if args.compare_versions:
         if not paired_mode:
-            parser.error('--compare-versions requires --verdict ultrafast or ultrasave')
+            parser.error('--compare-versions requires --verdict ultrafast, ultrasave, or auto')
         baseline_modes += (args.verdict,)
     if paired_mode and (
             args.transport != 'acp' or args.candidate_mode != args.verdict or
@@ -410,7 +415,7 @@ def main(argv=None):
                'binaries': {v: {'path': str(b), 'sha256': frozen['binaries'][v]}
                             for v, b in binaries.items()}}
     results['verdict'] = {'parallel': verdict, 'ultrafast': ultrafast_verdict,
-                          'ultrasave': ultrasave_verdict}[args.verdict](results)
+                          'ultrasave': ultrasave_verdict, 'auto': auto_verdict}[args.verdict](results)
     invalid = [f'{r["variant"]} {r["case"]}#{r["repetition"]}: {r["acp"]["error"] or "ACP incomplete"}'
                for r in runs if r.get('acp') is not None
                and (not r['acp']['setup_confirmed'] or not r['acp']['cleanup_complete'])]

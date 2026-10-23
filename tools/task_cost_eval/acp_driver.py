@@ -17,7 +17,7 @@ from .runner import _terminate_owned_group
 
 ULTRACODE_METHOD = '_x.ai/session/ultracode/set'
 EXECUTION_MODE_METHOD = '_x.ai/session/execution_mode/set'
-EXECUTION_MODES = ('normal', 'ultrafast', 'ultracode', 'ultrasave')
+EXECUTION_MODES = ('normal', 'ultrafast', 'ultracode', 'ultrasave', 'auto')
 HOOK_RUN_METHOD = '_x.ai/hooks/run'
 STOP_CALLBACK_ID = 'benchmark-root-stop'
 SHUTDOWN_GRACE = 2.0
@@ -393,7 +393,7 @@ def run_acp(command, *, cwd, environment, prompt, model, effort, ultracode=False
                 raise AcpError('session/set_model did not confirm the requested model/effort')
             if execution_mode is not None:
                 activation = client.request(activation_method, {'sessionId': session, 'mode': execution_mode})
-                if activation.get('mode') != execution_mode:
+                if activation.get('choice', activation.get('mode')) != execution_mode:
                     raise AcpError(f'Execution mode activation did not confirm mode={execution_mode}')
             else:
                 activation = client.request(activation_method, {'sessionId': session, 'enabled': ultracode})

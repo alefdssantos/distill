@@ -1143,7 +1143,10 @@ pub(crate) async fn spawn_session_actor(
         .map(|policy| policy.mode.clone())
         .unwrap_or_else(|| Arc::new(distill_tool_types::AtomicExecutionMode::default()));
     if !startup_hints.is_subagent {
-        execution_mode.store(crate::extensions::session_ultracode::load_mode(&session_info)?);
+        crate::extensions::session_ultracode::apply_mode(
+            &execution_mode,
+            crate::extensions::session_ultracode::load_mode(&session_info)?,
+        );
     }
     let rebuild_spec = std::sync::Arc::new(crate::session::agent_rebuild::AgentRebuildSpec {
         working_directory: tool_context.cwd.as_path().to_path_buf(),

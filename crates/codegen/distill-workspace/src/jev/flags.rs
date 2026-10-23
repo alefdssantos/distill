@@ -120,6 +120,8 @@ pub struct JevLadderOverlay {
     /// D6 also in warm batches that pay for their cache break.
     pub d6_warm_batches: Option<bool>,
     pub b7_subagent_model: Option<bool>,
+    /// B8: Auto execution mode picks Normal/UltraFast/UltraCode/UltraSave per request.
+    pub b8_execution_mode: Option<bool>,
 }
 
 /// Resolves one boolean switch: an explicit value from any trusted layer wins
@@ -186,6 +188,7 @@ impl JevFlags {
             // history_batch / history_reread counts show it pays.
             d6_warm_batches: false,
             b7_subagent_model: true,
+            b8_execution_mode: true,
         }
     }
 
@@ -281,6 +284,8 @@ impl JevFlags {
             && resolve_switch(ladder.d6_warm_batches, None, self.d6_warm_batches);
         self.b7_subagent_model =
             self.enabled && resolve_switch(ladder.b7_subagent_model, None, self.b7_subagent_model);
+        self.b8_execution_mode =
+            self.enabled && resolve_switch(ladder.b8_execution_mode, None, self.b8_execution_mode);
         self
     }
 }
@@ -366,6 +371,8 @@ pub struct JevFlags {
     /// default: it rewrites sent history on a warm cache).
     pub d6_warm_batches: bool,
     pub b7_subagent_model: bool,
+    /// B8: Auto execution mode picks the session's effective mode.
+    pub b8_execution_mode: bool,
 }
 
 impl JevFlags {
@@ -408,6 +415,7 @@ impl JevFlags {
             d6_history_eviction: false,
             d6_warm_batches: false,
             b7_subagent_model: false,
+            b8_execution_mode: false,
         }
     }
 
@@ -506,6 +514,7 @@ impl JevFlags {
             JevLever::D5MemoryCaptureGate => self.d5_memory_capture_gate,
             JevLever::D6HistoryEviction => self.d6_history_eviction,
             JevLever::B7SubagentModel => self.b7_subagent_model,
+            JevLever::B8ExecutionMode => self.b8_execution_mode,
         }
     }
 
@@ -543,6 +552,7 @@ pub enum JevLever {
     B3SubagentType,
     B6DelegationHint,
     B7SubagentModel,
+    B8ExecutionMode,
     C1PrematureStop,
     C3CompletionCheck,
     C4DiffRisk,
@@ -582,6 +592,7 @@ impl JevLever {
             Self::B3SubagentType => "b3_subagent_type",
             Self::B6DelegationHint => "b6_delegation_hint",
             Self::B7SubagentModel => "b7_subagent_model",
+            Self::B8ExecutionMode => "b8_execution_mode",
             Self::C1PrematureStop => "c1_premature_stop",
             Self::C3CompletionCheck => "c3_completion_check",
             Self::C4DiffRisk => "c4_diff_risk",

@@ -1584,7 +1584,7 @@
         pw.textarea.set_selection(1, 3);
 
         assert!(pw.accept_slash_completion(&models));
-        assert_eq!(pw.textarea.text(), "/model ");
+        assert_eq!(pw.textarea.text(), "/mode ");
         assert!(pw.textarea.selection_range().is_none());
     }
 
@@ -1593,14 +1593,14 @@
         let mut pw = PromptWidget::new();
         let models = crate::acp::model_state::ModelState::default();
 
-        // Typing "/mod" should match "/model" which takes_args
+        // Typing "/mod" ranks the shorter "/mode" first; it takes args too
         pw.textarea.insert_str("/mod");
         pw.refresh_slash(&models);
 
         pw.accept_slash_completion(&models);
         let text = pw.textarea.text().to_string();
         assert_eq!(
-            text, "/model ",
+            text, "/mode ",
             "arg-taking command should get trailing space"
         );
     }
@@ -3874,6 +3874,7 @@
             main: "gpt-6-sol (auto)".to_owned(),
             worker: Some("gpt-6-luna".to_owned()),
             execution_mode: distill_tool_types::ExecutionMode::Ultracode,
+            execution_mode_choice: distill_tool_types::ExecutionModeChoice::Ultracode,
         };
         let info = PromptInfo {
             model_tiers: Some(&tiers),
@@ -3952,13 +3953,17 @@
         );
         models.current = Some(main);
         models.effort_auto = true;
-        for (mode, expected) in [
-            (distill_tool_types::ExecutionMode::Normal, "Main: M (auto) | Mode: Normal | change"),
-            (distill_tool_types::ExecutionMode::Ultrafast, "Main: M (auto) | Mode: UltraFast | change"),
-            (distill_tool_types::ExecutionMode::Ultracode, "Main: M (auto) | Mode: UltraCode | change"),
-            (distill_tool_types::ExecutionMode::Ultrasave, "Main: M (auto) | Mode: UltraSave | change"),
+        use distill_tool_types::{ExecutionMode as M, ExecutionModeChoice as C};
+        for (choice, mode, expected) in [
+            (C::Normal, M::Normal, "Main: M (auto) | Mode: Normal | change"),
+            (C::Ultrafast, M::Ultrafast, "Main: M (auto) | Mode: UltraFast | change"),
+            (C::Ultracode, M::Ultracode, "Main: M (auto) | Mode: UltraCode | change"),
+            (C::Ultrasave, M::Ultrasave, "Main: M (auto) | Mode: UltraSave | change"),
+            (C::Auto, M::Ultrasave, "Main: M (auto) | Mode: Auto → UltraSave | change"),
+            (C::Auto, M::Normal, "Main: M (auto) | Mode: Auto → Normal | change"),
         ] {
             models.execution_mode = mode;
+            models.execution_mode_choice = choice;
             let tiers = PromptModelTiers::from_model_state(&models).expect("main model");
             let info = PromptInfo {
                 model_tiers: Some(&tiers),
@@ -3986,6 +3991,7 @@
             main: "gpt-6-astra (auto)".to_owned(),
             worker: None,
             execution_mode: distill_tool_types::ExecutionMode::Normal,
+            execution_mode_choice: distill_tool_types::ExecutionModeChoice::Normal,
         };
         let info = PromptInfo {
             model_tiers: Some(&tiers),

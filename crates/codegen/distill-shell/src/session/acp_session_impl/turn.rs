@@ -1177,6 +1177,15 @@ impl SessionActor {
             self.maybe_inject_mcp_reminder().await;
             self.maybe_inject_date_rollover_reminder().await;
             self.inject_plan_mode_reminders().await;
+            // A scheduled prompt is a new request too.
+            if policy.authority.is_human_intent()
+                || matches!(
+                    input_origin.as_prompt_origin(),
+                    super::super::PromptOrigin::SchedulerFired
+                )
+            {
+                self.jev_auto_pick_mode(&user_message).await;
+            }
             self.inject_execution_mode_reminder();
             self.inject_fork_reminder().await;
             self.inject_resumed_tasks_reminder();
@@ -2719,7 +2728,7 @@ impl SessionActor {
         }
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
-        let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
+        let (mut tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         self.maybe_inject_mcp_connecting_reminder().await;
         self.maybe_inject_mcp_reminder().await;
@@ -3989,6 +3998,13 @@ impl SessionActor {
                 return Ok(TurnOutcome::MaxTurnsReached { limit });
             }
             tool_turn_count = next_turn;
+            if self.execution_mode.is_auto()
+                && let Some(request) = self.jev_last_human_request().await
+                && self.jev_auto_review_mode(&request, tool_turn_count - 1).await
+            {
+                // The new mode sends its own tool list.
+                tool_definitions = self.prepare_tool_definitions_timed().await.0;
+            }
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_preflight_overflow().await
             {

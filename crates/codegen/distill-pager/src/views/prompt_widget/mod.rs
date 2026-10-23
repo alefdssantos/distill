@@ -451,6 +451,7 @@ pub struct PromptModelTiers {
     pub main: String,
     pub worker: Option<String>,
     pub execution_mode: distill_tool_types::ExecutionMode,
+    pub execution_mode_choice: distill_tool_types::ExecutionModeChoice,
 }
 
 impl PromptModelTiers {
@@ -460,6 +461,7 @@ impl PromptModelTiers {
                 main: format!("Auto → {}", models.effort_label(&models.display_name(main))),
                 worker: Some(format!("Auto → {} (auto)", models.display_name(worker))),
                 execution_mode: models.execution_mode,
+                execution_mode_choice: models.execution_mode_choice,
             });
         }
         let main = models.current_model_name()?;
@@ -467,6 +469,7 @@ impl PromptModelTiers {
             main: models.effort_label(&main),
             worker: models.worker_label(),
             execution_mode: models.execution_mode,
+            execution_mode_choice: models.execution_mode_choice,
         })
     }
 }
@@ -3628,15 +3631,20 @@ impl PromptWidget {
                 left_spans.push(Span::styled(worker.as_str(), worker_style));
             }
             left_spans.push(Span::styled(" | ", sep_style));
-            let execution_mode_style = if tiers.execution_mode != distill_tool_types::ExecutionMode::Normal {
+            let auto_choice = tiers.execution_mode_choice.fixed().is_none();
+            let execution_mode_style = if auto_choice
+                || tiers.execution_mode != distill_tool_types::ExecutionMode::Normal
+            {
                 Style::default().fg(theme.accent_thinking).bg(bg)
             } else {
                 theme.muted().bg(bg)
             };
-            left_spans.push(Span::styled(
-                format!("Mode: {}", tiers.execution_mode.label()),
-                execution_mode_style,
-            ));
+            let mode_label = if auto_choice {
+                format!("Auto → {}", tiers.execution_mode.label())
+            } else {
+                tiers.execution_mode_choice.label().to_owned()
+            };
+            left_spans.push(Span::styled(format!("Mode: {mode_label}"), execution_mode_style));
             left_spans.push(Span::styled(" | ", sep_style));
             change_start = Some(Line::from(left_spans.clone()).width() as u16);
             left_spans.push(Span::styled(

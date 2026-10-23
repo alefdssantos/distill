@@ -45,4 +45,6 @@ pub use types::{
 pub use web_search::{WebSearchOutput, WebSearchToolInput};
 
 mod execution_mode;
-pub use execution_mode::{AtomicExecutionMode, ExecutionMode, ExecutionModeOperation};
+pub use execution_mode::{
+    AtomicExecutionMode, ExecutionMode, ExecutionModeChoice, ExecutionModeOperation,
+};

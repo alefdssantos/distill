@@ -630,6 +630,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/queue/changed" => handle_queue_changed(notif, app),
         "x.ai/session/prompt_complete" => handle_prompt_complete(notif, app),
         "x.ai/session/interjection" => handle_interjection(notif, app),
+        "x.ai/session/execution_mode/changed" => handle_execution_mode_changed(notif, app),
         "x.ai/monitor_event" => handle_monitor_event(notif, app),
         "x.ai/scheduled_task_created" => handle_scheduled_task_created(notif, app),
         "x.ai/scheduled_task_fired" => handle_scheduled_task_fired(notif, app),
@@ -700,6 +701,41 @@ fn user_message_text(update: &acp::SessionUpdate) -> Option<&str> {
         acp::ContentBlock::Text(text) => Some(text.text.as_str()),
         _ => None,
     }
+}
+
+/// Auto picked a new effective mode for a session: keep the footer and scrollback in step.
+fn handle_execution_mode_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
+        tracing::warn!("Failed to parse x.ai/session/execution_mode/changed");
+        return false;
+    };
+    let Some(session_id) = parsed.get("sessionId").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Some(mode) = parsed.get("mode").and_then(|v| serde_json::from_value(v.clone()).ok()) else {
+        return false;
+    };
+    let reason = parsed.get("reason").and_then(|v| v.as_str()).unwrap_or_default();
+    let sid = acp::SessionId::new(session_id.to_string());
+    let Some(SessionMatch::Root(id)) = find_session_match(app, &sid) else {
+        return false;
+    };
+    let is_active = is_matched_agent_active(app, id);
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return false;
+    };
+    agent.session.models.execution_mode = mode;
+    agent.session.models.execution_mode_choice = distill_tool_types::ExecutionModeChoice::Auto;
+    if is_active {
+        app.models.execution_mode = mode;
+        app.models.execution_mode_choice = distill_tool_types::ExecutionModeChoice::Auto;
+    }
+    let agent = app.agents.get_mut(&id).expect("agent checked above");
+    agent.scrollback.push_block(RenderBlock::system(format!(
+        "Auto mode: {} — {reason}",
+        mode.label()
+    )));
+    is_active
 }
 
 fn handle_interjection(notif: &acp::ExtNotification, app: &mut AppView) -> bool {

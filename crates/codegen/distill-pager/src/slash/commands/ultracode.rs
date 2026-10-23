@@ -1,141 +1,116 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
-//! Exclusive session execution modes. Explicit reasoning effort remains independent.
+//! `/mode`: select the session execution mode (Auto, or one fixed mode).
 
 use crate::app::actions::Action;
-use crate::slash::command::{AppCtx, CommandExecCtx, CommandResult, SlashCommand, slash_meta};
-use distill_tool_types::{ExecutionMode, ExecutionModeOperation};
+use crate::slash::command::{
+    AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand, slash_meta,
+};
+use distill_tool_types::{ExecutionModeChoice, ExecutionModeOperation};
 
-pub struct UltracodeCommand;
-pub struct UltrafastCommand;
-pub struct UltrasaveCommand;
+pub struct ModeCommand;
 
-impl SlashCommand for UltracodeCommand {
+const MODE_ARGS: [(&str, ExecutionModeChoice, &str); 5] = [
+    ("auto", ExecutionModeChoice::Auto, "Jev picks the mode per request"),
+    ("normal", ExecutionModeChoice::Normal, "Standard execution"),
+    ("ultrafast", ExecutionModeChoice::Ultrafast, "Direct execution and parallel independent work"),
+    ("ultracode", ExecutionModeChoice::Ultracode, "Orchestrate work across parallel subagents"),
+    ("ultrasave", ExecutionModeChoice::Ultrasave, "Prioritize token economy"),
+];
+
+impl SlashCommand for ModeCommand {
     slash_meta! {
-        name: "ultracode",
-        description: "Select UltraCode: orchestrate work across parallel subagents",
-        usage: "/ultracode [on|off]",
+        name: "mode",
+        description: "Select execution mode: auto (Jev picks per request), normal, ultrafast, ultracode, ultrasave",
+        usage: "/mode <auto|normal|ultrafast|ultracode|ultrasave>",
         takes_args: true,
+        args_required: true,
         session_scoped: true,
-        arg_placeholder: "[on|off]",
+        arg_placeholder: "<auto|normal|ultrafast|ultracode|ultrasave>",
     }
 
-    fn takes_args_now(&self, _ctx: &AppCtx) -> bool {
-        false
+    fn suggest_args(&self, _ctx: &AppCtx, _args_query: &str) -> Option<Vec<ArgItem>> {
+        Some(
+            MODE_ARGS
+                .iter()
+                .map(|(name, _, description)| ArgItem {
+                    display: (*name).to_string(),
+                    match_text: (*name).to_string(),
+                    insert_text: (*name).to_string(),
+                    description: (*description).to_string(),
+                })
+                .collect(),
+        )
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        select_mode(args, ExecutionMode::Ultracode, self.usage())
-    }
-}
-
-impl SlashCommand for UltrafastCommand {
-    slash_meta! {
-        name: "ultrafast",
-        description: "Select UltraFast: direct execution and parallel independent work",
-        usage: "/ultrafast [on|off]",
-        takes_args: true,
-        session_scoped: true,
-        arg_placeholder: "[on|off]",
-    }
-
-    fn takes_args_now(&self, _ctx: &AppCtx) -> bool {
-        false
-    }
-
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        select_mode(args, ExecutionMode::Ultrafast, self.usage())
-    }
-}
-
-impl SlashCommand for UltrasaveCommand {
-    slash_meta! {
-        name: "ultrasave",
-        description: "Select UltraSave: prioritize token economy",
-        usage: "/ultrasave [on|off]",
-        takes_args: true,
-        session_scoped: true,
-        arg_placeholder: "[on|off]",
-    }
-
-    fn takes_args_now(&self, _ctx: &AppCtx) -> bool {
-        false
-    }
-
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        select_mode(args, ExecutionMode::Ultrasave, self.usage())
-    }
-}
-
-fn select_mode(args: &str, target: ExecutionMode, usage: &str) -> CommandResult {
-    let operation = match args.trim().to_ascii_lowercase().as_str() {
-        "" => ExecutionModeOperation::Toggle,
-        "on" => ExecutionModeOperation::Set,
-        "off" => ExecutionModeOperation::Disable,
-        other => {
-            return CommandResult::Error(format!("unknown argument '{other}'; usage: {usage}"));
+        let arg = args.trim().to_ascii_lowercase();
+        match MODE_ARGS.iter().find(|(name, _, _)| *name == arg) {
+            Some((_, choice, _)) => CommandResult::Action(Action::SetExecutionMode {
+                mode: *choice,
+                operation: ExecutionModeOperation::Set,
+            }),
+            None if arg.is_empty() => CommandResult::Error(format!("usage: {}", self.usage())),
+            None => CommandResult::Error(format!(
+                "unknown argument '{arg}'; usage: {}",
+                self.usage()
+            )),
         }
-    };
-    CommandResult::Action(Action::SetExecutionMode {
-        mode: target,
-        operation,
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acp::model_state::ModelState;
     use crate::slash::commands::{builtin_commands, tests::make_ctx};
     use crate::slash::registry::CommandRegistry;
+    use crate::acp::model_state::ModelState;
 
-    fn run(command: &str, args: &str, mode: ExecutionMode) -> CommandResult {
+    fn run(args: &str) -> CommandResult {
         let reg = CommandRegistry::new(builtin_commands());
-        let cmd = reg.get(command).expect("execution-mode command is registered").clone();
-        let mut models = ModelState::default();
-        models.execution_mode = mode;
+        let cmd = reg.get("mode").expect("mode command is registered").clone();
+        let models = ModelState::default();
         let mut ctx = make_ctx(&models);
         cmd.run(&mut ctx, args)
     }
 
-    fn assert_operation(
-        command: &str,
-        args: &str,
-        current: ExecutionMode,
-        expected_mode: ExecutionMode,
-        expected_operation: ExecutionModeOperation,
-    ) {
-        let CommandResult::Action(Action::SetExecutionMode { mode, operation }) =
-            run(command, args, current)
-        else {
-            panic!("expected an execution-mode action");
-        };
-        assert_eq!(mode, expected_mode);
-        assert_eq!(operation, expected_operation);
+    #[test]
+    fn mode_args_select_the_matching_choice() {
+        use ExecutionModeChoice::*;
+        for (arg, expected) in [
+            ("auto", Auto),
+            ("normal", Normal),
+            ("ultrafast", Ultrafast),
+            ("ultracode", Ultracode),
+            ("ultrasave", Ultrasave),
+            (" UltraSave ", Ultrasave),
+        ] {
+            let CommandResult::Action(Action::SetExecutionMode { mode, operation }) = run(arg)
+            else {
+                panic!("expected an execution-mode action for {arg:?}");
+            };
+            assert_eq!(mode, expected, "arg {arg:?} must select its own choice");
+            assert_eq!(operation, ExecutionModeOperation::Set);
+        }
     }
 
     #[test]
-    fn execution_mode_commands_resolve_toggle_and_disable_on_the_server() {
-        use ExecutionMode::*;
-        use ExecutionModeOperation::*;
-        assert_operation("ultrafast", "on", Ultracode, Ultrafast, Set);
-        assert_operation("ultracode", "on", Ultrafast, Ultracode, Set);
-        assert_operation("ultrasave", "on", Ultracode, Ultrasave, Set);
-        // The client may still show Normal while the previous "on" is pending.
-        assert_operation("ultrafast", " OFF ", Normal, Ultrafast, Disable);
-        assert_operation("ultracode", "off", Ultrafast, Ultracode, Disable);
-        assert_operation("ultrasave", "off", Normal, Ultrasave, Disable);
-        assert_operation("ultrafast", "", Normal, Ultrafast, Toggle);
-        assert_operation("ultrafast", "", Ultrafast, Ultrafast, Toggle);
-        assert_operation("ultracode", "", Ultracode, Ultracode, Toggle);
-        assert_operation("ultrasave", "", Normal, Ultrasave, Toggle);
-        assert_operation("ultrasave", "", Ultrasave, Ultrasave, Toggle);
-        assert!(matches!(run("ultrafast", "bogus", Normal), CommandResult::Error(_)));
-        assert!(matches!(run("ultracode", "bogus", Normal), CommandResult::Error(_)));
-        assert!(matches!(run("ultrasave", "bogus", Normal), CommandResult::Error(_)));
+    fn mode_rejects_empty_and_unknown_args_with_usage() {
+        for arg in ["", "   ", "on", "off", "toggle", "fast"] {
+            let CommandResult::Error(message) = run(arg) else {
+                panic!("expected an error for {arg:?}");
+            };
+            assert!(message.contains("/mode <auto|normal|ultrafast|ultracode|ultrasave>"));
+        }
     }
 
     #[test]
-    fn execution_mode_menu_pick_runs_without_args() {
+    fn mode_is_registered_and_offers_all_five_choices() {
+        let registry = CommandRegistry::new(builtin_commands());
+        assert!(registry.get("ultracode").is_none());
+        assert!(registry.get("ultrafast").is_none());
+        assert!(registry.get("ultrasave").is_none());
+        assert!(crate::slash::is_command_complete("/mode auto", &registry));
+        assert!(!crate::slash::is_command_complete("/mode", &registry));
         let models = ModelState::default();
         let ctx = AppCtx {
             models: &models,
@@ -149,12 +124,8 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
-        assert!(!UltracodeCommand.takes_args_now(&ctx));
-        assert!(!UltrafastCommand.takes_args_now(&ctx));
-        assert!(!UltrasaveCommand.takes_args_now(&ctx));
-        let registry = CommandRegistry::new(builtin_commands());
-        assert!(crate::slash::is_command_complete("/ultracode", &registry));
-        assert!(crate::slash::is_command_complete("/ultrafast", &registry));
-        assert!(crate::slash::is_command_complete("/ultrasave", &registry));
+        let items = ModeCommand.suggest_args(&ctx, "").expect("arg items");
+        let names: Vec<_> = items.iter().map(|item| item.insert_text.as_str()).collect();
+        assert_eq!(names, ["auto", "normal", "ultrafast", "ultracode", "ultrasave"]);
     }
 }

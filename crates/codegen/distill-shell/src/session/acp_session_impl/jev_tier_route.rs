@@ -150,7 +150,7 @@ impl SessionActor {
     }
 
     /// The worker the user chose: the session override, else `[models] worker`.
-    fn tier_worker_slug(&self) -> Option<String> {
+    pub(super) fn tier_worker_slug(&self) -> Option<String> {
         let session = self
             .rebuild_spec
             .worker_override

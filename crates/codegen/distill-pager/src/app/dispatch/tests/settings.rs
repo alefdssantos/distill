@@ -587,7 +587,7 @@ fn tier_editor_saves_main_and_worker_efforts() {
             main: "chatgpt/gpt-6-sol high".into(),
             worker: "worker-test-luna auto".into(),
             utility: String::new(),
-            execution_mode: distill_tool_types::ExecutionMode::Normal,
+            execution_mode: distill_tool_types::ExecutionModeChoice::Normal,
         },
         &mut app,
     );
@@ -632,20 +632,20 @@ fn tier_editor_execution_mode_requires_a_session_and_keeps_the_draft() {
     let Some(crate::views::modal::ActiveModal::DocViewer { tier_editor: Some(editor), .. }) = app.welcome_doc_viewer.as_mut() else {
         panic!("expected Models screen");
     };
-    editor.execution_mode = distill_tool_types::ExecutionMode::Ultrafast;
+    editor.execution_mode = distill_tool_types::ExecutionModeChoice::Ultrafast;
 
     let effects = dispatch(Action::SetTierEditor {
         main: "tier-test-main auto".into(),
         worker: String::new(),
         utility: String::new(),
-        execution_mode: distill_tool_types::ExecutionMode::Ultrafast,
+        execution_mode: distill_tool_types::ExecutionModeChoice::Ultrafast,
     }, &mut app);
 
     assert!(effects.is_empty(), "invalid session mode must not partially save other fields");
     let Some(crate::views::modal::ActiveModal::DocViewer { tier_editor: Some(editor), .. }) = app.welcome_doc_viewer.as_ref() else {
         panic!("Models screen must remain open");
     };
-    assert_eq!(editor.execution_mode, distill_tool_types::ExecutionMode::Ultrafast);
+    assert_eq!(editor.execution_mode, distill_tool_types::ExecutionModeChoice::Ultrafast);
     assert_eq!(editor.status.as_ref(), Some(&("Start a session before changing its execution mode.".to_owned(), true)));
     assert_eq!(app.models.execution_mode, distill_tool_types::ExecutionMode::Normal);
 }

@@ -987,11 +987,12 @@ impl MvpAgent {
         let config_options = self.acp_config_options(Some(&session_id), &models);
         self.report_setup_phase(SessionSetupPhase::ResponseReady);
         if let Some(meta) = meta.as_object_mut() {
-            let mode = self
+            let (mode, choice) = self
                 .resident_handle(&session_id)
-                .map(|handle| handle.execution_mode.load())
+                .map(|handle| (handle.execution_mode.load(), handle.execution_mode.choice()))
                 .unwrap_or_default();
             meta.insert("executionMode".into(), serde_json::json!(mode));
+            meta.insert("executionModeChoice".into(), serde_json::json!(choice));
             meta.insert(
                 "ultracode".into(),
                 serde_json::Value::Bool(mode == distill_tool_types::ExecutionMode::Ultracode),
@@ -1503,11 +1504,12 @@ impl MvpAgent {
         distill_telemetry::unified_log::info("session loaded", Some(session_id.0.as_ref()), None);
         let config_options = self.acp_config_options(Some(&session_id), &model_state);
         if let Some(meta) = response_meta.as_object_mut() {
-            let mode = self
+            let (mode, choice) = self
                 .resident_handle(&session_id)
-                .map(|handle| handle.execution_mode.load())
+                .map(|handle| (handle.execution_mode.load(), handle.execution_mode.choice()))
                 .unwrap_or_default();
             meta.insert("executionMode".into(), serde_json::json!(mode));
+            meta.insert("executionModeChoice".into(), serde_json::json!(choice));
             meta.insert(
                 "ultracode".into(),
                 serde_json::Value::Bool(mode == distill_tool_types::ExecutionMode::Ultracode),

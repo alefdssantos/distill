@@ -2133,7 +2133,7 @@ pub(in crate::app::dispatch) fn set_tier_editor(
     main: String,
     worker: String,
     utility: String,
-    execution_mode: distill_tool_types::ExecutionMode,
+    execution_mode: distill_tool_types::ExecutionModeChoice,
 ) -> Vec<Effect> {
     use crate::slash::commands::model::parse_tier_selection;
     let models = match app.active_view {
@@ -2155,7 +2155,7 @@ pub(in crate::app::dispatch) fn set_tier_editor(
             return vec![];
         }
     };
-    let execution_mode_changed = models.execution_mode != execution_mode;
+    let execution_mode_changed = models.execution_mode_choice != execution_mode;
     if execution_mode_changed && app.active_session_id().is_none() {
         let message = "Start a session before changing its execution mode.";
         let modal = match app.active_view {

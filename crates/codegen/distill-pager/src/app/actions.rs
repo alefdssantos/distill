@@ -714,7 +714,7 @@ pub enum Action {
         main: String,
         worker: String,
         utility: String,
-        execution_mode: distill_tool_types::ExecutionMode,
+        execution_mode: distill_tool_types::ExecutionModeChoice,
     },
     /// Rename the current session's title/summary.
     RenameSession {
@@ -745,7 +745,7 @@ pub enum Action {
     SetPlanMode(PlanModeKind),
     /// Update the session execution mode through an atomic ACP operation.
     SetExecutionMode {
-        mode: distill_tool_types::ExecutionMode,
+        mode: distill_tool_types::ExecutionModeChoice,
         operation: distill_tool_types::ExecutionModeOperation,
     },
     /// Open the feedback modal (every screen mode).
@@ -1728,7 +1728,7 @@ pub enum Effect {
     /// Set the exclusive session execution mode (`x.ai/session/execution_mode/set`).
     SetExecutionMode {
         session_id: acp::SessionId,
-        mode: distill_tool_types::ExecutionMode,
+        mode: distill_tool_types::ExecutionModeChoice,
         operation: distill_tool_types::ExecutionModeOperation,
     },
     /// Set the session-scoped worker model.
@@ -2581,8 +2581,8 @@ pub enum TaskResult {
     WithPinnedMemoryMode {
         agent_id: AgentId,
         memory_mode: Option<distill_shell::config::MemoryMode>,
-        /// Actual session mode from ACP; older responses default to Normal.
-        execution_mode: Option<distill_tool_types::ExecutionMode>,
+        /// Actual session mode and choice from ACP; older responses default to Normal.
+        execution_mode: Option<(distill_tool_types::ExecutionMode, distill_tool_types::ExecutionModeChoice)>,
         result: Box<TaskResult>,
     },
     /// A `command` status line finished.
@@ -2880,7 +2880,7 @@ pub enum TaskResult {
     /// Execution-mode update finished; the agent-reported mode is authoritative.
     ExecutionModeSet {
         session_id: acp::SessionId,
-        result: Result<distill_tool_types::ExecutionMode, String>,
+        result: Result<(distill_tool_types::ExecutionMode, distill_tool_types::ExecutionModeChoice), String>,
     },
     /// Auto effort request finished; a rejection rolls the optimistic flag back.
     EffortAutoSet {

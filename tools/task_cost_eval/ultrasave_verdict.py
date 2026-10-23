@@ -13,6 +13,37 @@ MAX_CREDIT_RATIO_COMPARE_VERSIONS = 0.85
 TOKEN_FIELDS = ('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_tokens')
 
 
+def token_reasons(results):
+    """Shared token-usage validation over every run and model call."""
+    reasons = []
+    for row in results['runs']:
+        label = f'{row["variant"]} {row["case"]}#{row["repetition"]}'
+        entries = [row, *row['call_usage']]
+        if any(type(entry.get(field)) is not int or entry[field] < 0
+               for entry in entries for field in TOKEN_FIELDS):
+            reasons.append(f'{label}: missing or invalid token usage')
+            continue
+        if any(entry['cached_input_tokens'] > entry['input_tokens'] or
+               entry['reasoning_tokens'] > entry['output_tokens'] for entry in entries):
+            reasons.append(f'{label}: token subsets exceed their provider totals')
+        if any(row[field] != sum(call[field] for call in row['call_usage']) for field in TOKEN_FIELDS):
+            reasons.append(f'{label}: per-call token usage does not reconcile with run totals')
+        if row['input_tokens'] + row['output_tokens'] == 0:
+            reasons.append(f'{label}: no provider tokens recorded')
+    return reasons
+
+
+def summarize(rows):
+    tokens = {field: sum(row[field] for row in rows) for field in TOKEN_FIELDS}
+    return {**tokens, 'total_tokens': tokens['input_tokens'] + tokens['output_tokens'],
+            'uncached_input_tokens': tokens['input_tokens'] - tokens['cached_input_tokens'],
+            'runs': len(rows), 'accepted': sum(row['passed'] for row in rows),
+            'credits': sum(row['credits'] for row in rows),
+            'raw_elapsed_s': sum(row['wall_time_s'] for row in rows),
+            'verification_s': sum(row['grader']['wall_time_s'] for row in rows),
+            'model_calls': sum(len(row['call_usage']) for row in rows)}
+
+
 def verdict(results):
     compare_versions = bool(results.get('compare_versions'))
     reasons, pairs = validated_pairs(results, candidate_mode='ultrasave',
@@ -30,32 +61,9 @@ def verdict(results):
               'pairs': [], 'baseline': None, 'candidate': None}
     if reasons:
         return report
-    for row in results['runs']:
-        label = f'{row["variant"]} {row["case"]}#{row["repetition"]}'
-        entries = [row, *row['call_usage']]
-        if any(type(entry.get(field)) is not int or entry[field] < 0
-               for entry in entries for field in TOKEN_FIELDS):
-            reasons.append(f'{label}: missing or invalid token usage')
-            continue
-        if any(entry['cached_input_tokens'] > entry['input_tokens'] or
-               entry['reasoning_tokens'] > entry['output_tokens'] for entry in entries):
-            reasons.append(f'{label}: token subsets exceed their provider totals')
-        if any(row[field] != sum(call[field] for call in row['call_usage']) for field in TOKEN_FIELDS):
-            reasons.append(f'{label}: per-call token usage does not reconcile with run totals')
-        if row['input_tokens'] + row['output_tokens'] == 0:
-            reasons.append(f'{label}: no provider tokens recorded')
+    reasons.extend(token_reasons(results))
     if reasons:
         return report
-
-    def summarize(rows):
-        tokens = {field: sum(row[field] for row in rows) for field in TOKEN_FIELDS}
-        return {**tokens, 'total_tokens': tokens['input_tokens'] + tokens['output_tokens'],
-                'uncached_input_tokens': tokens['input_tokens'] - tokens['cached_input_tokens'],
-                'runs': len(rows), 'accepted': sum(row['passed'] for row in rows),
-                'credits': sum(row['credits'] for row in rows),
-                'raw_elapsed_s': sum(row['wall_time_s'] for row in rows),
-                'verification_s': sum(row['grader']['wall_time_s'] for row in rows),
-                'model_calls': sum(len(row['call_usage']) for row in rows)}
 
     for key, pair in sorted(pairs.items()):
         baseline, candidate = pair['baseline'], pair['candidate']

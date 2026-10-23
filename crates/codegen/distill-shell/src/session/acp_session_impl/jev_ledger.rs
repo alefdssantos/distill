@@ -87,6 +87,8 @@ pub(crate) struct JevTurnLedger {
     /// Catalog slug of the non-main tier model the turn route runs on, so a
     /// kept route resumes that exact entry rather than a wire-id lookalike.
     pub(crate) tier_route_slug: Option<String>,
+    /// B8: Auto execution mode bookkeeping for the current request.
+    pub(crate) auto_mode: crate::session::acp_session::jev_auto_mode::AutoModeTurn,
     /// Model and effort the last main request was sent with. Session-scoped:
     /// a compaction or recap at the start of the next turn replays that
     /// request's prefix and must send the same effort to read its cache.
@@ -370,6 +372,7 @@ impl JevTurnLedger {
         self.tier_route_off = false;
         self.tier_route_active = false;
         self.tier_route_slug = None;
+        self.auto_mode = Default::default();
         rows.sort_by(|a, b| {
             b.tokens()
                 .cmp(&a.tokens())
