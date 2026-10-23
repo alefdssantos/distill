@@ -4,10 +4,12 @@ $repo = 'samuelfaj/distill'
 $installDir = if ($env:DISTILL_INSTALL_DIR) { $env:DISTILL_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'distill' }
 $version = if ($env:DISTILL_VERSION) { $env:DISTILL_VERSION } else { 'latest' }
 
-$asset = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-  'X64' { 'distill-windows-x86_64' }
-  'Arm64' { 'distill-windows-aarch64' }
-  default { throw "Unsupported CPU architecture: $_" }
+# RuntimeInformation is missing on older .NET Framework hosts of Windows PowerShell 5.1.
+$arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$asset = switch ($arch) {
+  'AMD64' { 'distill-windows-x86_64' }
+  'ARM64' { 'distill-windows-aarch64' }
+  default { throw "Unsupported CPU architecture: $arch" }
 }
 
 if ($version -eq 'latest') {
