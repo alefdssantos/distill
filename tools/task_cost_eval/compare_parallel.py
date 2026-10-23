@@ -306,7 +306,8 @@ def main(argv=None):
     parser.add_argument('--verdict', choices=('parallel', 'ultrafast', 'ultrasave', 'auto'), default='parallel',
                         help='paired ACP gates vs Normal: ultrafast median completion ratio <=0.60; ultrasave median credit '
                              'ratio <=0.45 (both <=0.85 with --compare-versions); auto median credit and completion '
-                             'ratios <=1.0 with one <=0.85 vs all fixed modes; at most 1 quality regression')
+                             'ratios <=1.0 with one <=0.85 vs each fixed mode and all Auto tasks accepted; '
+                             'other verdicts allow at most 1 quality regression')
     for variant in VARIANTS:
         mode = parser.add_mutually_exclusive_group()
         mode.add_argument(f'--{variant}-ultracode', action='store_true',

@@ -1,7 +1,7 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
 //! B8 (Auto execution mode): with the session in Auto, one Jev decision picks
 //! the effective mode (Normal, UltraFast, UltraCode, UltraSave) when a request
-//! starts, and round boundaries with a concrete signal may move it up or down.
+//! starts, and each new action may move it up or down when switching pays off.
 //! Every pick reaches clients as `x.ai/session/execution_mode/changed`.
 
 use distill_tool_types::ExecutionMode;
@@ -12,13 +12,6 @@ use super::*;
 pub(super) const MODE_QUESTION: &str = "execution_mode";
 pub(super) const MODE_CHANGED_METHOD: &str = "x.ai/session/execution_mode/changed";
 
-/// Mid-request switches allowed per request; each one changes the tool list
-/// and directive, which costs a cache miss.
-const MAX_SWITCHES_PER_REQUEST: u8 = 2;
-/// Completed tool rounds between reviews when nothing failed.
-const REVIEW_EVERY_ROUNDS: usize = 8;
-/// New failed tool calls since the last decision that prompt an early review.
-const FAILURES_FOR_REVIEW: u64 = 2;
 /// A mid-request switch needs this much of Jev's probability on the new mode.
 const SWITCH_PROBABILITY: f64 = 0.6;
 const REQUEST_CHARS: usize = 4_000;
@@ -26,8 +19,6 @@ const REQUEST_CHARS: usize = 4_000;
 /// Auto's per-request bookkeeping.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AutoModeTurn {
-    switches: u8,
-    failures_at_decision: u64,
     round_at_decision: usize,
 }
 
@@ -49,10 +40,18 @@ fn mode_id(mode: ExecutionMode) -> &'static str {
 
 fn mode_criterion(mode: ExecutionMode) -> &'static str {
     match mode {
-        ExecutionMode::Ultrasave => "UltraSave: the main model works directly with few tokens; tier routing may move rounds to the cheaper worker/utility model. Best for clear, bounded or mechanical work (one-file fixes, known edits, questions answerable from a few reads) where a cheaper model still gets it right.",
-        ExecutionMode::Ultrafast => "UltraFast: minimum wall time; one round of parallel subagents on the worker model, tier routing toward the fastest capable model. Best for clear work with several independent parts, or when speed matters more than a small extra cost.",
-        ExecutionMode::Normal => "Normal: default policy on the main model with full tools. Best for ambiguous, risky or judgment-heavy work (unexplained failures, design decisions, security, subtle correctness) where a cheaper or faster mode would likely lose quality or need rework.",
-        ExecutionMode::Ultracode => "UltraCode: orchestrates large work across parallel subagents with deeper delegation. Best only for large multi-part work (many files or components, broad refactors, multi-step features) whose independent parts can be verified separately; overhead is wasted on small tasks.",
+        ExecutionMode::Ultrasave => {
+            "UltraSave: minimize total money cost with direct, concise work and the cheapest capable model. Best for clear, bounded coding or mechanical work: a known edit, a small implementation with a complete specification, or a nonurgent batch. A long specification or many edge cases alone do not make a known, bounded task difficult. Correctness and required verification are mandatory."
+        }
+        ExecutionMode::Ultrafast => {
+            "UltraFast: minimize time to a verified result for short, bounded actions such as a routine tool read, executing a known check, or delivering an already verified result. Favor it when the user is waiting for a simple interactive action, for urgent work, or when independent parts can usefully run in parallel. A request to take a screenshot of Google Chrome and show it should run directly and immediately. Do not delegate a single quick action. Correctness and required verification are mandatory."
+        }
+        ExecutionMode::Normal => {
+            "Normal: balanced execution on the main model with full tools when the next action has no clear advantage from economy, speed or deeper reasoning."
+        }
+        ExecutionMode::Ultracode => {
+            "UltraCode: extra care and deeper reasoning for an explicit request for care, refactoring that must preserve behavior and invariants, substantial or uncertain logic, subtle diagnosis, or risky design and correctness judgments. These can require UltraCode even in one file. Routine work from a complete, understood specification does not need this mode merely because it involves code or tests. Delegation is optional and only useful for independent parts."
+        }
     }
 }
 
@@ -67,13 +66,12 @@ fn mode_question() -> Option<std::collections::BTreeMap<String, distill_workspac
         })
         .collect();
     let question = distill_workspace::jev::Question::choice(
-        "Which execution mode is most efficient for the request in `request` given `progress`? \
-         Efficiency means the best quality at the lowest money cost in the least time: never \
-         trade a correct, verified result for savings, and count retries and rework as cost \
-         and time. Prefer the cheapest and fastest mode that will still deliver the result \
-         right the first time. When `current_mode` is set, switching changes the directive \
-         and tool list mid-request; choose a different mode only when the evidence in \
-         `progress` clearly shows the current one is the wrong fit.",
+        "Which mode best serves the next action or micro-action in `micro_action`? \
+         `request` gives the overall objective; choose for this step. Use UltraSave for clear, bounded work whose implementation is understood; \
+         UltraFast for short tool actions, known checks, delivery, immediate interactive actions, urgency or useful parallel work; UltraCode for explicit extra care, refactoring or genuinely substantial or uncertain reasoning; \
+         otherwise Normal. Minimize total cost and time while delivering the correct, verified result, counting retries and rework. \
+         When `current_mode` is set, switch only when the next action benefits enough to justify `switch_cost`; a routine step after difficult work can use a lighter mode. \
+         Never delegate a quick single action merely because the mode permits subagents.",
         criteria,
     )
     .ok()?;
@@ -101,13 +99,22 @@ fn bounded(text: &str) -> String {
 
 impl SessionActor {
     fn auto_mode_active(&self) -> bool {
-        !self.startup_hints.is_subagent
-            && self.tool_context.subagent_depth == 0
-            && self.execution_mode.is_auto()
+        self.execution_mode.is_auto()
     }
 
-    fn auto_mode_state(&self, request: &str, current: Option<ExecutionMode>, rounds: usize) -> serde_json::Value {
+    async fn auto_mode_state(
+        &self,
+        request: &str,
+        current: Option<ExecutionMode>,
+        rounds: usize,
+    ) -> serde_json::Value {
+        let conversation = self.chat_state_handle.get_conversation().await;
         let ledger = self.jev_ledger.borrow();
+        let action = if current.is_some() {
+            describe_micro_action(&conversation, &ledger.facts).as_json()
+        } else {
+            serde_json::json!({"step": "first_step", "what_it_must_do": bounded(request)})
+        };
         let failed_checks = ledger
             .facts
             .recorded_checks()
@@ -116,7 +123,14 @@ impl SessionActor {
             .count();
         serde_json::json!({
             "request": bounded(request),
+            "micro_action": action,
             "current_mode": current.map(mode_id),
+            "subagent_depth": self.tool_context.subagent_depth,
+            "switch_cost": {
+                "last_prompt_tokens": ledger.last_main_prompt_tokens(),
+                "previous_dispatch": ledger.last_execution,
+                "note": "Mode reminders append to history; they do not by themselves invalidate the existing prefix. Model or tool-list changes may lose cache; compare that possible cost with the next action's benefit.",
+            },
             "progress": {
                 "completed_tool_rounds": rounds,
                 "failed_tool_calls": ledger.facts.failed_tool_count(),
@@ -128,13 +142,17 @@ impl SessionActor {
     }
 
     /// Applies Auto's pick and tells every attached client.
-    fn publish_auto_mode(&self, mode: ExecutionMode, reason: &str) {
-        self.execution_mode.store_auto(mode);
-        if let Err(error) = crate::extensions::session_ultracode::persist_mode(
-            &self.session_info,
-            distill_tool_types::ExecutionModeChoice::Auto,
-            mode,
-        ) {
+    fn publish_auto_mode(&self, mode: ExecutionMode, reason: &str) -> bool {
+        if !self.execution_mode.pick_auto(mode) {
+            return false;
+        }
+        if !self.startup_hints.is_subagent
+            && let Err(error) = crate::extensions::session_ultracode::persist_mode(
+                &self.session_info,
+                distill_tool_types::ExecutionModeChoice::Auto,
+                mode,
+            )
+        {
             tracing::warn!(%error, "auto execution mode could not be persisted");
         }
         let payload = serde_json::json!({
@@ -146,8 +164,12 @@ impl SessionActor {
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
             self.notifications
                 .gateway
-                .forward_fire_and_forget(acp::ExtNotification::new(MODE_CHANGED_METHOD, params.into()));
+                .forward_fire_and_forget(acp::ExtNotification::new(
+                    MODE_CHANGED_METHOD,
+                    params.into(),
+                ));
         }
+        true
     }
 
     /// Request start: Jev picks the mode for this request. Without an answer
@@ -160,54 +182,61 @@ impl SessionActor {
         let Some(questions) = mode_question() else {
             return;
         };
-        let state = self.auto_mode_state(request, None, 0);
-        let Some(answers) = crate::jev::ask_item(JevLever::B8ExecutionMode, state, questions).await else {
-            crate::jev::record_item(JevLever::B8ExecutionMode, "defer", "Jev gave no answer", None, None);
+        let state = self.auto_mode_state(request, None, 0).await;
+        let Some(answers) = crate::jev::ask_item(JevLever::B8ExecutionMode, state, questions).await
+        else {
+            crate::jev::record_item(
+                JevLever::B8ExecutionMode,
+                "defer",
+                "Jev gave no answer",
+                None,
+                None,
+            );
             return;
         };
         let confidence = answers.confidence(MODE_QUESTION);
         let Some((mode, _)) = picked_mode(&answers) else {
-            crate::jev::record_item(JevLever::B8ExecutionMode, "defer", "no usable mode answer", confidence, Some(&answers));
+            crate::jev::record_item(
+                JevLever::B8ExecutionMode,
+                "defer",
+                "no usable mode answer",
+                confidence,
+                Some(&answers),
+            );
             return;
         };
         // The user may have fixed a mode while Jev was answering.
         if !self.auto_mode_active() {
             return;
         }
-        crate::jev::record_item(JevLever::B8ExecutionMode, mode_id(mode), "request start", confidence, Some(&answers));
+        crate::jev::record_item(
+            JevLever::B8ExecutionMode,
+            mode_id(mode),
+            "request start",
+            confidence,
+            Some(&answers),
+        );
         self.publish_auto_mode(mode, "picked for this request");
     }
 
-    /// Round boundary: with new failures or a long run, Jev may move the
-    /// request to another mode. Pushes the new directive when it does; `true`
-    /// means the caller must rebuild the mode's tool list.
+    /// Reconsider after each completed tool round, including short actions.
+    /// Retries of the same boundary do not pay for another decision. There is
+    /// no switch quota: useful later changes must remain possible.
     pub(super) async fn jev_auto_review_mode(&self, request: &str, rounds: usize) -> bool {
         if !self.auto_mode_active() {
             return false;
         }
-        let (due, failures) = {
-            let ledger = self.jev_ledger.borrow();
-            let turn = &ledger.auto_mode;
-            let failures = ledger.facts.failed_tool_count();
-            let due = turn.switches < MAX_SWITCHES_PER_REQUEST
-                && (failures.saturating_sub(turn.failures_at_decision) >= FAILURES_FOR_REVIEW
-                    || rounds.saturating_sub(turn.round_at_decision) >= REVIEW_EVERY_ROUNDS);
-            (due, failures)
-        };
-        if !due {
+        if rounds <= self.jev_ledger.borrow().auto_mode.round_at_decision {
             return false;
         }
-        {
-            let mut ledger = self.jev_ledger.borrow_mut();
-            ledger.auto_mode.failures_at_decision = failures;
-            ledger.auto_mode.round_at_decision = rounds;
-        }
+        self.jev_ledger.borrow_mut().auto_mode.round_at_decision = rounds;
         let Some(questions) = mode_question() else {
             return false;
         };
         let current = self.execution_mode.load();
-        let state = self.auto_mode_state(request, Some(current), rounds);
-        let Some(answers) = crate::jev::ask_item(JevLever::B8ExecutionMode, state, questions).await else {
+        let state = self.auto_mode_state(request, Some(current), rounds).await;
+        let Some(answers) = crate::jev::ask_item(JevLever::B8ExecutionMode, state, questions).await
+        else {
             return false;
         };
         let confidence = answers.confidence(MODE_QUESTION);
@@ -218,15 +247,27 @@ impl SessionActor {
             return false;
         }
         if mode == current || probability < SWITCH_PROBABILITY {
-            crate::jev::record_item(JevLever::B8ExecutionMode, "keep", mode_id(current), confidence, Some(&answers));
+            crate::jev::record_item(
+                JevLever::B8ExecutionMode,
+                "keep",
+                mode_id(current),
+                confidence,
+                Some(&answers),
+            );
             return false;
         }
-        crate::jev::record_item(JevLever::B8ExecutionMode, mode_id(mode), &format!("switch from {}", mode_id(current)), confidence, Some(&answers));
-        self.jev_ledger.borrow_mut().auto_mode.switches += 1;
-        let reason = format!("switched from {} after {rounds} tool rounds", current.label());
-        self.publish_auto_mode(mode, &reason);
-        self.inject_execution_mode_reminder();
-        true
+        crate::jev::record_item(
+            JevLever::B8ExecutionMode,
+            mode_id(mode),
+            &format!("switch from {}", mode_id(current)),
+            confidence,
+            Some(&answers),
+        );
+        let reason = format!(
+            "switched from {} after {rounds} tool rounds",
+            current.label()
+        );
+        self.publish_auto_mode(mode, &reason)
     }
 }
 
@@ -257,7 +298,10 @@ mod tests {
         let questions = mode_question().expect("question");
         assert_eq!(questions.len(), 1);
         for mode in MODES {
-            assert_eq!(picked_mode(&answer(mode_id(mode), 0.9)).map(|(m, _)| m), Some(mode));
+            assert_eq!(
+                picked_mode(&answer(mode_id(mode), 0.9)).map(|(m, _)| m),
+                Some(mode)
+            );
         }
         assert!(picked_mode(&answer("turbo", 0.9)).is_none());
     }
@@ -275,27 +319,68 @@ mod tests {
                 assert!(actor.execution_mode.is_auto());
                 assert_eq!(actor.execution_mode.load(), ExecutionMode::Ultrasave);
 
-                // No signal yet: nothing is asked.
+                // No completed action yet: nothing is asked.
                 crate::jev::set_test_decision_answers([Some(answer("normal", 0.9))]);
-                actor.jev_auto_review_mode("rename a variable", 1).await;
+                actor.jev_auto_review_mode("rename a variable", 0).await;
                 assert_eq!(crate::jev::test_decision_answers_remaining(), 1);
 
-                // A long run is a signal; a weak answer keeps the mode.
+                // Even the first short action is reviewed; weak evidence keeps the mode.
                 crate::jev::set_test_decision_answers([Some(answer("normal", 0.4))]);
-                actor.jev_auto_review_mode("rename a variable", REVIEW_EVERY_ROUNDS).await;
+                actor.jev_auto_review_mode("rename a variable", 1).await;
                 assert_eq!(actor.execution_mode.load(), ExecutionMode::Ultrasave);
 
                 // A confident answer switches.
                 crate::jev::set_test_decision_answers([Some(answer("normal", 0.9))]);
-                actor.jev_auto_review_mode("rename a variable", 2 * REVIEW_EVERY_ROUNDS).await;
+                actor.jev_auto_review_mode("rename a variable", 2).await;
                 assert_eq!(actor.execution_mode.load(), ExecutionMode::Normal);
                 assert!(actor.execution_mode.is_auto());
+
+                // More than two useful switches remain possible in the same request.
+                for (round, mode) in [
+                    (3, ExecutionMode::Ultracode),
+                    (4, ExecutionMode::Ultrafast),
+                    (5, ExecutionMode::Ultrasave),
+                ] {
+                    crate::jev::set_test_decision_answers([Some(answer(mode_id(mode), 0.9))]);
+                    assert!(actor.jev_auto_review_mode("rename a variable", round).await);
+                    assert_eq!(actor.execution_mode.load(), mode);
+                }
+                crate::jev::set_test_decision_answers([Some(answer("normal", 0.9))]);
+                assert!(!actor.jev_auto_review_mode("rename a variable", 5).await);
+                assert_eq!(crate::jev::test_decision_answers_remaining(), 1);
 
                 // A fixed choice belongs to the user.
                 actor.execution_mode.store(ExecutionMode::Ultracode);
                 crate::jev::set_test_decision_answers([Some(answer("ultrasave", 0.99))]);
                 actor.jev_auto_pick_mode("rename a variable").await;
                 assert_eq!(actor.execution_mode.load(), ExecutionMode::Ultracode);
+                assert_eq!(crate::jev::test_decision_answers_remaining(), 1);
+                crate::jev::clear_test_decision_answers();
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_auto_uses_its_own_action_and_never_changes_the_parent() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let parent = distill_tool_types::AtomicExecutionMode::default();
+                parent.store_auto(ExecutionMode::Ultracode);
+                let mut actor = super::super::support::plain_actor().await;
+                actor.startup_hints.is_subagent = true;
+                actor.tool_context.subagent_depth = 1;
+                actor.execution_mode = std::sync::Arc::new(parent.inherited());
+                let request = "tire um screenshot do meu Google Chrome e me mostre";
+                let state = actor.auto_mode_state(request, None, 0).await;
+                assert_eq!(state["micro_action"]["what_it_must_do"], request);
+                crate::jev::set_test_decision_answers([Some(answer("ultrafast", 0.95))]);
+                actor.jev_auto_pick_mode(request).await;
+                assert_eq!(actor.execution_mode.load(), ExecutionMode::Ultrafast);
+                assert_eq!(parent.load(), ExecutionMode::Ultracode);
+                parent.store(ExecutionMode::Ultrasave);
+                crate::jev::set_test_decision_answers([Some(answer("ultracode", 0.95))]);
+                assert!(!actor.jev_auto_review_mode(request, 1).await);
+                assert_eq!(actor.execution_mode.load(), ExecutionMode::Ultrasave);
                 assert_eq!(crate::jev::test_decision_answers_remaining(), 1);
                 crate::jev::clear_test_decision_answers();
             })

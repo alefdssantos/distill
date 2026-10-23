@@ -1138,9 +1138,8 @@ pub(crate) async fn spawn_session_actor(
         }
     }
     let execution_policy = tool_context.execution_policy.clone();
-    let execution_mode = execution_policy
-        .as_ref()
-        .map(|policy| policy.mode.clone())
+    let execution_mode = tool_context.execution_mode.clone()
+        .or_else(|| execution_policy.as_ref().map(|policy| policy.mode.clone()))
         .unwrap_or_else(|| Arc::new(distill_tool_types::AtomicExecutionMode::default()));
     if !startup_hints.is_subagent {
         crate::extensions::session_ultracode::apply_mode(

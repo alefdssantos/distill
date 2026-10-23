@@ -33,13 +33,16 @@ class AutoVerdictTest(unittest.TestCase):
         self.assertTrue(any('credit ratio' in reason for reason in report['reasons']), report['reasons'])
         self.assertTrue(any('completion ratio' in reason for reason in report['reasons']), report['reasons'])
 
-    def test_quality_regressions_beyond_tolerance_fail(self):
+    def test_even_one_unaccepted_auto_task_fails(self):
         data = result(FOUR)
-        for index in (1, 3):
-            data['runs'][index]['passed'] = False
+        data['runs'][1]['passed'] = False
         report = verdict(data)
-        self.assertEqual((report['quality_regressions'], report['verdict']), (2, 'FAIL'))
+        self.assertEqual((report['quality_regressions'], report['verdict']), (1, 'FAIL'))
         self.assertTrue(any('Auto' in reason for reason in report['reasons']), report['reasons'])
+        # A baseline failure must not excuse a candidate failure either.
+        data['runs'][0]['passed'] = False
+        report = verdict(data)
+        self.assertEqual((report['quality_regressions'], report['verdict']), (0, 'FAIL'))
 
     def test_mode_only_activation_for_auto_candidate_is_incomplete(self):
         data = result()

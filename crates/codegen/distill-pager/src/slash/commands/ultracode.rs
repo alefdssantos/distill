@@ -10,17 +10,17 @@ use distill_tool_types::{ExecutionModeChoice, ExecutionModeOperation};
 pub struct ModeCommand;
 
 const MODE_ARGS: [(&str, ExecutionModeChoice, &str); 5] = [
-    ("auto", ExecutionModeChoice::Auto, "Jev picks the mode per request"),
+    ("auto", ExecutionModeChoice::Auto, "Jev adapts the mode to each action"),
     ("normal", ExecutionModeChoice::Normal, "Standard execution"),
     ("ultrafast", ExecutionModeChoice::Ultrafast, "Direct execution and parallel independent work"),
-    ("ultracode", ExecutionModeChoice::Ultracode, "Orchestrate work across parallel subagents"),
+    ("ultracode", ExecutionModeChoice::Ultracode, "Careful reasoning, refactoring and complex logic"),
     ("ultrasave", ExecutionModeChoice::Ultrasave, "Prioritize token economy"),
 ];
 
 impl SlashCommand for ModeCommand {
     slash_meta! {
         name: "mode",
-        description: "Select execution mode: auto (Jev picks per request), normal, ultrafast, ultracode, ultrasave",
+        description: "Select execution mode: auto (Jev adapts per action), normal, ultrafast, ultracode, ultrasave",
         usage: "/mode <auto|normal|ultrafast|ultracode|ultrasave>",
         takes_args: true,
         args_required: true,

@@ -35,6 +35,7 @@ fn execution_modes_prune_tool_definitions_to_direct_work() {
     use distill_tool_types::ExecutionMode;
     let offered = [
         "ask_stored_output",
+        "browser__screenshot",
         "ask_user_question",
         "enter_plan_mode",
         "get_command_or_subagent_output",
@@ -74,11 +75,12 @@ fn execution_modes_prune_tool_definitions_to_direct_work() {
         let kept = names(&super::execution_mode_tool_definitions(mode, defs.clone()));
         for name in &kept {
             assert!(
-                super::EXECUTION_MODE_TOOLS.contains(&name.as_str()) || name == "spawn_subagent",
+                super::EXECUTION_MODE_TOOLS.contains(&name.as_str())
+                    || name == "spawn_subagent" || name == "browser__screenshot",
                 "{mode:?} kept {name}"
             );
         }
-        for required in ["read_file", "write", "search_replace", "run_terminal_command"] {
+        for required in ["read_file", "write", "search_replace", "run_terminal_command", "browser__screenshot"] {
             assert!(kept.iter().any(|name| name == required), "{mode:?}: {kept:?}");
         }
         // Both modes delegate: UltraFast to fan independent work out in parallel,

@@ -2283,6 +2283,14 @@ async fn ultracode_nested_shell_inherits_distinct_shared_cwd_without_reparenting
             assert_eq!(child.fs.root(), ordinary.as_path());
             assert_eq!(root_fs.root(), root.as_path());
             assert_eq!(child.fs.read_file("marker").await.unwrap(), b"ordinary");
+            let inherited = child.execution_mode.as_ref().expect("inherited mode");
+            assert!(Arc::ptr_eq(inherited, &child.execution_policy.as_ref().unwrap().mode));
+            enabled.store_auto(distill_tool_types::ExecutionMode::Ultracode);
+            assert!(inherited.pick_auto(distill_tool_types::ExecutionMode::Ultrafast));
+            assert_eq!(enabled.load(), distill_tool_types::ExecutionMode::Ultracode);
+            assert_eq!(inherited.load(), distill_tool_types::ExecutionMode::Ultrafast);
+            enabled.store(distill_tool_types::ExecutionMode::Ultrasave);
+            assert_eq!(inherited.load(), distill_tool_types::ExecutionMode::Ultrasave);
             child
                 .fs
                 .write_file("descendant.txt", b"verified")

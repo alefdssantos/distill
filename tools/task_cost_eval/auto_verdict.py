@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import statistics
 
-from .ultrafast_verdict import (MAX_MISSED_ACCEPTANCES, MAX_QUALITY_REGRESSIONS, charged_completion_s,
-                                quality_reasons, validated_pairs)
+from .ultrafast_verdict import charged_completion_s, validated_pairs
 from .ultrasave_verdict import summarize, token_reasons
 
 # Predeclared: Auto must not cost more or take longer than any fixed-mode baseline median,
@@ -22,8 +21,8 @@ def verdict(results):
               'target': {'maximum_median_paired_credit_ratio': MAX_RATIO,
                          'maximum_median_paired_completion_ratio': MAX_RATIO,
                          'minimum_saving_on_one_axis_ratio': MIN_SAVING_RATIO,
-                         'maximum_quality_regressions': MAX_QUALITY_REGRESSIONS,
-                         'minimum_candidate_accepted': 'runs - %d' % MAX_MISSED_ACCEPTANCES},
+                         'maximum_quality_regressions': 0,
+                         'minimum_candidate_accepted': 'all runs'},
               'credit_basis': results.get('credit_basis'),
               'token_basis': 'sum of provider input_tokens + output_tokens over all physical calls; '
                              'cached input and reasoning are included, not added again',
@@ -86,6 +85,8 @@ def verdict(results):
         reasons.append(f'median paired completion ratio {completion_ratio:.3f} exceeds {MAX_RATIO}')
     if min(credit_ratio, completion_ratio) > MIN_SAVING_RATIO:
         reasons.append(f'neither median credit ratio nor completion ratio reached {MIN_SAVING_RATIO}')
-    reasons.extend(quality_reasons(report, 'Auto'))
+    if report['candidate']['accepted'] != report['candidate']['runs']:
+        reasons.append(f'Auto accepted {report["candidate"]["accepted"]} of '
+                       f'{report["candidate"]["runs"]}; all runs must pass')
     report['verdict'] = 'FAIL' if reasons else 'PASS'
     return report

@@ -72,17 +72,17 @@ pub(super) fn compose_tier(
 
 fn tier_policy(mode: distill_tool_types::ExecutionMode) -> &'static str {
     if mode == distill_tool_types::ExecutionMode::Ultrasave {
-        "UltraSave: choose the cheapest of the user's chosen models that still completes this step correctly. Count total money including retries and rework. A small quality loss is acceptable; a critical one is not."
+        "UltraSave: choose the cheapest of the user's chosen models that still completes this step correctly. Count total money including retries and rework. Preserve correctness and required verification."
     } else {
-        "UltraFast: choose the fastest of the user's chosen models (lowest latency, highest throughput) that still completes this step correctly. A small quality loss is acceptable; a critical one is not."
+        "UltraFast: choose the fastest of the user's chosen models (lowest latency, highest throughput) that still completes this step correctly. Preserve correctness and required verification."
     }
 }
 
 fn tier_instructions(mode: distill_tool_types::ExecutionMode) -> &'static str {
     if mode == distill_tool_types::ExecutionMode::Ultrasave {
-        "Pick the cheapest of the user's chosen models that will still complete this step correctly. Default to the cheapest candidate for reading, searching, editing from a clear plan, running checks and fixing a known failure; choose a more capable one only when this step needs it (an unexplained failure after a retry, a design decision, a subtle correctness judgment). A small quality loss is acceptable, a critical one is not. Count retries and rework. When `prefix_cached` is true, switching re-reads the prompt uncached; switch only when the saving clearly outweighs that."
+        "Pick the cheapest of the user's chosen models that will still complete this step correctly. Default to the cheapest candidate for reading, searching, editing from a clear plan, running checks and fixing a known failure; choose a more capable one only when this step needs it (an unexplained failure after a retry, a design decision, a subtle correctness judgment). Preserve correctness and required verification. Count retries and rework. When `prefix_cached` is true, switching re-reads the prompt uncached; switch only when the saving clearly outweighs that."
     } else {
-        "Pick the fastest of the user's chosen models (lower latency, higher throughput; smaller models are usually faster) that will still complete this step correctly. Default to the fastest candidate for reading, searching, editing from a clear plan, running checks and fixing a known failure; choose a more capable one only when this step needs it (an unexplained failure after a retry, a design decision, a subtle correctness judgment). A small quality loss is acceptable, a critical one is not. Count retries and rework as time. When `prefix_cached` is true, switching re-reads the prompt uncached, which costs time; switch only when the time saved clearly outweighs that."
+        "Pick the fastest of the user's chosen models (lower latency, higher throughput; smaller models are usually faster) that will still complete this step correctly. Default to the fastest candidate for reading, searching, editing from a clear plan, running checks and fixing a known failure; choose a more capable one only when this step needs it (an unexplained failure after a retry, a design decision, a subtle correctness judgment). Preserve correctness and required verification. Count retries and rework as time. When `prefix_cached` is true, switching re-reads the prompt uncached, which costs time; switch only when the time saved clearly outweighs that."
     }
 }
 
@@ -322,7 +322,7 @@ impl SessionActor {
         state["switch_cost"] = serde_json::json!(if prefix_cached {
             "A model different from the previous dispatch re-reads the whole prompt uncached."
         } else {
-            "No main request has been sent yet, so there is no cached prefix: switching is free this round."
+            "No reusable main prefix is recorded for the current tools/history, so a model switch has no cached-prefix advantage to give up."
         });
         let Some(answers) = crate::jev::ask_item(JevLever::B2ExecutionTier, state, questions).await
         else {

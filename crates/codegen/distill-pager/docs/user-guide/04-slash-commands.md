@@ -128,11 +128,13 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 
 ### `/mode <auto|normal|ultrafast|ultracode|ultrasave>`
 
-Each session has one execution mode choice. **Auto** is the default: Jev picks the effective mode for each request, and can change it during a turn. The other choices fix the mode: **Normal**, **UltraFast**, **UltraCode**, or **UltraSave**. Selecting a choice replaces the previous one. `/mode` with no argument or an unknown argument shows the usage.
+Each session has one execution mode choice. **Auto** is the default: Jev picks the effective mode for each request and reconsiders it after each action, using the current step, results, failures and switching cost. There is no limit on useful switches during a conversation. The other choices fix the mode: **Normal**, **UltraFast**, **UltraCode**, or **UltraSave**. Selecting a choice replaces the previous one. `/mode` with no argument or an unknown argument shows the usage.
 
 When Auto changes the effective mode, the scrollback shows `Auto mode: UltraSave — <reason>`. The prompt footer always shows the choice and the effective mode, for example `Mode: Auto → UltraSave`, or `Mode: UltraCode` when fixed.
 
-UltraFast prioritizes direct execution and parallel independent tasks, with one level of executors and the same required verification. UltraCode keeps its existing task decomposition policy. UltraSave prioritizes token economy. All modes preserve an explicitly selected model and reasoning effort.
+UltraFast favors simple interactive actions, such as taking and showing a browser screenshot, and uses parallel tasks only when they save time. UltraCode favors careful reasoning, refactoring and complex logic, including single-file changes; delegation is optional. UltraSave favors cost and token economy for well-specified mechanical work. Normal balances ordinary work. All modes preserve model and effort pins, permissions and required verification.
+
+Subagents inherit the user's choice, including later changes. In Auto, each subagent selects a mode for its own action without changing the parent's or siblings' effective modes. Existing delegation and capability limits still apply.
 
 In the Models screen, select **Execution** and press Enter to cycle through Auto → Normal → UltraFast → UltraCode → UltraSave → Auto, then save.
 
@@ -144,7 +146,7 @@ In the Models screen, select **Execution** and press Enter to cycle through Auto
 /mode normal
 ```
 
-For headless prompts, use `--mode <auto|normal|ultrafast|ultracode|ultrasave>` (default `auto`). The legacy `--ultrafast`, `--ultracode`, and `--ultrasave` flags still work but cannot be combined with each other or with `--mode`. A fixed choice is sent only after the agent confirms it; Auto sends no activation request. Any choice other than Auto requires a headless prompt.
+For headless prompts, use `--mode <auto|normal|ultrafast|ultracode|ultrasave>`. Without a flag, the saved choice is kept; new sessions start in Auto. The legacy `--ultrafast`, `--ultracode`, and `--ultrasave` flags still work but cannot be combined with each other or with `--mode`. Every explicit choice, including Auto, is confirmed before sending the prompt. These flags require a headless prompt; use `/mode` in the interactive UI.
 
 ### `/always-approve`
 

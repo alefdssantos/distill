@@ -2506,12 +2506,11 @@ async fn async_main(mut args: PagerArgs) -> Result<()> {
         })
     };
     if let Some(choice) = execution_mode
-        && choice != distill_tool_types::ExecutionModeChoice::Auto
         && headless_prompt.is_none()
     {
         let mode = choice.label().to_ascii_lowercase();
         anyhow::bail!(
-            "--{mode} requires -p/--single, --prompt-file or --prompt-json; use /mode {mode} in the interactive UI"
+            "--mode {mode} requires -p/--single, --prompt-file or --prompt-json; use /mode {mode} in the interactive UI"
         );
     }
     if headless_prompt.is_some() || args.memory_flush {

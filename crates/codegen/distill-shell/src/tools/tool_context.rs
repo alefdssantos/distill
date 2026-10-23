@@ -202,6 +202,9 @@ pub struct ToolContext {
     pub(crate) active_message_parent_prompt_index: Arc<std::sync::atomic::AtomicUsize>,
     /// Top-level sessions start at 0; child sessions are parent_depth + 1.
     pub subagent_depth: u32,
+    /// Inherited user mode, including for workflow and other leaf agents that
+    /// do not inherit the Task delegation policy.
+    pub(crate) execution_mode: Option<Arc<distill_tool_types::AtomicExecutionMode>>,
     /// Host policy shared with the root switch and inherited by eligible Task children.
     pub(crate) execution_policy:
         Option<distill_tools::implementations::distill::task::types::ExecutionPolicy>,
@@ -334,6 +337,7 @@ impl ToolContext {
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
             active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             subagent_depth: 0,
+            execution_mode: None,
             execution_policy: None,
             subagent_event_tx: None,
             subagent_coordinator_sender: None,
@@ -431,6 +435,7 @@ mod tests {
                     0,
                 )),
                 subagent_depth: 0,
+                execution_mode: None,
                 execution_policy: None,
                 subagent_event_tx: None,
                 subagent_coordinator_sender: None,

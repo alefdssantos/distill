@@ -141,6 +141,7 @@ struct TurnRouteAnchor {
     turn: u64,
     /// Session model the round started from, so a model switch chooses again.
     session_model: String,
+    mode: distill_tool_types::ExecutionMode,
     route: TurnRoute,
     failed_tool_count: u64,
 }
@@ -193,9 +194,16 @@ impl JevTurnLedger {
         self.last_main_prompt_tokens = Some(input_tokens);
     }
 
-    /// Prompt tokens of the last main response, when one reported usage.
+    /// Prompt tokens of the last main response whose prefix may be reused.
     pub(crate) fn last_main_prompt_tokens(&self) -> Option<u64> {
         self.last_main_prompt_tokens
+    }
+
+    /// Changed tools or rewritten history cannot reuse the previous prefix.
+    /// Keep usage accounting and foreign reasoning history intact.
+    pub(crate) fn invalidate_cached_prompt(&mut self) {
+        self.turn_route = None;
+        self.last_main_prompt_tokens = None;
     }
 
     /// The route a main round of `turn` started from `session_model` must keep:
@@ -203,9 +211,9 @@ impl JevTurnLedger {
     /// choose: a new turn, another session model, no round chosen yet (or a
     /// compaction since), or a prompt still small enough that a cache miss is
     /// cheap.
-    pub(crate) fn kept_turn_route(&self, turn: u64, session_model: &str, reuse_small_prompt: bool) -> Option<TurnRoute> {
+    pub(crate) fn kept_turn_route(&self, turn: u64, session_model: &str, reuse_small_prompt: bool, mode: distill_tool_types::ExecutionMode) -> Option<TurnRoute> {
         let anchor = self.turn_route.as_ref()?;
-        if anchor.turn != turn || anchor.session_model != session_model
+        if anchor.turn != turn || anchor.session_model != session_model || anchor.mode != mode
             || (reuse_small_prompt && anchor.failed_tool_count != self.facts.failed_tool_count())
         {
             return None;
@@ -225,11 +233,13 @@ impl JevTurnLedger {
         turn: u64,
         session_model: impl Into<String>,
         route: TurnRoute,
+        mode: distill_tool_types::ExecutionMode,
     ) {
         self.turn_route = Some(TurnRouteAnchor {
             turn,
             session_model: session_model.into(),
             route,
+            mode,
             failed_tool_count: self.facts.failed_tool_count(),
         });
     }
@@ -237,7 +247,7 @@ impl JevTurnLedger {
     /// A compaction rewrote the prompt, so the cache the turn route protects is
     /// gone and the next round may choose again.
     pub(crate) fn note_compaction(&mut self) {
-        self.turn_route = None;
+        self.invalidate_cached_prompt();
         self.tier_route_slug = None;
         self.tier_route_touched = false;
     }
@@ -439,57 +449,61 @@ mod tests {
     #[test]
     fn a_turn_keeps_its_route_until_switching_is_cheap() {
         use distill_sampling_types::ReasoningEffort;
+        let mode = distill_tool_types::ExecutionMode::Normal;
         let high = TurnRoute {
             model: "sol".to_owned(),
             effort: Some(ReasoningEffort::High),
         };
         let mut ledger = JevTurnLedger::default();
         assert_eq!(
-            ledger.kept_turn_route(3, "sol", false),
+            ledger.kept_turn_route(3, "sol", false, mode),
             None,
             "the turn's first round chooses"
         );
-        ledger.anchor_turn_route(3, "sol", high.clone());
+        ledger.anchor_turn_route(3, "sol", high.clone(), mode);
         assert_eq!(
-            ledger.kept_turn_route(3, "sol", false),
+            ledger.kept_turn_route(3, "sol", false, mode),
             None,
             "without a reported prompt size the round behaves as before"
         );
         ledger.note_round("sol", Some("high".to_owned()));
         ledger.add_usage(EFFORT_SWITCH_FREE_PROMPT_TOKENS - 1, 10);
         assert_eq!(
-            ledger.kept_turn_route(3, "sol", false),
+            ledger.kept_turn_route(3, "sol", false, mode),
             None,
             "a miss on a small prompt is cheap, so the round may still choose"
         );
         ledger.add_usage(80_000, 10);
-        assert_eq!(ledger.kept_turn_route(3, "sol", false), Some(high.clone()));
+        assert_eq!(ledger.kept_turn_route(3, "sol", false, mode), Some(high.clone()));
         assert_eq!(
-            ledger.kept_turn_route(4, "sol", false),
+            ledger.kept_turn_route(4, "sol", false, mode),
             None,
             "a new prompt turn chooses again"
         );
         assert_eq!(
-            ledger.kept_turn_route(3, "luna", false),
+            ledger.kept_turn_route(3, "luna", false, mode),
             None,
             "after a model switch the old route's cache is not this model's"
         );
         ledger.note_compaction();
+        assert_eq!(ledger.last_main_prompt_tokens(), None,
+            "the old prefix is not a switching cost after history changes");
         assert_eq!(
-            ledger.kept_turn_route(3, "sol", false),
+            ledger.kept_turn_route(3, "sol", false, mode),
             None,
             "a compaction rewrote the prompt, so its cache is gone anyway"
         );
-        ledger.anchor_turn_route(3, "sol", high);
+        ledger.anchor_turn_route(3, "sol", high, mode);
+        ledger.add_usage(4_000, 10);
         let _ = ledger.take_rows();
         assert_eq!(
-            ledger.kept_turn_route(3, "sol", false),
+            ledger.kept_turn_route(3, "sol", false, mode),
             None,
             "the drain ends the turn"
         );
         assert_eq!(
             ledger.last_main_prompt_tokens(),
-            Some(80_000),
+            Some(4_000),
             "the prompt size describes the session's cache, not the turn"
         );
     }
@@ -564,6 +578,8 @@ mod tests {
         let mut ledger = JevTurnLedger::default();
         ledger.tier_route_touched = true;
         ledger.tier_route_slug = Some("worker".to_owned());
+        ledger.invalidate_cached_prompt();
+        assert!(ledger.tier_route_touched, "a tool-list change does not rewrite foreign reasoning");
         let _ = ledger.take_rows();
         assert!(ledger.tier_route_touched, "next turn's history still holds it");
         assert_eq!(ledger.tier_route_slug, None, "the kept route is per turn");

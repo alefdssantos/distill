@@ -5,13 +5,11 @@ use distill_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
     /// Applies a model switch deferred while the previous turn ran. Called
     /// when the next turn starts, before it reads history or samples.
-    pub(super) async fn apply_deferred_model_switch(self: &std::sync::Arc<Self>) {
+    pub(super) async fn apply_deferred_model_switch(self: &std::sync::Arc<Self>) -> Result<(), acp::Error> {
         let Some(switch) = self.jev_ledger.borrow_mut().deferred_model_switch.0.take() else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = self.apply_session_model(switch, false).await {
-            tracing::warn!(session_id = %self.session_info.id.0, ?error, "deferred model switch failed");
-        }
+        self.apply_session_model(switch, false).await.map(|_| ())
     }
 
     pub(super) async fn handle_set_session_model(
@@ -273,6 +271,11 @@ impl SessionActor {
         // The new main model may be the worker; a switch that leaves the prompt alone skips it too.
         if apply_prompt_override {
             self.refresh_worker_prompt().await;
+        }
+        if defer_handoff {
+            // A later explicit pick supersedes any queued handoff, including
+            // choosing the current account again before the next turn starts.
+            self.jev_ledger.borrow_mut().deferred_model_switch.0 = None;
         }
         Ok(model_id)
     }
