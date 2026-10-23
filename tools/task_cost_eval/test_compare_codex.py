@@ -258,6 +258,29 @@ class StrictDistillAccountingTest(unittest.TestCase):
                     main_evidence = next(r for r in evidence['sessions'] if r['session_id'] == 'main')
                     self.assertEqual(main_evidence['retry_attempt_ids'], ['sampler:b:retry:api:1'])
 
+    def test_observed_jev_request_must_have_a_usage_attribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            main, _, rows = self.fixture(root)
+            rows.append({**rows[0], 'attempt_id': 'jev:auto', 'request_id': 'gen-auto',
+                         'role': 'jev', 'model_id': 'typesafe/jev', 'cost_usd_ticks': 1000,
+                         'endpoint': 'https://openrouter.ai/api/alpha/decisions'})
+            self.write_ledger(main, rows)
+            log = root / 'logs/jev.jsonl'
+            observed = {'fields': {'event_kind': 'decision', 'lever': 'b8_execution_mode',
+                                   'request_id': 'gen-auto'}}
+            log.write_text(json.dumps(observed) + '\n')
+            self.assertTrue(distill_accounting(root, 'main', strict=True)['accounting_complete'])
+
+            observed['fields']['request_id'] = 'gen-unrecorded-start'
+            with log.open('a') as stream:
+                stream.write(json.dumps(observed) + '\n')
+            result = distill_accounting(root, 'main', strict=True)
+            self.assertFalse(result['accounting_complete'])
+            self.assertIsNone(result['credit_estimate'])
+            self.assertTrue(any('gen-unrecorded-start' in reason
+                                for reason in result['accounting_evidence']['reasons']))
+
     def test_missing_request_evidence_is_unknown_even_with_complete_ledger(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

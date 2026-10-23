@@ -544,7 +544,13 @@ impl SessionActor {
         if let Some(ref tp) = request.traceparent {
             distill_otel::link_span_to_meta(&span, &serde_json::json!({ "traceparent": tp }));
         }
-        self.handle_turn_input_inner(request).instrument(span).await
+        // Routing during prompt preparation is billable before sampling starts.
+        crate::jev::with_session_scope_and_recorder(
+            self.session_info.id.0.to_string(),
+            Some(self.chat_state_handle.clone()),
+            self.handle_turn_input_inner(request).instrument(span),
+        )
+        .await
     }
     async fn handle_turn_input_inner(
         self: &Arc<Self>,
@@ -2628,7 +2634,7 @@ impl SessionActor {
         salvage: &mut super::length_salvage::LengthSalvage,
         turn_sampling: &mut TurnSampling,
     ) -> Result<TurnOutcome, acp::Error> {
-        let result = crate::jev::with_session_scope_and_recorder(
+        let result = crate::jev::with_recorder_unless_scoped(
             self.session_info.id.0.to_string(),
             Some(self.chat_state_handle.clone()),
             self.process_conversation_turn_inner(
