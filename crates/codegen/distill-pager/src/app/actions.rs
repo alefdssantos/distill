@@ -1490,6 +1490,8 @@ pub enum Effect {
     Accounts(AccountsTask),
     /// Flip `routing.enabled` in the account store.
     ToggleAutoRouting,
+    /// Turn Auto routing off because the user picked a Main or Worker model.
+    DisableAutoRouting,
     LoginProvider {
         provider: LoginProvider,
         attempt_id: u64,
@@ -2578,6 +2580,8 @@ pub enum TaskResult {
     AutoRoutingSet {
         result: Result<(bool, Option<acp::ModelId>), String>,
     },
+    /// Auto routing was on and an explicit Main/Worker pick turned it off.
+    AutoRoutingDisabledByPick,
     WithPinnedMemoryMode {
         agent_id: AgentId,
         memory_mode: Option<distill_shell::config::MemoryMode>,

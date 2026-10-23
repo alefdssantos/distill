@@ -153,7 +153,53 @@ pub(in crate::app::dispatch) fn confirmed_quit(app: &mut AppView) -> Vec<Effect>
     effects.push(Effect::Quit);
     effects
 }
+/// When Auto routing runs the active session, an explicit Main/Worker pick
+/// turns Auto off and drops the routed pair from the footer. A Worker pick
+/// also pins the Main the route was running, so Main stays put.
+fn leave_auto_routing(app: &mut AppView, mut effects: Vec<Effect>, worker_pick: bool) -> Vec<Effect> {
+    let route = match app.active_view {
+        ActiveView::Agent(id) => app.agents.get_mut(&id).map(|agent| &mut agent.session.models.auto_route),
+        _ => Some(&mut app.models.auto_route),
+    };
+    let Some(route) = route.filter(|route| route.is_some()) else {
+        return effects;
+    };
+    if effects.is_empty() {
+        return effects;
+    }
+    let routed_main = route.take().map(|(main, _)| main);
+    app.models.auto_route = None;
+    effects.insert(0, Effect::DisableAutoRouting);
+    if worker_pick && let Some(main) = routed_main {
+        effects.extend(dispatch_action(
+            Action::SwitchModel {
+                model_id: main,
+                effort: None,
+            },
+            app,
+        ));
+    }
+    effects
+}
+
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+    // An explicit Main or Worker pick takes model authority back from Auto routing.
+    let (explicit_pick, worker_pick) = match &action {
+        Action::SwitchModel { model_id, .. } | Action::SetDefaultModel(model_id) => {
+            (model_id.0.as_ref() != "auto", false)
+        }
+        Action::SetWorkerModel(..) => (true, true),
+        _ => (false, false),
+    };
+    let effects = dispatch_action(action, app);
+    if explicit_pick {
+        leave_auto_routing(app, effects, worker_pick)
+    } else {
+        effects
+    }
+}
+
+fn dispatch_action(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => confirmed_quit(app),

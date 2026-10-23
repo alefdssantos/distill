@@ -26,6 +26,16 @@ impl LedgerRow {
     }
 }
 
+/// Holds a [`crate::session::SessionModelSwitch`] without requiring `Debug` on it.
+#[derive(Default)]
+pub(crate) struct DeferredModelSwitch(pub(crate) Option<crate::session::SessionModelSwitch>);
+
+impl std::fmt::Debug for DeferredModelSwitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "Some(..)" } else { "None" })
+    }
+}
+
 /// The turn's model/effort split. Cheap by construction: one row per pair the
 /// turn actually used, so a normal turn holds two or three.
 #[derive(Debug, Default)]
@@ -87,6 +97,9 @@ pub(crate) struct JevTurnLedger {
     /// Catalog slug of the non-main tier model the turn route runs on, so a
     /// kept route resumes that exact entry rather than a wire-id lookalike.
     pub(crate) tier_route_slug: Option<String>,
+    /// A model switch that needed an account handoff while a turn ran; applied
+    /// when the turn ends. Session-scoped: the turn drain keeps it.
+    pub(crate) deferred_model_switch: DeferredModelSwitch,
     /// B8: Auto execution mode bookkeeping for the current request.
     pub(crate) auto_mode: crate::session::acp_session::jev_auto_mode::AutoModeTurn,
     /// Model and effort the last main request was sent with. Session-scoped:

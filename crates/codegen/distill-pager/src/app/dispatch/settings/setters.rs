@@ -2203,7 +2203,10 @@ pub(in crate::app::dispatch) fn set_tier_editor(
     let main_changed = current_main.as_ref() != Some(&main_id);
     if main_changed || current_main_effort != main_effort {
         match main_effort {
-            None if main_changed => effects.extend(set_default_model(app, main_id.clone())),
+            None if main_changed => effects.extend(super::super::router::dispatch(
+                crate::app::actions::Action::SetDefaultModel(main_id.clone()),
+                app,
+            )),
             None => effects.extend(super::super::router::dispatch(
                 crate::app::actions::Action::SetEffortAuto { model_id: main_id.clone() },
                 app,
@@ -2237,7 +2240,7 @@ pub(in crate::app::dispatch) fn set_tier_editor(
             if current_worker.as_ref() != Some(&id)
                 || crate::acp::ModelState::configured_worker_effort() != effort =>
         {
-            set_worker_model(app, id, effort)
+            super::super::router::dispatch(crate::app::actions::Action::SetWorkerModel(id, effort), app)
         }
         None if current_worker.is_some() => clear_worker_model(app),
         _ => vec![],

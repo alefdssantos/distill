@@ -403,6 +403,52 @@ fn slash_model_valid_dispatches_set_default_model_with_switch_and_persist() {
     );
     assert!(expect_agent(&app, id).session.model_switch_pending);
 }
+/// With Auto routing running the session, picking a Main hands model
+/// authority back to the user: Auto turns off and the footer drops the routed
+/// pair; picking only a Worker also pins the Main the route was running so the
+/// next turn does not jump to the configured default.
+#[test]
+fn explicit_pick_while_auto_routed_leaves_auto_and_keeps_routed_main_for_worker_picks() {
+    crate::acp::ModelState::set_instance_worker(None, None);
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let opus = acp::ModelId::new("claude/claude-opus-5-5");
+    let sonnet = acp::ModelId::new("claude/claude-sonnet-5-5");
+    let haiku = acp::ModelId::new("claude/claude-haiku-5-5");
+    let route = || Some((opus.clone(), haiku.clone()));
+    {
+        let models = &mut app.agents.get_mut(&id).unwrap().session.models;
+        for (model, name) in [(&opus, "Opus 5.5"), (&sonnet, "Sonnet 5.5"), (&haiku, "Haiku 5.5")] {
+            models.available.insert(model.clone(), acp::ModelInfo::new(model.clone(), name));
+        }
+        models.set_current(opus.clone(), None);
+        models.auto_route = route();
+    }
+    app.models.auto_route = route();
+
+    let effects = dispatch(Action::SendPrompt("/model Sonnet 5.5".into()), &mut app);
+    assert!(matches!(effects.first(), Some(Effect::DisableAutoRouting)), "{effects:?}");
+    assert!(effects.iter().any(|e| matches!(e, Effect::SwitchModel { model_id, .. } if model_id == &sonnet)));
+    assert_eq!(expect_agent(&app, id).session.models.auto_route, None);
+    assert_eq!(app.models.auto_route, None);
+
+    app.agents.get_mut(&id).unwrap().session.models.auto_route = route();
+    let effects = dispatch(Action::SendPrompt("/worker-model Sonnet 5.5".into()), &mut app);
+    assert!(matches!(effects.first(), Some(Effect::DisableAutoRouting)), "{effects:?}");
+    assert!(effects.iter().any(|e| matches!(e, Effect::SetSessionWorker { model_id, .. } if model_id == "claude/claude-sonnet-5-5")));
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::SwitchModel { model_id, .. } if model_id == &opus)),
+        "the routed Main must be pinned: {effects:?}"
+    );
+
+    // Choosing Auto itself is not an opt-out.
+    let effects = dispatch(
+        Action::SwitchModel { model_id: acp::ModelId::new("auto"), effort: None },
+        &mut app,
+    );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::DisableAutoRouting)), "{effects:?}");
+}
+
 /// The worker model is a separate, optional preference: choosing it saves
 /// `[models].worker` and must never switch the session off its main model.
 #[test]
