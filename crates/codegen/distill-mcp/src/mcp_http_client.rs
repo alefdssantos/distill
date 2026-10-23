@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::stream::BoxStream;
+use futures::{StreamExt, stream::BoxStream};
 use http::{HeaderName, HeaderValue};
-use rmcp::model::ClientJsonRpcMessage;
+use rmcp::model::{ClientJsonRpcMessage, ClientRequest, ServerJsonRpcMessage};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
 };
@@ -123,7 +123,20 @@ impl ThrottleState {
     }
 }
 
-/// Wraps any [`StreamableHttpClient`] and backs off `get_stream` reconnects; `post_message` / `delete_session` delegate untouched.
+fn is_bootstrap_request(message: &ClientJsonRpcMessage) -> bool {
+    matches!(
+        message,
+        ClientJsonRpcMessage::Request(request)
+            if matches!(
+                &request.request,
+                ClientRequest::InitializeRequest(_) | ClientRequest::DiscoverRequest(_)
+            )
+    )
+}
+
+/// Wraps any [`StreamableHttpClient`] and backs off `get_stream` reconnects; `delete_session` delegates untouched.
+/// Bootstrap (`initialize` / `server/discover`) SSE responses return their first response or error as
+/// JSON, so a rejected handshake surfaces through rmcp's `expect_initialized` instead of waiting for EOF.
 /// Clones share the throttle state (rmcp clones the client per stream task / reconnect).
 /// Backoff and episode state are per instance; the [`WarnBudget`] is the caller's, so a rebuilt client does not warn again within the cooldown.
 #[derive(Clone)]
@@ -215,9 +228,42 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        self.inner
+        let bootstrap = is_bootstrap_request(&message);
+        let response = self
+            .inner
             .post_message(uri, message, session_id, auth_token, custom_headers)
-            .await
+            .await?;
+        if !bootstrap {
+            return Ok(response);
+        }
+        let (mut stream, session_id) = match response {
+            StreamableHttpPostResponse::Sse(stream, session_id) => (stream, session_id),
+            other => return Ok(other),
+        };
+        loop {
+            let Some(event) = stream.next().await else {
+                return Err(StreamableHttpError::UnexpectedServerResponse(
+                    "empty sse stream".into(),
+                ));
+            };
+            let event = event?;
+            if !matches!(event.event.as_deref(), None | Some("") | Some("message")) {
+                continue;
+            }
+            let Some(data) = event.data.as_deref() else {
+                continue;
+            };
+            if data.trim().is_empty() {
+                continue;
+            }
+            let message: ServerJsonRpcMessage = serde_json::from_str(data)?;
+            match message {
+                ServerJsonRpcMessage::Response(_) | ServerJsonRpcMessage::Error(_) => {
+                    return Ok(StreamableHttpPostResponse::Json(message, session_id));
+                }
+                _ => {}
+            }
+        }
     }
 
     async fn delete_session(
@@ -380,6 +426,296 @@ mod tests {
         ) -> Result<(), StreamableHttpError<Self::Error>> {
             unimplemented!("not used by these tests")
         }
+    }
+
+    fn sse_event(data: &str) -> Sse {
+        Sse {
+            data: Some(data.to_owned()),
+            ..Sse::default()
+        }
+    }
+
+    fn sse_stream(events: Vec<Sse>) -> BoxStream<'static, Result<Sse, SseError>> {
+        futures::stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    fn initialize_request(id: i64) -> ClientJsonRpcMessage {
+        let message: ClientJsonRpcMessage = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1.0"},
+            },
+        }))
+        .expect("valid client request");
+        assert!(matches!(
+            &message,
+            ClientJsonRpcMessage::Request(request)
+                if matches!(&request.request, ClientRequest::InitializeRequest(_))
+        ));
+        message
+    }
+
+    fn rpc_request(method: &str, id: i64) -> ClientJsonRpcMessage {
+        serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": {},
+        }))
+        .expect("valid client request")
+    }
+
+    #[derive(Clone)]
+    struct PostInner {
+        response: Arc<parking_lot::Mutex<Option<StreamableHttpPostResponse>>>,
+    }
+
+    impl PostInner {
+        fn from_stream(stream: BoxStream<'static, Result<Sse, SseError>>) -> Self {
+            Self {
+                response: Arc::new(parking_lot::Mutex::new(Some(
+                    StreamableHttpPostResponse::Sse(stream, Some("session".into())),
+                ))),
+            }
+        }
+
+        fn sse(events: Vec<Sse>) -> Self {
+            Self::from_stream(sse_stream(events))
+        }
+
+        fn sse_held_open(events: Vec<Sse>) -> Self {
+            Self::from_stream(
+                futures::stream::iter(events.into_iter().map(Ok))
+                    .chain(futures::stream::pending())
+                    .boxed(),
+            )
+        }
+    }
+
+    impl StreamableHttpClient for PostInner {
+        type Error = std::io::Error;
+
+        async fn get_stream(
+            &self,
+            _uri: Arc<str>,
+            _session_id: Option<Arc<str>>,
+            _last_event_id: Option<String>,
+            _auth_token: Option<String>,
+            _custom_headers: HashMap<HeaderName, HeaderValue>,
+        ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>>
+        {
+            unimplemented!("not used by these tests")
+        }
+
+        async fn post_message(
+            &self,
+            _uri: Arc<str>,
+            _message: ClientJsonRpcMessage,
+            _session_id: Option<Arc<str>>,
+            _auth_token: Option<String>,
+            _custom_headers: HashMap<HeaderName, HeaderValue>,
+        ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+            self.response.lock().take().ok_or_else(|| {
+                StreamableHttpError::UnexpectedServerResponse("no scripted response".into())
+            })
+        }
+
+        async fn delete_session(
+            &self,
+            _uri: Arc<str>,
+            _session_id: Arc<str>,
+            _auth_token: Option<String>,
+            _custom_headers: HashMap<HeaderName, HeaderValue>,
+        ) -> Result<(), StreamableHttpError<Self::Error>> {
+            unimplemented!("not used by these tests")
+        }
+    }
+
+    async fn try_post_once(
+        inner: PostInner,
+        message: ClientJsonRpcMessage,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<std::io::Error>> {
+        McpHttpClient::new(inner, "mock-server", WarnBudget::default())
+            .post_message(
+                "http://mock".into(),
+                message,
+                Some("request-session".into()),
+                None,
+                HashMap::new(),
+            )
+            .await
+    }
+
+    async fn post_once(
+        inner: PostInner,
+        message: ClientJsonRpcMessage,
+    ) -> StreamableHttpPostResponse {
+        try_post_once(inner, message).await.expect("post succeeds")
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sse_error_surfaces_as_json_before_stream_ends() {
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            post_once(
+                PostInner::sse_held_open(vec![sse_event(
+                    r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32001,"message":"Unauthorized: token expired"}}"#,
+                )]),
+                initialize_request(7),
+            ),
+        )
+        .await
+        .expect("must return at the error without draining the stream");
+
+        match response {
+            StreamableHttpPostResponse::Json(ServerJsonRpcMessage::Error(error), session_id) => {
+                assert_eq!(error.id, Some(rmcp::model::RequestId::Number(7)));
+                assert_eq!(error.error.code, rmcp::model::ErrorCode(-32001));
+                assert_eq!(session_id.as_deref(), Some("session"));
+            }
+            other => panic!("expected Json error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sse_success_returns_json_response() {
+        let response = post_once(
+            PostInner::sse(vec![
+                sse_event(
+                    r#"{"jsonrpc":"2.0","method":"notifications/custom-server","params":{"hello":"world"}}"#,
+                ),
+                Sse::default(),
+                sse_event(
+                    r#"{"jsonrpc":"2.0","id":7,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"srv","version":"1.0"}}}"#,
+                ),
+                sse_event(
+                    r#"{"jsonrpc":"2.0","method":"notifications/custom-server","params":{"hello":"after"}}"#,
+                ),
+            ]),
+            initialize_request(7),
+        )
+        .await;
+
+        match response {
+            StreamableHttpPostResponse::Json(
+                ServerJsonRpcMessage::Response(response),
+                session_id,
+            ) => {
+                assert_eq!(response.id, rmcp::model::RequestId::Number(7));
+                assert_eq!(session_id.as_deref(), Some("session"));
+            }
+            other => panic!("expected Json success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sse_error_after_notifications_surfaces_as_json() {
+        let response = post_once(
+            PostInner::sse(vec![
+                sse_event(
+                    r#"{"jsonrpc":"2.0","method":"notifications/custom-server","params":{"hello":"world"}}"#,
+                ),
+                Sse::default(),
+                Sse {
+                    event: Some("ping".into()),
+                    data: Some("keepalive".into()),
+                    ..Sse::default()
+                },
+                sse_event(
+                    r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"Method not found"}}"#,
+                ),
+            ]),
+            rpc_request("server/discover", 7),
+        )
+        .await;
+
+        match response {
+            StreamableHttpPostResponse::Json(ServerJsonRpcMessage::Error(error), session_id) => {
+                assert_eq!(error.id, Some(rmcp::model::RequestId::Number(7)));
+                assert_eq!(error.error.code, rmcp::model::ErrorCode(-32601));
+                assert_eq!(session_id.as_deref(), Some("session"));
+            }
+            other => panic!("expected Json error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_bootstrap_sse_error_is_untouched() {
+        let error_event =
+            sse_event(r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"boom"}}"#);
+        let response = post_once(
+            PostInner::sse(vec![error_event.clone()]),
+            rpc_request("tools/list", 7),
+        )
+        .await;
+
+        match response {
+            StreamableHttpPostResponse::Sse(stream, session_id) => {
+                assert_eq!(session_id.as_deref(), Some("session"));
+                let got: Vec<Sse> = stream.map(|event| event.expect("event")).collect().await;
+                assert_eq!(got, vec![error_event]);
+            }
+            other => panic!("expected passthrough Sse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_malformed_json_is_propagated() {
+        let result = try_post_once(
+            PostInner::sse(vec![sse_event("not json")]),
+            initialize_request(7),
+        )
+        .await;
+
+        assert!(matches!(result, Err(StreamableHttpError::Deserialize(_))));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sse_event_error_is_propagated() {
+        let result = try_post_once(
+            PostInner::from_stream(futures::stream::iter(vec![Err(SseError::InvalidLine)]).boxed()),
+            initialize_request(7),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(StreamableHttpError::Sse(SseError::InvalidLine))
+        ));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_eof_is_propagated() {
+        let result = try_post_once(PostInner::sse(vec![]), initialize_request(7)).await;
+
+        match result {
+            Err(StreamableHttpError::UnexpectedServerResponse(message)) => {
+                assert_eq!(message, "empty sse stream");
+            }
+            other => panic!("expected EOF error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_error_reaches_expect_initialized() {
+        let response = post_once(
+            PostInner::sse(vec![sse_event(
+                r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32001,"message":"Unauthorized"}}"#,
+            )]),
+            initialize_request(7),
+        )
+        .await;
+
+        let (message, session_id) = response
+            .expect_initialized::<std::io::Error>()
+            .await
+            .expect("JSON error does not wait for an SSE response");
+        assert!(matches!(message, ServerJsonRpcMessage::Error(_)));
+        assert_eq!(session_id.as_deref(), Some("session"));
     }
 
     /// Counts this module's warn events and records each debug event's `suppressed_warn` field.
