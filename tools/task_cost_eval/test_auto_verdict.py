@@ -5,13 +5,16 @@ from .test_ultrafast_verdict import FOUR
 from .test_ultrasave_verdict import result as paired_result
 
 
-def result(cases=('parallel', 'sequential')):
+def result(cases=('parallel', 'sequential'), baseline_mode='normal'):
     """Candidate runs Auto: activation reports the mode Auto chose (normal) plus choice 'auto'."""
     data = paired_result(cases)
     for row in data['runs']:
         if row['variant'] == 'candidate':
             row['settings']['execution_mode'] = 'auto'
             row['acp']['activation_receipt']['result'] = {'mode': 'normal', 'choice': 'auto'}
+        else:
+            row['settings']['execution_mode'] = baseline_mode
+            row['acp']['activation_receipt']['result'] = {'mode': baseline_mode}
     return data
 
 
@@ -52,6 +55,28 @@ class AutoVerdictTest(unittest.TestCase):
         report = verdict(data)
         self.assertEqual(report['verdict'], 'INCOMPLETE')
         self.assertIsNone(report['candidate'])
+
+    def test_specialist_tradeoff_is_reported_without_claiming_a_performance_win(self):
+        data = result(baseline_mode='ultrafast')
+        for row in data['runs']:
+            if row['variant'] == 'candidate':
+                row['wall_time_s'] = 110
+                row['credits'] = 12
+        report = verdict(data)
+        self.assertEqual(report['verdict'], 'PASS', report['reasons'])
+        self.assertEqual(report['comparison'], 'specialist_tradeoff')
+        self.assertFalse(report['performance_gate_required'])
+        self.assertIsNone(report['performance_target_met'])
+        self.assertGreater(report['median_paired_credit_ratio'], 1)
+        self.assertGreater(report['median_paired_completion_ratio'], 1)
+        self.assertIsNone(report['target']['maximum_median_paired_completion_ratio'])
+
+    def test_specialist_comparison_still_requires_every_auto_task_to_pass(self):
+        data = result(baseline_mode='ultrasave')
+        data['runs'][1]['passed'] = False
+        report = verdict(data)
+        self.assertEqual(report['verdict'], 'FAIL', report['reasons'])
+        self.assertEqual(report['quality_regressions'], 1)
 
 
 if __name__ == '__main__':

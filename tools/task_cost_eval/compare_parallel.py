@@ -301,12 +301,13 @@ def main(argv=None):
                              'Jev calls are reported as jev_usd, not credits')
     parser.add_argument('--compare-versions', action='store_true',
                         help='head-to-head release comparison: baseline and candidate may use the same execution '
-                             'mode with different binaries; requires an ultrafast/ultrasave verdict')
+                             'mode with different binaries; requires an ultrafast/ultrasave/auto verdict')
     parser.add_argument('--max-concurrent', type=int, help='common task, sampling, and workflow capacity')
     parser.add_argument('--verdict', choices=('parallel', 'ultrafast', 'ultrasave', 'auto'), default='parallel',
                         help='paired ACP gates vs Normal: ultrafast median completion ratio <=0.60; ultrasave median credit '
                              'ratio <=0.45 (both <=0.85 with --compare-versions); auto median credit and completion '
-                             'ratios <=1.0 with one <=0.85 vs each fixed mode and all Auto tasks accepted; '
+                             'ratios <=1.0 with one <=0.85 vs Normal or a previous Auto version; '
+                             'Auto vs specialists reports tradeoffs without a performance gate; all Auto tasks must pass; '
                              'other verdicts allow at most 1 quality regression')
     for variant in VARIANTS:
         mode = parser.add_mutually_exclusive_group()

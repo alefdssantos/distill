@@ -1,4 +1,4 @@
-"""Paired Auto gate: best quality at the lowest credit cost in the least time; bounded sample, not a statistical test."""
+"""Auto must improve Normal; specialist comparisons report the balance of time and cost."""
 from __future__ import annotations
 
 import statistics
@@ -6,8 +6,8 @@ import statistics
 from .ultrafast_verdict import charged_completion_s, validated_pairs
 from .ultrasave_verdict import summarize, token_reasons
 
-# Predeclared: Auto must not cost more or take longer than any fixed-mode baseline median,
-# and must save at least 15% on one of the two axes.
+# Auto must not cost more or take longer than Normal, with at least 15% saved on
+# one axis. Specialists optimize their own priority; their tradeoffs are reported.
 MAX_RATIO = 1.0
 MIN_SAVING_RATIO = 0.85
 
@@ -17,10 +17,21 @@ def verdict(results):
     baseline_modes = ('normal', 'ultrafast', 'ultrasave', 'ultracode') + (('auto',) if compare_versions else ())
     reasons, pairs = validated_pairs(results, candidate_mode='auto', baseline_modes=baseline_modes,
                                      compare_versions=compare_versions)
+    observed_baselines = {row['settings'].get('execution_mode') for row in results['runs']
+                          if row['variant'] == 'baseline'}
+    baseline_mode = next(iter(observed_baselines)) if len(observed_baselines) == 1 else None
+    if baseline_mode is None:
+        reasons.append('one consistent baseline mode is required')
+    require_improvement = baseline_mode in ('normal', 'auto')
     report = {'verdict': 'INCOMPLETE', 'reasons': reasons, 'compare_versions': compare_versions,
-              'target': {'maximum_median_paired_credit_ratio': MAX_RATIO,
-                         'maximum_median_paired_completion_ratio': MAX_RATIO,
-                         'minimum_saving_on_one_axis_ratio': MIN_SAVING_RATIO,
+              'baseline_mode': baseline_mode,
+              'comparison': ('version_improvement' if baseline_mode == 'auto' else
+                             'normal_improvement' if baseline_mode == 'normal' else 'specialist_tradeoff'),
+              'performance_gate_required': require_improvement,
+              'performance_target_met': None,
+              'target': {'maximum_median_paired_credit_ratio': MAX_RATIO if require_improvement else None,
+                         'maximum_median_paired_completion_ratio': MAX_RATIO if require_improvement else None,
+                         'minimum_saving_on_one_axis_ratio': MIN_SAVING_RATIO if require_improvement else None,
                          'maximum_quality_regressions': 0,
                          'minimum_candidate_accepted': 'all runs'},
               'credit_basis': results.get('credit_basis'),
@@ -79,12 +90,15 @@ def verdict(results):
     if not report['baseline']['accepted']:
         reasons.append('baseline accepted no task; no quality comparison basis')
         return report
-    if credit_ratio > MAX_RATIO:
-        reasons.append(f'median paired credit ratio {credit_ratio:.3f} exceeds {MAX_RATIO}')
-    if completion_ratio > MAX_RATIO:
-        reasons.append(f'median paired completion ratio {completion_ratio:.3f} exceeds {MAX_RATIO}')
-    if min(credit_ratio, completion_ratio) > MIN_SAVING_RATIO:
-        reasons.append(f'neither median credit ratio nor completion ratio reached {MIN_SAVING_RATIO}')
+    if require_improvement:
+        report['performance_target_met'] = (credit_ratio <= MAX_RATIO and completion_ratio <= MAX_RATIO
+                                           and min(credit_ratio, completion_ratio) <= MIN_SAVING_RATIO)
+        if credit_ratio > MAX_RATIO:
+            reasons.append(f'median paired credit ratio {credit_ratio:.3f} exceeds {MAX_RATIO}')
+        if completion_ratio > MAX_RATIO:
+            reasons.append(f'median paired completion ratio {completion_ratio:.3f} exceeds {MAX_RATIO}')
+        if min(credit_ratio, completion_ratio) > MIN_SAVING_RATIO:
+            reasons.append(f'neither median credit ratio nor completion ratio reached {MIN_SAVING_RATIO}')
     if report['candidate']['accepted'] != report['candidate']['runs']:
         reasons.append(f'Auto accepted {report["candidate"]["accepted"]} of '
                        f'{report["candidate"]["runs"]}; all runs must pass')

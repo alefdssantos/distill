@@ -128,7 +128,7 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 
 ### `/mode <auto|normal|ultrafast|ultracode|ultrasave>`
 
-Each session has one execution mode choice. **Auto** is the default: Jev picks the effective mode for each request and reconsiders it after each action, using the current step, results, failures and switching cost. There is no limit on useful switches during a conversation. The other choices fix the mode: **Normal**, **UltraFast**, **UltraCode**, or **UltraSave**. Selecting a choice replaces the previous one. `/mode` with no argument or an unknown argument shows the usage.
+Each session has one execution mode choice. **Auto** is the default: Jev balances quality, time and cost by picking the effective mode for each request and reconsidering it after each action, using the current step, results, failures and switching cost. It does not aim to beat each specialist at its own priority. There is no limit on useful switches during a conversation. The other choices fix the mode: **Normal**, **UltraFast**, **UltraCode**, or **UltraSave**. Selecting a choice replaces the previous one. `/mode` with no argument or an unknown argument shows the usage.
 
 When Auto changes the effective mode, the scrollback shows `Auto mode: UltraSave — <reason>`. The prompt footer always shows the choice and the effective mode, for example `Mode: Auto → UltraSave`, or `Mode: UltraCode` when fixed.
 
