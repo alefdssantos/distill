@@ -20,34 +20,12 @@ OpenAI-compatible protocol.
 
 ## Modes
 
-Each session has one execution mode choice. New sessions default to Auto.
-Switch with `/mode <auto|normal|ultrafast|ultracode|ultrasave>` in the TUI,
-or pass `--mode <mode>` to a headless prompt. Saved choices are preserved.
-
-### Auto
-
-**57% less total time and 77% fewer estimated LLM credits than Normal** in
-our 20-case paired benchmark, with **20/20 tasks passing in both modes**.
-
-Auto balances speed, cost and quality as the work changes. It can reconsider
-the mode after each action: UltraFast for quick work, UltraCode for careful
-reasoning and refactoring, and UltraSave for bounded, well-understood tasks.
-Subagents inherit your `/mode` choice; in Auto, each chooses its own effective
-mode. Model and effort choices, permissions and required checks still apply.
-
-`/mode auto` or `--mode auto`
-
-The gains above are aggregate results from 20 task pairs, with complete call
-accounting and grading time included. Jev's USD charges are reported separately
-from estimated LLM credits. Auto also has measurable tradeoffs: against
-UltraSave, the median paired run took **21.1% more time** and used **3.4% more
-LLM credits**. In three pairs of a quick local file action with an ordinary
-request, Auto selected UltraFast every time but added a median **2.4 seconds**
-versus fixed UltraFast. See the [results and methodology](https://github.com/samuelfaj/distill/pull/45).
+Each session runs in one execution mode. Auto is the default. Switch with a
+slash command in the TUI, or pass a flag to headless prompts.
 
 <table>
 <tr>
-<td width="33%" valign="top">
+<td width="25%" valign="top">
 
 ### UltraSave
 
@@ -62,7 +40,7 @@ still run before a task counts as done.
 `/ultrasave on` or `--ultrasave`
 
 </td>
-<td width="33%" valign="top">
+<td width="25%" valign="top">
 
 ### UltraFast
 
@@ -77,7 +55,7 @@ model, effort and verification steps stay the same.
 `/ultrafast on` or `--ultrafast`
 
 </td>
-<td width="33%" valign="top">
+<td width="25%" valign="top">
 
 ### UltraCode
 
@@ -92,11 +70,26 @@ and permissions stay the same.
 `/ultracode on` or `--ultracode`
 
 </td>
+<td width="25%" valign="top">
+
+### Auto
+
+# Balanced
+
+Auto used **57% less total time** and **77% fewer estimated LLM credits**
+than Normal; both passed **20/20 tasks** in our paired benchmark.
+
+It switches modes as work changes. Subagents inherit Auto and adapt independently.
+
+`/mode auto` or `--mode auto`
+
+[Results and tradeoffs](https://github.com/samuelfaj/distill/pull/45).
+
+</td>
 </tr>
 </table>
 
 Details:
-[Auto and mode selection](crates/codegen/distill-pager/docs/user-guide/04-slash-commands.md),
 [UltraSave](docs/ultrasave.md), [UltraFast](docs/ultrafast.md) and
 [UltraCode](docs/ultracode.md).
 
