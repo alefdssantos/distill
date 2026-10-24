@@ -208,12 +208,18 @@ impl coordinator::ChildRunner for ShellChildRunner {
                     parent_session_id = %parent_sid,
                     subagent_id = %run.request.id,
                 ));
-                handle.spawn(crate::agent::subagent::run_shell_child(
-                    run,
-                    ctx,
-                    completion_data,
-                    gateway,
-                    root_span,
+                // A new worker task does not inherit the parent's task-local
+                // recorder. Attribute setup decisions before the child exists.
+                handle.spawn(crate::jev::with_session_scope_and_recorder(
+                    ctx.parent_session_id.clone(),
+                    ctx.parent_chat_state.clone(),
+                    crate::agent::subagent::run_shell_child(
+                        run,
+                        ctx,
+                        completion_data,
+                        gateway,
+                        root_span,
+                    ),
                 ))
             };
             join_worker_task(

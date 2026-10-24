@@ -50,7 +50,7 @@ def validated_pairs(results, *, candidate_mode, baseline_modes, compare_versions
         acp = row.get('acp') or {}
         activation = (acp.get('activation_receipt') or {}).get('result') or {}
         if (settings.get('transport') != 'acp' or mode not in expected_mode or
-                activation.get('mode') != mode or not acp.get('setup_confirmed') or
+                activation.get('choice', activation.get('mode')) != mode or not acp.get('setup_confirmed') or
                 not acp.get('cleanup_complete') or not row.get('execution_mode_activation_confirmed')):
             reasons.append(f'{label}: missing mode/setup/cleanup confirmation')
         if (not row.get('accounting_complete') or not (row.get('accounting_evidence') or {}).get('complete') or
@@ -71,6 +71,13 @@ def validated_pairs(results, *, candidate_mode, baseline_modes, compare_versions
     return reasons, pairs
 
 
+def charged_completion_s(row):
+    # Include verification and charge failures the full time budget: an early
+    # failure must not count as delivering the requested result more quickly.
+    elapsed = row['wall_time_s'] + row['grader']['wall_time_s']
+    return elapsed if row['passed'] else max(elapsed, row['settings']['timeout_s'])
+
+
 def verdict(results):
     compare_versions = bool(results.get('compare_versions'))
     baseline_modes = ('normal', 'ultracode') + (('ultrafast',) if compare_versions else ())
@@ -86,15 +93,9 @@ def verdict(results):
     if reasons:
         return report
 
-    def completion(row):
-        # Include verification and charge failures the full time budget: an early
-        # failure must not count as delivering the requested result more quickly.
-        elapsed = row['wall_time_s'] + row['grader']['wall_time_s']
-        return elapsed if row['passed'] else max(elapsed, row['settings']['timeout_s'])
-
     for key, pair in sorted(pairs.items()):
         baseline, candidate = pair['baseline'], pair['candidate']
-        base_time, cand_time = completion(baseline), completion(candidate)
+        base_time, cand_time = charged_completion_s(baseline), charged_completion_s(candidate)
         if base_time <= 0:
             report['reasons'].append(f'{key}: nonpositive baseline completion time')
             return report
@@ -116,7 +117,7 @@ def verdict(results):
             'runs': len(rows), 'accepted': sum(row['passed'] for row in rows),
             'raw_elapsed_s': sum(row['wall_time_s'] for row in rows),
             'verification_s': sum(row['grader']['wall_time_s'] for row in rows),
-            'charged_completion_s': sum(completion(row) for row in rows),
+            'charged_completion_s': sum(charged_completion_s(row) for row in rows),
             'median_raw_elapsed_s': statistics.median(row['wall_time_s'] for row in rows),
             'slowest_raw_elapsed_s': max(row['wall_time_s'] for row in rows),
             'credits': sum(row['credits'] for row in rows),

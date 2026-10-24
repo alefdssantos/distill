@@ -592,6 +592,14 @@ pub struct PagerArgs {
     /// Enable session-scoped UltraSave before a headless prompt; preserves explicit effort.
     #[clap(long, conflicts_with_all = ["ultracode", "ultrafast"])]
     pub ultrasave: bool,
+    /// Execution mode for a headless prompt: auto (default), normal, ultrafast, ultracode, or ultrasave.
+    #[clap(
+        long,
+        value_name = "MODE",
+        value_parser = ["auto", "normal", "ultrafast", "ultracode", "ultrasave"],
+        conflicts_with_all = ["ultracode", "ultrafast", "ultrasave"],
+    )]
+    pub mode: Option<String>,
     /// Extra rules to append to the system prompt.
     #[clap(long = "rules", alias = "append-system-prompt")]
     pub rules: Option<String>,

@@ -263,21 +263,21 @@ The response is the effective worker after the change:
 
 ### Execution modes
 
-Each session has one execution mode: `normal`, `ultrafast`, `ultracode`, or `ultrasave`. Selecting a mode replaces the previous one. UltraFast prioritizes direct execution and parallel independent tasks; its child agents execute locally. UltraCode retains its existing decomposition policy. UltraSave prioritizes token economy. All modes preserve explicit model and effort choices and required verification.
+Each session has one execution mode choice: `auto` (default), `normal`, `ultrafast`, `ultracode`, or `ultrasave`. `auto` balances quality, time and cost by letting Jev pick the effective mode per request and reconsider after each action when the benefit outweighs switching cost; the shell sends `x.ai/session/execution_mode/changed` (`{sessionId, mode, choice: "auto", reason}`) for each pick or switch. Selecting a fixed choice replaces the previous one. UltraFast prioritizes fast interactive actions and useful independent parallel work. UltraCode prioritizes care, refactoring and complex logic with optional delegation. UltraSave prioritizes cost and token economy. All modes preserve model and effort pins, permissions and required verification.
 
 Send `x.ai/session/execution_mode/set` (on the JSON-RPC wire, `_x.ai/session/execution_mode/set`):
 
 ```json
-{ "sessionId": "…", "mode": "ultrafast" }
+{ "sessionId": "…", "mode": "ultrafast", "operation": "set" }
 ```
 
-The response confirms the effective mode:
+The response confirms the effective mode and the choice:
 
 ```json
-{ "mode": "ultrafast" }
+{ "mode": "ultrafast", "choice": "ultrafast" }
 ```
 
-The mode is saved with the session and restored when it loads. Session creation and load responses expose `executionMode` in `_meta`. It is not a global `config.toml` setting. Only the root session can change it; child agents share that selection. An unknown `sessionId` returns a resource-not-found error.
+The choice is saved with the session and restored when it loads. Session creation and load responses expose `executionMode` (effective) and `executionModeChoice` in `_meta`. A missing `executionModeChoice` means a fixed mode from an older shell. It is not a global `config.toml` setting. Only the root session can change the user's choice; all child agents inherit it live. In Auto, each child adapts its effective mode independently while retaining its delegation and capability limits. An unknown `sessionId` returns a resource-not-found error.
 
 The legacy `x.ai/session/ultracode/set` endpoint remains supported. `{ "sessionId": "…", "enabled": true }` selects UltraCode; `false` returns an active UltraCode session to Normal and leaves other modes unchanged. Omitting `enabled` toggles UltraCode. Its response remains `{ "enabled": true }` or `{ "enabled": false }`.
 

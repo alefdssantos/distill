@@ -177,6 +177,14 @@ def distill_accounting(home, session, *, strict=False, zero_usage_attempts=froze
         attempts = {sid: {row['attempt_id']: row for row in ledger.get('attributions', [])}
                     for sid, ledger in ledgers.items()}
         canonical = attempts.get(session, {})
+        jev_log = home / 'logs/jev.jsonl'
+        if jev_log.is_file():
+            observed = {row['fields']['request_id'] for row in read(jev_log, lines=True)
+                        if row.get('fields', {}).get('event_kind') == 'decision'
+                        and row['fields'].get('request_id')}
+            recorded = {row['request_id'] for row in canonical.values() if row.get('request_id')}
+            if missing := observed - recorded:
+                reasons.append(f'Observed Jev request IDs absent from ledger: {sorted(missing)}')
         logged_sessions = {row.get('sid') for row in logs
                            if str(row.get('msg', '')).startswith('shell.turn.inference_') and row.get('sid')}
         for sid in sorted(logged_sessions - directories.keys()):

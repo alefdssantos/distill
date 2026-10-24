@@ -1,7 +1,7 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
 //! Exclusive session execution mode; the old UltraCode endpoint remains an alias.
 use agent_client_protocol as acp;
-use distill_tool_types::{ExecutionMode, ExecutionModeOperation};
+use distill_tool_types::{ExecutionMode, ExecutionModeChoice, ExecutionModeOperation};
 use serde::{Deserialize, Serialize};
 
 use super::{ExtResult, parse_params, to_raw_response};
@@ -14,7 +14,7 @@ pub const MODE_SET_METHOD: &str = "x.ai/session/execution_mode/set";
 #[serde(rename_all = "camelCase")]
 struct SetModeRequest {
     session_id: String,
-    mode: ExecutionMode,
+    mode: ExecutionModeChoice,
     #[serde(default)]
     operation: ExecutionModeOperation,
 }
@@ -26,9 +26,12 @@ struct SetSessionUltracodeRequest {
     enabled: Option<bool>,
 }
 
+/// `mode` is the effective mode; `choice` is absent in files written before Auto.
 #[derive(Serialize, Deserialize)]
 struct ModeState {
     mode: ExecutionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    choice: Option<ExecutionModeChoice>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -65,33 +68,43 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             .data("Execution mode can only be changed on the root session"));
     }
     let current = handle.execution_mode.load();
-    let mode = match requested_mode {
+    let current_choice = handle.execution_mode.choice();
+    let choice = match requested_mode {
         Some((target, operation)) => match operation {
             ExecutionModeOperation::Set => target,
-            ExecutionModeOperation::Toggle if current != target => target,
+            ExecutionModeOperation::Toggle if current_choice != target => target,
             ExecutionModeOperation::Toggle | ExecutionModeOperation::Disable
-                if current == target =>
+                if current_choice == target =>
             {
-                ExecutionMode::Normal
+                ExecutionModeChoice::Auto
             }
-            _ => current,
+            _ => current_choice,
         },
         None => {
             if enabled.unwrap_or(current != ExecutionMode::Ultracode) {
-                ExecutionMode::Ultracode
+                ExecutionModeChoice::Ultracode
             } else if current == ExecutionMode::Ultracode {
-                ExecutionMode::Normal
+                ExecutionModeChoice::Normal
             } else {
-                current
+                current_choice
             }
         }
     };
+    // Auto keeps the mode it last picked until its next decision.
+    let mode = choice.fixed().unwrap_or(current);
     // Persist before acknowledging. There is no await between read and commit.
-    persist_mode(&handle.info, mode)
+    persist_mode(&handle.info, choice, mode)
         .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
-    handle.execution_mode.store(mode);
+    if choice == ExecutionModeChoice::Auto {
+        handle.execution_mode.store_auto(mode);
+    } else {
+        handle.execution_mode.store(mode);
+    }
     if requested_mode.is_some() {
-        to_raw_response(&ModeState { mode })
+        to_raw_response(&ModeState {
+            mode,
+            choice: Some(choice),
+        })
     } else {
         to_raw_response(&SetSessionUltracodeResponse {
             enabled: mode == ExecutionMode::Ultracode,
@@ -99,26 +112,43 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-pub(crate) fn load_mode(info: &crate::session::info::Info) -> std::io::Result<ExecutionMode> {
+/// Stores a loaded selection into the session's shared mode.
+pub(crate) fn apply_mode(
+    target: &distill_tool_types::AtomicExecutionMode,
+    (choice, mode): (ExecutionModeChoice, ExecutionMode),
+) {
+    if choice == ExecutionModeChoice::Auto {
+        target.store_auto(mode);
+    } else {
+        target.store(mode);
+    }
+}
+
+/// The saved selection and effective mode. Sessions without a saved
+/// selection start in Auto.
+pub(crate) fn load_mode(
+    info: &crate::session::info::Info,
+) -> std::io::Result<(ExecutionModeChoice, ExecutionMode)> {
     let dir = crate::session::persistence::session_dir(info);
+    let invalid = |error| std::io::Error::new(std::io::ErrorKind::InvalidData, error);
     match std::fs::read(dir.join("execution_mode.json")) {
         Ok(bytes) => serde_json::from_slice::<ModeState>(&bytes)
-            .map(|state| state.mode)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+            .map(|state| (state.choice.unwrap_or(state.mode.into()), state.mode))
+            .map_err(invalid),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // Sessions saved before exclusive modes keep their existing selection.
+            // Sessions saved before exclusive modes keep an explicit UltraCode.
             match std::fs::read(dir.join("ultracode.json")) {
                 Ok(bytes) => serde_json::from_slice::<SetSessionUltracodeResponse>(&bytes)
                     .map(|state| {
                         if state.enabled {
-                            ExecutionMode::Ultracode
+                            (ExecutionModeChoice::Ultracode, ExecutionMode::Ultracode)
                         } else {
-                            ExecutionMode::Normal
+                            (ExecutionModeChoice::Auto, ExecutionMode::Normal)
                         }
                     })
-                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+                    .map_err(invalid),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(ExecutionMode::Normal)
+                    Ok((ExecutionModeChoice::Auto, ExecutionMode::Normal))
                 }
                 Err(error) => Err(error),
             }
@@ -129,10 +159,14 @@ pub(crate) fn load_mode(info: &crate::session::info::Info) -> std::io::Result<Ex
 
 pub(crate) fn persist_mode(
     info: &crate::session::info::Info,
+    choice: ExecutionModeChoice,
     mode: ExecutionMode,
 ) -> std::io::Result<()> {
     let dir = crate::session::persistence::ensure_owner_only_session_dir(info)?;
-    let bytes = serde_json::to_vec(&ModeState { mode })
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let bytes = serde_json::to_vec(&ModeState {
+        mode,
+        choice: Some(choice),
+    })
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     crate::session::storage::write_bytes_atomic(&dir.join("execution_mode.json"), &bytes)
 }

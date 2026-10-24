@@ -81,6 +81,34 @@ async fn model_switch_relabels_live_agent_and_system_head() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_later_explicit_pick_supersedes_a_deferred_model_switch() {
+    tokio::task::LocalSet::new().run_until(async {
+        let (actor, _gateway_rx) = build_actor().await;
+        let switch = |model: &str| crate::session::SessionModelSwitch {
+            rebuild_definition: None,
+            sampling_config: distill_sampler::SamplerConfig {
+                model: model.to_owned(),
+                ..distill_sampler::SamplerConfig::default()
+            },
+            canonical_model_id: None,
+            model_selection_intent: true,
+            use_concise: false,
+            is_family_switch: false,
+            apply_prompt_override: false,
+            skip_prompt_rewrite: true,
+            auto_compact_threshold_percent: 85,
+            system_prompt_label: distill_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_owned(),
+        };
+        actor.state.lock().await.running_task = Some(running_task_stub("running"));
+        actor.jev_ledger.borrow_mut().deferred_model_switch.0 = Some(switch("old-pick"));
+        actor.handle_set_session_model(switch("latest-pick")).await.unwrap();
+        actor.state.lock().await.running_task = None;
+        actor.apply_deferred_model_switch().await.unwrap();
+        assert_eq!(actor.chat_state_handle.get_sampling_config().await.unwrap().model, "latest-pick");
+    }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn effort_only_model_switch_does_not_create_child_model_pin() {
     tokio::task::LocalSet::new()
         .run_until(async {

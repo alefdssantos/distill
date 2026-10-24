@@ -2398,8 +2398,8 @@ mod tests {
         let snapshot = state.snapshot();
         assert!(snapshot.active, "mid-text slash under cursor is active");
         if let Some(ref ghost) = snapshot.inline_ghost {
-            assert_eq!(ghost.full_name, "model");
-            assert_eq!(ghost.text, "el");
+            assert_eq!(ghost.full_name, "mode");
+            assert_eq!(ghost.text, "e");
             assert_eq!(ghost.token_range, 3..7);
         } else {
             panic!("expected inline ghost for partial /mod");
@@ -3093,8 +3093,8 @@ mod tests {
             .inline_ghost
             .as_ref()
             .expect("expected ghost for /mod on line 2");
-        assert_eq!(ghost.full_name, "model");
-        assert_eq!(ghost.text, "el");
+        assert_eq!(ghost.full_name, "mode");
+        assert_eq!(ghost.text, "e");
         assert_eq!(ghost.token_range, 6..10);
     }
 

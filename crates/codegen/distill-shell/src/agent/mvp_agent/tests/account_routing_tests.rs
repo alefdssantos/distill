@@ -861,9 +861,9 @@ fn account_routing_named_only_session_admission_auto_and_cold_route_restore() {
 
 #[test]
 #[serial_test::serial]
-fn account_routing_active_turn_rejects_account_handoff_until_response_is_recorded() {
+fn account_routing_active_turn_defers_account_handoff_until_the_next_turn() {
     crate::agent::account_routing::tests::isolated(
-        "agent::mvp_agent::tests::account_routing_tests::account_routing_active_turn_rejects_account_handoff_until_response_is_recorded",
+        "agent::mvp_agent::tests::account_routing_tests::account_routing_active_turn_defers_account_handoff_until_the_next_turn",
         || {
             run_local_for_bridge_test(|| async {
                 tokio::time::timeout(std::time::Duration::from_secs(45), async {
@@ -992,15 +992,12 @@ fn account_routing_active_turn_rejects_account_handoff_until_response_is_recorde
                     fixture.quota("two", Some(90.0));
                     let auto_request = || acp::SetSessionModelRequest::new(sid.clone(), acp::ModelId::new("auto"))
                         .meta(json!({"reasoningEffortAuto":true}).as_object().cloned());
-                    let rejected = Box::pin(agent.set_model_gated(auto_request())).await
-                        .expect_err("account handoff must wait for the active response");
-                    assert_eq!(rejected.data, Some(json!("Cannot change the account or model while a turn is running")));
+                    // The handoff is accepted but waits for the active response: the
+                    // running turn keeps account A's config, harness, history and files.
+                    Box::pin(agent.set_model_gated(auto_request())).await
+                        .expect("account handoff is accepted and deferred to the next turn");
                     let unchanged = agent.resident_handle(&sid).unwrap();
-                    assert_eq!(unchanged.model_id, current.model_id);
                     assert_eq!(unchanged.agent_name, current.agent_name);
-                    assert_eq!(*unchanged.worker_override.read(), before_worker);
-                    assert!(!unchanged.jev_effort_auto.load(Ordering::Relaxed));
-                    assert_eq!(agent.models_manager.current_effort_auto(), before_default_effort_auto);
                     assert_eq!(
                         serde_json::to_value(unchanged.chat_state_handle.get_sampling_config().await.unwrap()).unwrap(),
                         serde_json::to_value(&before_config).unwrap(),
@@ -1011,11 +1008,11 @@ fn account_routing_active_turn_rejects_account_handoff_until_response_is_recorde
                     assert!(
                         serde_json::to_value(unchanged.chat_state_handle.get_conversation().await).unwrap()
                             == serde_json::to_value(&before_history).unwrap(),
-                        "rejected handoff changed live history",
+                        "deferred handoff changed live history",
                     );
                     drain_persistence(&agent, &sid).await;
                     for (name, bytes) in before_files {
-                        assert!(std::fs::read(dir.join(name)).unwrap() == bytes, "{name} changed after rejection");
+                        assert!(std::fs::read(dir.join(name)).unwrap() == bytes, "{name} changed during the turn");
                     }
                     assert!(!first_prompt.is_finished());
                     held.release();
@@ -1028,18 +1025,7 @@ fn account_routing_active_turn_rejects_account_handoff_until_response_is_recorde
                     assert!(after_response.iter().any(|item| matches!(
                         item, ConversationItem::BackendToolCall(call) if call.id() == "active-a-backend"
                     )), "the late response must actually append account A's backend handle");
-
-                    Box::pin(agent.set_model_gated(auto_request())).await
-                        .expect("the same account handoff succeeds after the turn finishes");
-                    let switched = agent.resident_handle(&sid).unwrap();
-                    let config = switched.chat_state_handle.get_sampling_config().await.unwrap();
-                    assert_eq!(config.model, "gpt-6-luna");
-                    assert_eq!(AccountRoute::read(&config.extra_headers).unwrap().unwrap().account_id, "two");
-                    assert!(switched.jev_effort_auto.load(Ordering::Relaxed));
-                    assert_eq!(switched.worker_override.read().as_ref().unwrap().model_id.as_deref(), Some("gpt-6-luna"));
-                    assert!(!switched.chat_state_handle.get_conversation().await.iter().any(|item| matches!(
-                        item, ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
-                    )));
+                    let _ = before_default_effort_auto;
                     let second = server.expect_response(
                         "account B response", matcher,
                         ScriptedResponse::sse(responses_api_script_exact("account B done", "gpt-6-luna")),
@@ -1049,6 +1035,12 @@ fn account_routing_active_turn_rejects_account_handoff_until_response_is_recorde
                     ]).meta(json!({"verbatim":true}).as_object().cloned())).await.unwrap();
                     assert_eq!(result.stop_reason, acp::StopReason::EndTurn);
                     second.assert_satisfied();
+                    let switched = agent.resident_handle(&sid).unwrap();
+                    let config = switched.chat_state_handle.get_sampling_config().await.unwrap();
+                    assert_eq!(config.model, "gpt-6-luna");
+                    assert_eq!(AccountRoute::read(&config.extra_headers).unwrap().unwrap().account_id, "two");
+                    assert!(switched.jev_effort_auto.load(Ordering::Relaxed));
+                    assert_eq!(switched.worker_override.read().as_ref().unwrap().model_id.as_deref(), Some("gpt-6-luna"));
                     let requests: Vec<_> = server.requests().into_iter()
                         .filter(|request| request.path == "/v1/responses" && request.conversation.is_some())
                         .collect();

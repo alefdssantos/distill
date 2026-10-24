@@ -90,8 +90,8 @@ pub struct HeadlessOptions {
     pub permission_mode_flag: Option<String>,
     /// Effort token (`--reasoning-effort` / `--effort`); resolved like `/effort` after models load.
     pub reasoning_effort: Option<String>,
-    /// Explicitly enable the real session mode before sending the prompt.
-    pub execution_mode: distill_tool_types::ExecutionMode,
+    /// Execution mode choice to activate before the prompt; `None` keeps the session's saved choice.
+    pub execution_mode: Option<distill_tool_types::ExecutionModeChoice>,
     /// Wait for background tasks to report `task_completed` before exiting (default true).
     pub wait_for_background: bool,
     /// Max time to wait for background work to finish after the first turn ends.
@@ -835,14 +835,15 @@ fn headless_materialize_ctx(
 async fn send_headless_prompt(
     acp_tx: &AcpAgentTx,
     request: acp::PromptRequest,
-    mode: distill_tool_types::ExecutionMode,
+    choice: Option<distill_tool_types::ExecutionModeChoice>,
 ) -> distill_acp_lib::AcpResult<acp::PromptResponse> {
-    if mode != distill_tool_types::ExecutionMode::Normal {
+    if let Some(choice) = choice {
+        let label = choice.label();
         let params = serde_json::value::to_raw_value(&serde_json::json!({
             "sessionId": request.session_id.0.as_ref(),
-            "mode": mode,
+            "mode": choice,
         }))
-        .map_err(|e| distill_acp_lib::acp_internal_error(format!("{} activation: {e}", mode.label())))?;
+        .map_err(|e| distill_acp_lib::acp_internal_error(format!("{label} activation: {e}")))?;
         let response: acp::ExtResponse = acp_send(
             acp::ExtRequest::new(
                 "x.ai/session/execution_mode/set",
@@ -852,16 +853,17 @@ async fn send_headless_prompt(
         )
         .await?;
         let response: serde_json::Value = serde_json::from_str(response.0.get()).map_err(|e| {
-            distill_acp_lib::acp_internal_error(format!("{} activation: {e}", mode.label()))
+            distill_acp_lib::acp_internal_error(format!("{label} activation: {e}"))
         })?;
-        if response.get("mode") != Some(&serde_json::json!(mode)) {
+        let confirmed = response.get("choice").or_else(|| response.get("mode"));
+        if confirmed != Some(&serde_json::json!(choice)) {
             return Err(distill_acp_lib::acp_internal_error(
-                format!("{} activation did not confirm the requested mode", mode.label()),
+                format!("{label} activation did not confirm the requested mode"),
             ));
         }
         eprint_line(&format!(
-            "{} enabled for session {}",
-            mode.label(), request.session_id.0
+            "{label} enabled for session {}",
+            request.session_id.0
         ));
     }
     acp_send(request, acp_tx).await

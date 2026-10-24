@@ -40,6 +40,7 @@ pub(crate) fn execution_mode_tool_definitions(
             let name = def.function.name.as_str();
             EXECUTION_MODE_TOOLS.contains(&name)
                 || name == "spawn_subagent"
+                || crate::session::mcp_servers::parse_mcp_tool_name(name).is_some()
         })
         .collect()
 }
@@ -1339,8 +1340,9 @@ impl SessionActor {
         let models = self.models_manager.models();
         // A tier-routed round runs on another of the user's models by Jev's choice;
         // account Auto must not claim it or persist its config as the session's.
+        let tier_routed = self.jev_ledger.borrow().tier_route_active;
         let auto_allowed = (!self.startup_hints.is_subagent || !self.model_routing_locked.get())
-            && !self.jev_ledger.borrow().tier_route_active
+            && !tier_routed
             && !sampler_config
                 .extra_headers
                 .contains_key("x-distill-account-unavailable");
@@ -1367,7 +1369,7 @@ impl SessionActor {
                     {
                         Ok(config) => {
                             sampler_config = config;
-                            if self.persist_account_config(&sampler_config).await.is_err() {
+                            if !tier_routed && self.persist_account_config(&sampler_config).await.is_err() {
                                 crate::agent::account_routing::block_credentials(
                                     &mut sampler_config,
                                 );

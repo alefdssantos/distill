@@ -88,6 +88,7 @@ pub fn flags_from_tiers(cfg: &JevConfig, env_enabled: Option<bool>) -> JevFlags 
             d6_history_eviction: cfg.ladder.d6_history_eviction,
             d6_warm_batches: cfg.ladder.d6_warm_batches,
             b7_subagent_model: cfg.ladder.b7_subagent_model,
+            b8_execution_mode: cfg.ladder.b8_execution_mode,
         },
     )
 }

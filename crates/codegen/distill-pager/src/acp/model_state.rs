@@ -130,6 +130,8 @@ pub struct ModelState {
     pub effort_auto: bool,
     /// The session's exclusive mode, shown in the prompt footer and Models screen.
     pub execution_mode: distill_tool_types::ExecutionMode,
+    /// The user's selection: Auto (Jev picks `execution_mode`) or a fixed mode.
+    pub execution_mode_choice: distill_tool_types::ExecutionModeChoice,
     /// The `(main, worker)` models Auto routing chose for this session; `None`
     /// when the selected Main and Worker run as configured.
     pub auto_route: Option<(acp::ModelId, acp::ModelId)>,
@@ -485,6 +487,7 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     // explicit level (`/effort <level>`, `--effort`) clears it.
                     effort_auto: distill_shell::jev::effort_auto_cached(),
                     execution_mode: distill_tool_types::ExecutionMode::Normal,
+                    execution_mode_choice: distill_tool_types::ExecutionModeChoice::Auto,
                     auto_route,
                     context_window_override: None,
                 }

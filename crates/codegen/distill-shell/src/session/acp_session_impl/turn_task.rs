@@ -503,7 +503,11 @@ async fn run_task(
             tool_overrides: None,
         })
     } else {
-        session.handle_turn_input(request).await
+        // A model picked while the previous turn ran takes effect now.
+        match session.apply_deferred_model_switch().await {
+            Ok(()) => session.handle_turn_input(request).await,
+            Err(error) => Err(error),
+        }
     };
     let elapsed_ms = elapsed_ms_saturating(started_at, std::time::Instant::now());
     let _ = completion_tx.send(TurnCompletionMsg {

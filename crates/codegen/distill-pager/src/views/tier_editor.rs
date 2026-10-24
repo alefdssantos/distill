@@ -63,7 +63,7 @@ pub enum TierEditorOutcome {
         main: String,
         worker: String,
         utility: String,
-        execution_mode: distill_tool_types::ExecutionMode,
+        execution_mode: distill_tool_types::ExecutionModeChoice,
     },
     Cancelled,
     Changed,
@@ -157,7 +157,7 @@ impl AutoSummary {
     }
 }
 
-type Submission = (String, String, String, distill_tool_types::ExecutionMode);
+type Submission = (String, String, String, distill_tool_types::ExecutionModeChoice);
 
 #[derive(Debug)]
 pub struct TierEditorState {
@@ -168,7 +168,7 @@ pub struct TierEditorState {
     pub worker: Option<String>,
     pub worker_effort: Option<ReasoningEffort>,
     pub utility: LineEditor,
-    pub execution_mode: distill_tool_types::ExecutionMode,
+    pub execution_mode: distill_tool_types::ExecutionModeChoice,
     pub auto: AutoSummary,
     pub auto_pending: bool,
     /// Display names of the pair Auto chose for this session.
@@ -232,7 +232,7 @@ impl TierEditorState {
             worker: models.worker_model.as_ref().map(|id| id.0.to_string()),
             worker_effort: models.worker_effort,
             utility: LineEditor::default(),
-            execution_mode: models.execution_mode,
+            execution_mode: models.execution_mode_choice,
             auto,
             auto_pending: false,
             routed: models
@@ -443,11 +443,13 @@ impl TierEditorState {
                 TierEditorOutcome::Changed
             }
             HOME_EXECUTION_MODE => {
+                use distill_tool_types::ExecutionModeChoice as C;
                 self.execution_mode = match self.execution_mode {
-                    distill_tool_types::ExecutionMode::Normal => distill_tool_types::ExecutionMode::Ultrafast,
-                    distill_tool_types::ExecutionMode::Ultrafast => distill_tool_types::ExecutionMode::Ultracode,
-                    distill_tool_types::ExecutionMode::Ultracode => distill_tool_types::ExecutionMode::Ultrasave,
-                    distill_tool_types::ExecutionMode::Ultrasave => distill_tool_types::ExecutionMode::Normal,
+                    C::Auto => C::Normal,
+                    C::Normal => C::Ultrafast,
+                    C::Ultrafast => C::Ultracode,
+                    C::Ultracode => C::Ultrasave,
+                    C::Ultrasave => C::Auto,
                 };
                 TierEditorOutcome::Changed
             }
@@ -1522,28 +1524,34 @@ mod tests {
                 main: "claude/claude-opus-5-5 high".into(),
                 worker: "chatgpt/gpt-6-luna medium".into(),
                 utility: String::new(),
-                execution_mode: distill_tool_types::ExecutionMode::Normal,
+                execution_mode: distill_tool_types::ExecutionModeChoice::Auto,
             }
         );
     }
 
     #[test]
     fn execution_mode_cycles_exclusively_and_saves_the_selected_mode() {
-        use distill_tool_types::ExecutionMode;
+        use distill_tool_types::ExecutionModeChoice as Choice;
         let mut state = editor(routes(false, 0));
         state.selected = super::HOME_EXECUTION_MODE;
-        for expected in [ExecutionMode::Ultrafast, ExecutionMode::Ultracode, ExecutionMode::Ultrasave, ExecutionMode::Normal] {
+        for expected in [
+            Choice::Normal,
+            Choice::Ultrafast,
+            Choice::Ultracode,
+            Choice::Ultrasave,
+            Choice::Auto,
+        ] {
             assert_eq!(state.handle_key(&key(KeyCode::Enter)), TierEditorOutcome::Changed);
             assert_eq!(state.execution_mode, expected);
         }
-        assert!(!state.dirty(), "returning to Normal restores the initial selection");
-        state.handle_key(&key(KeyCode::Enter));
-        state.handle_key(&key(KeyCode::Enter));
-        state.handle_key(&key(KeyCode::Enter));
+        assert!(!state.dirty(), "cycling back to Auto restores the initial selection");
+        for _ in 0..4 {
+            state.handle_key(&key(KeyCode::Enter));
+        }
         let outcome = state.handle_key(&key(KeyCode::Char('s')));
         assert!(matches!(
             outcome,
-            TierEditorOutcome::Submitted { execution_mode: ExecutionMode::Ultrasave, .. }
+            TierEditorOutcome::Submitted { execution_mode: Choice::Ultrasave, .. }
         ));
     }
 
@@ -1622,7 +1630,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::render_tier_editor_overlay(&mut buf, area, &mut window, &mut state, false, &theme);
         let text: String = buf.content().iter().map(|cell| cell.symbol()).collect();
-        for expected in ["Auto routing is on", "Accounts & routes", "+2 more", "Execution", "Normal"] {
+        for expected in ["Auto routing is on", "Accounts & routes", "+2 more", "Execution", "Auto"] {
             assert!(text.contains(expected), "missing {expected}");
         }
         assert_eq!(state.hit_rows.len(), super::HOME_ROWS);

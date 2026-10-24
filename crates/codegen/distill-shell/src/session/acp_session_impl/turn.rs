@@ -544,7 +544,13 @@ impl SessionActor {
         if let Some(ref tp) = request.traceparent {
             distill_otel::link_span_to_meta(&span, &serde_json::json!({ "traceparent": tp }));
         }
-        self.handle_turn_input_inner(request).instrument(span).await
+        // Routing during prompt preparation is billable before sampling starts.
+        crate::jev::with_session_scope_and_recorder(
+            self.session_info.id.0.to_string(),
+            Some(self.chat_state_handle.clone()),
+            self.handle_turn_input_inner(request).instrument(span),
+        )
+        .await
     }
     async fn handle_turn_input_inner(
         self: &Arc<Self>,
@@ -1177,6 +1183,16 @@ impl SessionActor {
             self.maybe_inject_mcp_reminder().await;
             self.maybe_inject_date_rollover_reminder().await;
             self.inject_plan_mode_reminders().await;
+            // A scheduled prompt is a new request too.
+            if policy.authority.is_human_intent()
+                || self.startup_hints.is_subagent
+                || matches!(
+                    input_origin.as_prompt_origin(),
+                    super::super::PromptOrigin::SchedulerFired
+                )
+            {
+                self.jev_auto_pick_mode(&user_message).await;
+            }
             self.inject_execution_mode_reminder();
             self.inject_fork_reminder().await;
             self.inject_resumed_tasks_reminder();
@@ -2618,7 +2634,7 @@ impl SessionActor {
         salvage: &mut super::length_salvage::LengthSalvage,
         turn_sampling: &mut TurnSampling,
     ) -> Result<TurnOutcome, acp::Error> {
-        let result = crate::jev::with_session_scope_and_recorder(
+        let result = crate::jev::with_recorder_unless_scoped(
             self.session_info.id.0.to_string(),
             Some(self.chat_state_handle.clone()),
             self.process_conversation_turn_inner(
@@ -2719,7 +2735,8 @@ impl SessionActor {
         }
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
-        let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
+        let mut prepared_execution_mode = self.execution_mode.load();
+        let (mut tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         self.maybe_inject_mcp_connecting_reminder().await;
         self.maybe_inject_mcp_reminder().await;
@@ -2802,6 +2819,24 @@ impl SessionActor {
             );
         }
         loop {
+            // Auto and explicit /mode changes take effect before the next
+            // action, including in children already running when the user switches.
+            let execution_mode = self.execution_mode.load();
+            if execution_mode != prepared_execution_mode {
+                self.inject_execution_mode_reminder();
+                let next_tools = self.prepare_tool_definitions_timed().await.0;
+                let same_tools = tool_definitions.len() == next_tools.len()
+                    && tool_definitions.iter().zip(&next_tools).all(|(before, after)| {
+                        before.function.name == after.function.name
+                            && before.function.description == after.function.description
+                            && before.function.parameters == after.function.parameters
+                    });
+                if !same_tools {
+                    self.jev_ledger.borrow_mut().invalidate_cached_prompt();
+                }
+                tool_definitions = next_tools;
+                prepared_execution_mode = execution_mode;
+            }
             // A long tool loop must not postpone progress evaluation until delivery.
             // Only completed tool rounds count; retries do not buy extra checkpoints.
             if tool_turn_count.saturating_sub(last_progress_checkpoint) >= 24
@@ -3989,6 +4024,11 @@ impl SessionActor {
                 return Ok(TurnOutcome::MaxTurnsReached { limit });
             }
             tool_turn_count = next_turn;
+            if self.execution_mode.is_auto()
+                && let Some(request) = self.jev_last_human_request().await
+            {
+                self.jev_auto_review_mode(&request, tool_turn_count - 1).await;
+            }
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_preflight_overflow().await
             {

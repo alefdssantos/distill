@@ -167,6 +167,28 @@ pub(crate) fn execute(
                 TaskResult::AutoRoutingSet { result }
             });
         }
+        Effect::DisableAutoRouting => {
+            tasks.spawn(async {
+                let disabled = tokio::task::spawn_blocking(|| {
+                    let store = distill_shell::accounts::AccountStore::default();
+                    let mut routing = store.load_routing().ok()?;
+                    if !routing.enabled {
+                        return None;
+                    }
+                    routing.enabled = false;
+                    store.save_routing(&routing).ok()
+                })
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+                if disabled {
+                    TaskResult::AutoRoutingDisabledByPick
+                } else {
+                    TaskResult::CancelComplete
+                }
+            });
+        }
         Effect::Accounts(task) => {
             let model_tx = acp_tx.clone();
             let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2130,8 +2152,15 @@ pub(crate) fn execute(
                 let result = match acp_send(request, &tx).await {
                     Ok(resp) => serde_json::from_str::<serde_json::Value>(resp.0.get())
                         .ok()
-                        .and_then(|v| v.get("mode").cloned())
-                        .and_then(|v| serde_json::from_value(v).ok())
+                        .and_then(|v| {
+                            let mode: distill_tool_types::ExecutionMode =
+                                serde_json::from_value(v.get("mode")?.clone()).ok()?;
+                            let choice = match v.get("choice") {
+                                Some(choice) => serde_json::from_value(choice.clone()).ok()?,
+                                None => mode.into(),
+                            };
+                            Some((mode, choice))
+                        })
                         .ok_or_else(|| "unexpected response from agent".to_owned()),
                     Err(e) => Err(sanitize_user_error(&e.to_string())),
                 };

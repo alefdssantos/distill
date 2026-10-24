@@ -2415,6 +2415,7 @@ mod reconnect;
 mod turn_completion;
 mod hooks;
 mod interjection;
+mod execution_mode;
 mod session_routing;
 mod plugins;
 mod subagents;

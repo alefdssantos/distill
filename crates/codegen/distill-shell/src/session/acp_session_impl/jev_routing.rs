@@ -284,7 +284,7 @@ impl SessionActor {
         let Some(route) = self
             .jev_ledger
             .borrow()
-            .kept_turn_route(self.current_turn_number.get(), &cfg.model, reuse_small_prompt)
+            .kept_turn_route(self.current_turn_number.get(), &cfg.model, reuse_small_prompt, self.execution_mode.load())
         else {
             return false;
         };
@@ -314,6 +314,7 @@ impl SessionActor {
                 model: cfg.model.clone(),
                 effort: cfg.reasoning_effort,
             },
+            self.execution_mode.load(),
         );
     }
 
@@ -1240,7 +1241,7 @@ pub(super) struct MicroAction {
 }
 
 impl MicroAction {
-    fn as_json(&self) -> serde_json::Value {
+    pub(super) fn as_json(&self) -> serde_json::Value {
         serde_json::json!({
             "step": self.step,
             "what_it_must_do": self.plan,
@@ -1255,6 +1256,7 @@ pub(super) fn describe_micro_action(
     conversation: &[ConversationItem],
     facts: &super::turn_facts::TurnFacts,
 ) -> MicroAction {
+    use distill_chat_state::compaction_utils::is_real_user_turn;
     let mut action = MicroAction {
         step: "first_step",
         ..Default::default()
@@ -1268,21 +1270,36 @@ pub(super) fn describe_micro_action(
                     call_names.insert(call.id.to_string(), call.name.clone());
                 }
             }
-            ConversationItem::User(_) => break,
+            ConversationItem::User(_) if is_real_user_turn(item) => break,
             _ => {}
         }
     }
     let mut saw_result = false;
+    let mut saw_calls = false;
     for item in conversation.iter().rev().take(RECENT_ITEMS) {
         match item {
             ConversationItem::ToolResult(result) => {
+                if saw_calls {
+                    break;
+                }
                 saw_result = true;
                 if action.last_results.len() < MAX_STEP_RESULTS {
                     let tool = call_names
                         .get(&result.tool_call_id)
                         .map(String::as_str)
                         .unwrap_or("tool");
-                    let excerpt = first_line(&result.content, STEP_EXCERPT_CHARS);
+                    // Terminal output often starts with only `exit: 0`; keep
+                    // the outcome at the end as well, within the same bound.
+                    let normalized = result
+                        .content
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let excerpt = distill_compaction::history::truncate_middle(
+                        &normalized,
+                        STEP_EXCERPT_CHARS,
+                    )
+                    .unwrap_or(normalized);
                     let kind = match facts.tool_failed(&result.tool_call_id) {
                         Some(true) => "failure",
                         Some(false) => "success",
@@ -1295,6 +1312,9 @@ pub(super) fn describe_micro_action(
                 }
             }
             ConversationItem::Assistant(assistant) => {
+                if saw_calls && !assistant.tool_calls.is_empty() {
+                    break;
+                }
                 for call in &assistant.tool_calls {
                     if action.last_calls.len() < MAX_STEP_CALLS {
                         let intent = first_line(&call.arguments, STEP_EXCERPT_CHARS);
@@ -1307,8 +1327,9 @@ pub(super) fn describe_micro_action(
                         action.plan = first_line(text, STEP_PLAN_CHARS);
                     }
                 }
+                saw_calls |= !assistant.tool_calls.is_empty();
             }
-            ConversationItem::User(_) => break,
+            ConversationItem::User(_) if is_real_user_turn(item) => break,
             _ => {}
         }
     }
@@ -1570,6 +1591,10 @@ mod tests {
                 assert_eq!(cfg.reasoning_effort, Some(ReasoningEffort::High));
                 actor.jev_anchor_turn_effort("main", &cfg);
                 assert!(actor.jev_keep_turn_effort(&mut cfg).await, "a failure is reconsidered only once");
+                actor.execution_mode.store(distill_tool_types::ExecutionMode::Ultracode);
+                actor.jev_ledger.borrow_mut().note_round("main", Some("high".into()));
+                actor.jev_ledger.borrow_mut().add_usage(80_000, 10);
+                assert!(!actor.jev_keep_turn_effort(&mut cfg).await, "a mode switch must release the old model and effort even with a large cache");
             }
         }).await;
         crate::jev::clear_test_flags();
@@ -1863,7 +1888,7 @@ mod tests {
             ]),
             ConversationItem::tool_result(
                 "call-1",
-                "error[E0308]: mismatched types --> src/components/Board.tsx:12",
+                "exit: 1\nerror[E0308]: mismatched types --> src/components/Board.tsx:12",
             ),
         ];
         let mut facts = super::super::turn_facts::TurnFacts::default();
@@ -1886,6 +1911,29 @@ mod tests {
             action.plan, "",
             "no assistant text yet: the plan stays empty rather than invented"
         );
+        let mut with_reminder = turns.clone();
+        with_reminder.push(ConversationItem::user("<system-reminder>Current execution mode is UltraCode.</system-reminder>"));
+        assert_eq!(describe_micro_action(&with_reminder, &facts), action,
+            "a mode reminder must not hide the action and its failure from the next decision");
+
+        let mut later_step = with_reminder;
+        later_step.push(ConversationItem::assistant("Run the focused check after fixing the type error."));
+        later_step.push(ConversationItem::assistant_tool_calls(vec![
+            distill_sampling_types::conversation::ToolCall {
+                id: std::sync::Arc::from("call-2"),
+                name: "run_terminal_command".to_owned(),
+                arguments: std::sync::Arc::from("{\"command\":\"npm test\"}"),
+            },
+        ]));
+        later_step.push(ConversationItem::tool_result("call-2", "exit: 0\n12 tests passed"));
+        facts.note_tool_result("call-2", &succeeded());
+        let latest = describe_micro_action(&later_step, &facts);
+        assert_eq!(latest.last_calls.len(), 1, "old implementation work is not the current step");
+        assert!(latest.last_calls[0].starts_with("run_terminal_command"));
+        assert_eq!(latest.last_results.len(), 1);
+        assert!(latest.last_results[0].starts_with("run_terminal_command: success"));
+        assert!(latest.last_results[0].contains("12 tests passed"));
+        assert_eq!(latest.plan, "Run the focused check after fixing the type error.");
 
         // A fresh request has no step on the board.
         let fresh = describe_micro_action(&[ConversationItem::user("faça x")], &Default::default());

@@ -3,9 +3,28 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use distill_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
+    /// Applies a model switch deferred while the previous turn ran. Called
+    /// when the next turn starts, before it reads history or samples.
+    pub(super) async fn apply_deferred_model_switch(self: &std::sync::Arc<Self>) -> Result<(), acp::Error> {
+        let Some(switch) = self.jev_ledger.borrow_mut().deferred_model_switch.0.take() else {
+            return Ok(());
+        };
+        self.apply_session_model(switch, false).await.map(|_| ())
+    }
+
     pub(super) async fn handle_set_session_model(
         self: &std::sync::Arc<Self>,
         switch: crate::session::SessionModelSwitch,
+    ) -> Result<acp::ModelId, acp::Error> {
+        self.apply_session_model(switch, true).await
+    }
+
+    /// `defer_handoff`: an account handoff during a running turn waits for the
+    /// next turn instead of rewriting the history that turn still reads.
+    async fn apply_session_model(
+        self: &std::sync::Arc<Self>,
+        switch: crate::session::SessionModelSwitch,
+        defer_handoff: bool,
     ) -> Result<acp::ModelId, acp::Error> {
         let crate::session::SessionModelSwitch {
             mut sampling_config,
@@ -32,9 +51,25 @@ impl SessionActor {
                     &sampling_config,
                 )
         });
-        if account_handoff && self.state.lock().await.running_task.is_some() {
-            return Err(acp::Error::invalid_params()
-                .data("Cannot change the account or model while a turn is running"));
+        // History portability rewrites the conversation the running turn
+        // still reads, so the switch waits for the turn to end.
+        if defer_handoff && account_handoff && self.state.lock().await.running_task.is_some() {
+            let model_id = acp::ModelId::new(sampling_config.model.clone());
+            self.jev_ledger.borrow_mut().deferred_model_switch.0 = Some(crate::session::SessionModelSwitch {
+                sampling_config,
+                rebuild_definition,
+                canonical_model_id,
+                model_selection_intent,
+                use_concise,
+                is_family_switch,
+                apply_prompt_override,
+                skip_prompt_rewrite,
+                auto_compact_threshold_percent,
+                system_prompt_label,
+            });
+            tracing::info!(session_id = %self.session_info.id.0, model = %model_id.0,
+                "model switch deferred until the running turn ends");
+            return Ok(model_id);
         }
         if let Some(id) = previous_config
             .as_ref()
@@ -236,6 +271,11 @@ impl SessionActor {
         // The new main model may be the worker; a switch that leaves the prompt alone skips it too.
         if apply_prompt_override {
             self.refresh_worker_prompt().await;
+        }
+        if defer_handoff {
+            // A later explicit pick supersedes any queued handoff, including
+            // choosing the current account again before the next turn starts.
+            self.jev_ledger.borrow_mut().deferred_model_switch.0 = None;
         }
         Ok(model_id)
     }

@@ -942,6 +942,8 @@ pub(crate) async fn run_shell_child(
         .as_ref()
         .is_some_and(|policy| policy.is_enabled());
     let inherited_mode_active = request.runtime_overrides.execution_policy.as_ref().is_some_and(|policy| policy.is_enabled());
+    let execution_mode = ctx.parent_execution_policy.as_ref()
+        .map(|policy| Arc::new(policy.mode.inherited()));
     let mut execution_policy = request.runtime_overrides.execution_policy.clone().filter(|_| {
         ctx.parent_execution_policy.is_some()
             && !request.owner.is_workflow()
@@ -955,7 +957,7 @@ pub(crate) async fn run_shell_child(
     ) {
         // Wake requests may hold an old switch after the root was reloaded.
         // Current root state and configuration remain the authority.
-        policy.mode = root.mode.clone();
+        policy.mode = execution_mode.clone().expect("parent execution policy checked");
         policy.max_depth = policy.max_depth.min(root.max_depth);
         policy.off_max_depth = policy.off_max_depth.min(root.off_max_depth);
     }
@@ -1546,6 +1548,7 @@ pub(crate) async fn run_shell_child(
         .runtime_overrides
         .output_token_budget
         .map(crate::tools::tool_context::TaskOutputTokenBudget::limited);
+    tool_ctx.execution_mode = execution_mode;
     tool_ctx.execution_policy = execution_policy;
     tool_ctx.task_output_token_budget = task_output_budget.clone();
     tool_ctx.sampler_retry_only_before_output = task_output_budget.is_some();

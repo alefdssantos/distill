@@ -3,18 +3,24 @@
 use super::*;
 #[test]
 fn execution_mode_metadata_prefers_exclusive_mode_and_reads_legacy_sessions() {
-    use distill_tool_types::ExecutionMode;
+    use distill_tool_types::{ExecutionMode as M, ExecutionModeChoice as C};
     let parse = |meta: serde_json::Value| parse_session_execution_mode(meta.as_object());
     assert_eq!(
         parse(serde_json::json!({"executionMode": "ultrafast", "ultracode": true})),
-        Some(ExecutionMode::Ultrafast)
+        Some((M::Ultrafast, C::Ultrafast))
     );
     assert_eq!(
         parse(serde_json::json!({"executionMode": "ultrasave", "ultracode": true})),
-        Some(ExecutionMode::Ultrasave)
+        Some((M::Ultrasave, C::Ultrasave))
     );
-    assert_eq!(parse(serde_json::json!({"ultracode": true})), Some(ExecutionMode::Ultracode));
-    assert_eq!(parse(serde_json::json!({"ultracode": false})), Some(ExecutionMode::Normal));
+    assert_eq!(parse(serde_json::json!({"ultracode": true})), Some((M::Ultracode, C::Ultracode)));
+    assert_eq!(parse(serde_json::json!({"ultracode": false})), Some((M::Normal, C::Normal)));
+    assert_eq!(parse(serde_json::json!({"executionMode": "ultrasave"})), Some((M::Ultrasave, C::Ultrasave)));
+    assert_eq!(
+        parse(serde_json::json!({"executionMode": "ultrasave", "executionModeChoice": "auto"})),
+        Some((M::Ultrasave, C::Auto))
+    );
+    assert_eq!(parse(serde_json::json!({})), Some((M::Normal, C::Auto)));
     assert_eq!(parse_session_execution_mode(None), None);
 }
 fn nth<T>(xs: &[T], i: usize) -> &T {

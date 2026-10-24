@@ -422,6 +422,7 @@ async fn later_rounds_of_a_turn_keep_its_effort_on_an_effort_keyed_cache() {
                         model: "test".to_owned(),
                         effort: Some(ReasoningEffort::Low),
                     },
+                    actor.execution_mode.load(),
                 );
                 ledger.note_round("test", Some("low".to_owned()));
                 ledger.add_usage(EFFORT_SWITCH_FREE_PROMPT_TOKENS * 4, 100);
@@ -445,6 +446,61 @@ async fn later_rounds_of_a_turn_keep_its_effort_on_an_effort_keyed_cache() {
             crate::jev::clear_test_decision_answers();
         })
         .await;
+}
+
+#[test]
+#[serial_test::serial]
+fn tier_routing_does_not_replace_the_session_model() {
+    crate::agent::account_routing::tests::isolated(
+        "session::acp_session::sampler_turn::tests::tier_routing_does_not_replace_the_session_model",
+        || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build().unwrap();
+            tokio::task::LocalSet::new().block_on(&runtime, async {
+                use super::super::jev_ledger::TurnRoute;
+                use crate::agent::account_routing::{self, tests::NamedAccounts};
+                use distill_tool_types::ExecutionMode;
+
+                let fixture = NamedAccounts::new(crate::codex_auth::CODEX_INFERENCE_BASE_URL);
+                fixture.routing(crate::accounts::AutoStrategy::OrderedFirst, false);
+                let legacy = fixture.store.credential_path("legacy-chatgpt").unwrap();
+                std::fs::copy(fixture.store.credential_path("one").unwrap(), &legacy).unwrap();
+                std::fs::create_dir_all(legacy.parent().unwrap().join("accounts/legacy-chatgpt")).unwrap();
+                fixture.quota("legacy-chatgpt", Some(50.0));
+                let actor = super::super::support::plain_actor().await;
+                for (id, entry) in &fixture.models {
+                    actor.models_manager.insert_test_entry(id, entry.clone());
+                }
+                let main = account_routing::select_startup_config(
+                    &fixture.base(), &fixture.models, true,
+                ).await.unwrap();
+                actor.persist_account_config(&main).await.unwrap();
+                actor.execution_mode.store_auto(ExecutionMode::Ultrafast);
+                actor.jev_effort_auto.store(true, std::sync::atomic::Ordering::Relaxed);
+                crate::jev::set_test_decision_answers([]);
+                {
+                    let mut ledger = actor.jev_ledger.borrow_mut();
+                    ledger.anchor_turn_route(actor.current_turn_number.get(), "gpt-6.1-sol",
+                        TurnRoute { model: "gpt-6-luna".into(), effort: None },
+                        ExecutionMode::Ultrafast);
+                    ledger.tier_route_slug = Some("gpt-6-luna".into());
+                }
+                let fast = actor.prepare_sampler_for_turn().await;
+                assert_eq!(fast.model, "gpt-6-luna");
+                assert_eq!(actor.chat_state_handle.get_sampling_config().await.unwrap().model,
+                    "gpt-6.1-sol", "a temporary worker must not replace the selected main model");
+                let saved = account_routing::load_session_config(&actor.session_info, &fixture.models)
+                    .await.unwrap().unwrap();
+                assert_eq!(saved.model, "gpt-6.1-sol");
+
+                assert!(actor.execution_mode.pick_auto(ExecutionMode::Ultracode));
+                let careful = actor.prepare_sampler_for_turn().await;
+                assert_eq!(careful.model, "gpt-6.1-sol",
+                    "a later careful action returns to the session's main model");
+                crate::jev::clear_test_decision_answers();
+            });
+        },
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
