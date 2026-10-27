@@ -549,10 +549,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
         } => super::accounts::complete(app, agent_id, instance, seq, result),
         TaskResult::AutoRoutingSet { result } => super::accounts::auto_routing_set(app, result),
-        TaskResult::AutoRoutingDisabledByPick => {
-            app.show_toast("Auto routing off: your selected Main and Worker run");
-            vec![]
-        }
         TaskResult::WithPinnedMemoryMode { .. } | TaskResult::WithAutoRoute { .. } => {
             unreachable!("result wrappers are removed before task-result dispatch")
         }

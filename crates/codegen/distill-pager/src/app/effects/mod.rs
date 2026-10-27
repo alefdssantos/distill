@@ -167,28 +167,6 @@ pub(crate) fn execute(
                 TaskResult::AutoRoutingSet { result }
             });
         }
-        Effect::DisableAutoRouting => {
-            tasks.spawn(async {
-                let disabled = tokio::task::spawn_blocking(|| {
-                    let store = distill_shell::accounts::AccountStore::default();
-                    let mut routing = store.load_routing().ok()?;
-                    if !routing.enabled {
-                        return None;
-                    }
-                    routing.enabled = false;
-                    store.save_routing(&routing).ok()
-                })
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-                if disabled {
-                    TaskResult::AutoRoutingDisabledByPick
-                } else {
-                    TaskResult::CancelComplete
-                }
-            });
-        }
         Effect::Accounts(task) => {
             let model_tx = acp_tx.clone();
             let (feedback_tx, mut feedback_rx) = tokio::sync::mpsc::unbounded_channel();
