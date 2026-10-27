@@ -4833,7 +4833,7 @@ dependencies = [
 
 [[package]]
 name = "distill-version"
-version = "2.0.55"
+version = "2.0.56"
 dependencies = [
  "semver",
 ]
