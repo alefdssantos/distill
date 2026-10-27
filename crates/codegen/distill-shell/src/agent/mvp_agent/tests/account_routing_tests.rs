@@ -1225,3 +1225,90 @@ fn account_routing_effort_bind_keeps_routeless_explicit_model_pinned() {
         },
     );
 }
+
+/// An explicit model pick in an Auto session leaves Auto for THAT session only. `accounts.json`
+/// is shared with every other session and app, so `routing.enabled` must stay true.
+#[test]
+#[serial_test::serial]
+fn account_routing_explicit_pick_pins_session_and_keeps_global_auto_on() {
+    crate::agent::account_routing::tests::isolated(
+        "agent::mvp_agent::tests::account_routing_tests::account_routing_explicit_pick_pins_session_and_keeps_global_auto_on",
+        || {
+            run_local_for_bridge_test(|| async {
+                let fixture = NamedAccounts::new("http://127.0.0.1:1/v1");
+                fixture.routing(crate::accounts::AutoStrategy::HighestRemaining, true);
+                fixture.quota("one", Some(10.0));
+                fixture.quota("two", Some(30.0));
+                fixture.quota("three", Some(80.0));
+                let agent = build_minimal_agent_for_tests();
+                for (id, model) in &fixture.models {
+                    agent.models_manager.insert_test_entry(id, model.clone());
+                }
+                agent
+                    .initialize_request
+                    .set(
+                        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+                            acp::ClientCapabilities::new()
+                                .fs(acp::FileSystemCapabilities::new())
+                                .terminal(false),
+                        ),
+                    )
+                    .unwrap();
+                let cwd = tempfile::tempdir().unwrap();
+                let sid = agent
+                    .new_session_inner(
+                        acp::NewSessionRequest::new(cwd.path().to_path_buf()).meta(
+                            serde_json::json!({"modelId":"auto"}).as_object().cloned(),
+                        ),
+                    )
+                    .await
+                    .expect("Auto session")
+                    .session_id;
+                let models = agent.models_manager.models();
+                let next_turn = async || {
+                    let handle = agent.resident_handle(&sid).unwrap();
+                    let stored = handle
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap();
+                    let turn = distill_sampler::SamplerConfig {
+                        api_key: handle.chat_state_handle.get_credentials().await.api_key,
+                        base_url: stored.base_url.clone(),
+                        model: stored.model.clone(),
+                        api_backend: stored.api_backend.clone(),
+                        extra_headers: stored.extra_headers.clone(),
+                        ..Default::default()
+                    };
+                    let routes =
+                        account_routing::routes_for_turn(&fixture.store, &models, &turn, true)
+                            .await
+                            .unwrap();
+                    (stored, routes)
+                };
+                let (auto, routes) = next_turn().await;
+                assert!(!auto.extra_headers.contains_key(account_routing::PIN_HEADER));
+                assert!(!routes.is_empty(), "Auto routes the unpinned session");
+
+                Box::pin(agent.set_model_gated(acp::SetSessionModelRequest::new(
+                    sid.clone(),
+                    acp::ModelId::new("gpt-6.1-sol"),
+                )))
+                .await
+                .expect("explicit pick inside an Auto session");
+                let (picked, routes) = next_turn().await;
+                assert_eq!(picked.model, "gpt-6.1-sol", "the next turn uses the picked model");
+                assert!(picked.extra_headers.contains_key(account_routing::PIN_HEADER));
+                assert!(
+                    routes.iter().all(|route| route.option_id.is_none() && route.main_model == "gpt-6.1-sol"),
+                    "the pinned session takes no Auto option: {routes:?}"
+                );
+                assert!(
+                    fixture.store.load_routing().unwrap().enabled,
+                    "the pick must not turn the shared Auto profile off"
+                );
+                agent.remove_session(&sid);
+            });
+        },
+    );
+}

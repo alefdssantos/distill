@@ -154,8 +154,10 @@ pub(in crate::app::dispatch) fn confirmed_quit(app: &mut AppView) -> Vec<Effect>
     effects
 }
 /// When Auto routing runs the active session, an explicit Main/Worker pick
-/// turns Auto off and drops the routed pair from the footer. A Worker pick
-/// also pins the Main the route was running, so Main stays put.
+/// takes that session off Auto and drops the routed pair from the footer. The
+/// global Auto setting stays on: other sessions and other Distill clients
+/// sharing `accounts.json` keep routing. A Worker pick also pins the Main the
+/// route was running, so Main stays put.
 fn leave_auto_routing(app: &mut AppView, mut effects: Vec<Effect>, worker_pick: bool) -> Vec<Effect> {
     let route = match app.active_view {
         ActiveView::Agent(id) => app.agents.get_mut(&id).map(|agent| &mut agent.session.models.auto_route),
@@ -169,7 +171,6 @@ fn leave_auto_routing(app: &mut AppView, mut effects: Vec<Effect>, worker_pick: 
     }
     let routed_main = route.take().map(|(main, _)| main);
     app.models.auto_route = None;
-    effects.insert(0, Effect::DisableAutoRouting);
     if worker_pick && let Some(main) = routed_main {
         effects.extend(dispatch_action(
             Action::SwitchModel {
