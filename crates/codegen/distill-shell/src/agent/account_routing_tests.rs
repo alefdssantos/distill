@@ -258,7 +258,11 @@ fn account_routing_order_unknown_highest_and_disabled_account_selection() {
                     None,
                 );
                 assert!(legacy.api_key.is_none());
-                assert!(!legacy.extra_headers.contains_key(CREDENTIAL_AUTHORITY_HEADER));
+                assert!(
+                    !legacy
+                        .extra_headers
+                        .contains_key(CREDENTIAL_AUTHORITY_HEADER)
+                );
                 assert_eq!(
                     legacy
                         .bearer_resolver
@@ -468,4 +472,86 @@ fn account_routing_claude_pair_quota_and_provider_specific_402() {
     info.should_retry = None;
     info.status_code = Some(403);
     assert!(!quota_fallback_eligible(&info, Provider::Openrouter));
+}
+
+#[test]
+#[serial_test::serial]
+fn account_routing_reresolves_auto_route_after_identity_change() {
+    crate::agent::account_routing::tests::isolated(
+        "agent::account_routing::tests::account_routing_reresolves_auto_route_after_identity_change",
+        || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            tokio::task::LocalSet::new().block_on(&runtime, async {
+                let fixture = NamedAccounts::new(crate::codex_auth::CODEX_INFERENCE_BASE_URL);
+                let selected = select_startup_config(&fixture.base(), &fixture.models, false)
+                    .await
+                    .unwrap();
+                // The account was signed in again: its stored anchor no longer matches.
+                let mut stale = selected.clone();
+                stale.extra_headers.insert(
+                    "x-distill-codex-account-anchor".into(),
+                    "old-identity".into(),
+                );
+                assert!(
+                    restore_credentials(&fixture.store, &mut stale.clone())
+                        .await
+                        .is_err()
+                );
+
+                // Auto must pick a route again instead of failing every retry.
+                let mut auto = stale.clone();
+                reresolve_or_block(&fixture.store, &fixture.models, &mut auto, true).await;
+                assert!(
+                    !auto
+                        .extra_headers
+                        .contains_key("x-distill-account-unavailable")
+                );
+                assert_eq!(
+                    AccountRoute::read(&auto.extra_headers)
+                        .unwrap()
+                        .unwrap()
+                        .account_id,
+                    "one"
+                );
+                assert_ne!(
+                    auto.extra_headers.get("x-distill-codex-account-anchor"),
+                    Some(&"old-identity".to_string())
+                );
+                assert!(account_history_needs_portability(
+                    &distill_sampling_types::SamplingConfig {
+                        model: stale.model.clone(),
+                        base_url: stale.base_url.clone(),
+                        api_backend: stale.api_backend.clone(),
+                        extra_headers: stale.extra_headers.clone(),
+                        ..Default::default()
+                    },
+                    &auto
+                ));
+
+                // An explicit account choice keeps failing closed.
+                let mut pinned = stale.clone();
+                let mut route = AccountRoute::read(&pinned.extra_headers).unwrap().unwrap();
+                route.pinned = true;
+                route.write(&mut pinned).unwrap();
+                reresolve_or_block(&fixture.store, &fixture.models, &mut pinned, true).await;
+                assert!(
+                    pinned
+                        .extra_headers
+                        .contains_key("x-distill-account-unavailable")
+                );
+
+                // A routing-locked delegate does not pick a new account either.
+                let mut locked = stale.clone();
+                reresolve_or_block(&fixture.store, &fixture.models, &mut locked, false).await;
+                assert!(
+                    locked
+                        .extra_headers
+                        .contains_key("x-distill-account-unavailable")
+                );
+            });
+        },
+    );
 }

@@ -1361,14 +1361,18 @@ async fn read_parent_sampling_config(
                 .extra_headers
                 .contains_key(crate::agent::account_routing::ROUTE_HEADER)
             {
-                if crate::agent::account_routing::restore_credentials(
-                    &crate::accounts::AccountStore::default(),
-                    &mut inherited,
-                )
-                .await
-                .is_err()
+                let store = crate::accounts::AccountStore::default();
+                if crate::agent::account_routing::restore_credentials(&store, &mut inherited)
+                    .await
+                    .is_err()
                 {
-                    crate::agent::account_routing::block_credentials(&mut inherited);
+                    Box::pin(crate::agent::account_routing::reresolve_or_block(
+                        &store,
+                        &ctx.models_manager.models(),
+                        &mut inherited,
+                        true,
+                    ))
+                    .await;
                 }
             }
             let model_id = ctx.model_id.clone();
