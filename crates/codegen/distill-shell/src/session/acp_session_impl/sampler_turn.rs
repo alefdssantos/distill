@@ -3,7 +3,9 @@
 //! It also covers sampling-failure recovery and per-response usage recording.
 
 use super::*;
-use crate::agent::account_routing::{account_history_needs_portability, make_account_history_portable};
+use crate::agent::account_routing::{
+    account_history_needs_portability, make_account_history_portable,
+};
 use distill_login::backend::{ActiveAuthBackend, AuthBackend};
 use distill_telemetry::region;
 use distill_telemetry::region::Parent;
@@ -987,15 +989,19 @@ impl SessionActor {
             },
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
         };
+        let store = crate::accounts::AccountStore::default();
         if selected_account
-            && crate::agent::account_routing::restore_credentials(
-                &crate::accounts::AccountStore::default(),
-                &mut restored,
-            )
-            .await
-            .is_err()
+            && crate::agent::account_routing::restore_credentials(&store, &mut restored)
+                .await
+                .is_err()
         {
-            crate::agent::account_routing::block_credentials(&mut restored);
+            Box::pin(crate::agent::account_routing::reresolve_or_block(
+                &store,
+                &self.models_manager.models(),
+                &mut restored,
+                !self.startup_hints.is_subagent || !self.model_routing_locked.get(),
+            ))
+            .await;
         }
         restored
     }
@@ -1369,7 +1375,9 @@ impl SessionActor {
                     {
                         Ok(config) => {
                             sampler_config = config;
-                            if !tier_routed && self.persist_account_config(&sampler_config).await.is_err() {
+                            if !tier_routed
+                                && self.persist_account_config(&sampler_config).await.is_err()
+                            {
                                 crate::agent::account_routing::block_credentials(
                                     &mut sampler_config,
                                 );
@@ -2418,7 +2426,13 @@ impl SessionActor {
                     .await
                 {
                     Ok(outcome) => Ok(outcome),
-                    Err(info) if local_route_falls_back(&info, self.startup_hints.cheap_agent || self.jev_ledger.borrow().tier_route_active) => {
+                    Err(info)
+                        if local_route_falls_back(
+                            &info,
+                            self.startup_hints.cheap_agent
+                                || self.jev_ledger.borrow().tier_route_active,
+                        ) =>
+                    {
                         route_config = Some(self.undo_local_route(&mut request, &info).await);
                         self.bound_request_output_to_route(
                             &mut request,
@@ -2517,7 +2531,8 @@ impl SessionActor {
                     // model's reasoning payload). The routing is an optimization,
                     // so the round goes back to the session model and the rest
                     // of the turn stays there.
-                    let cheap_agent = self.startup_hints.cheap_agent || self.jev_ledger.borrow().tier_route_active;
+                    let cheap_agent = self.startup_hints.cheap_agent
+                        || self.jev_ledger.borrow().tier_route_active;
                     if routed_local && local_route_falls_back(&info, cheap_agent) {
                         route_config = Some(self.undo_local_route(&mut request, &info).await);
                         routed_local = false;

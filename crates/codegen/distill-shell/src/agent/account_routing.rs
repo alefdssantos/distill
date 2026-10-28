@@ -59,6 +59,11 @@ pub(crate) fn account_history_needs_portability(
     previous.model != next.model
         || previous.base_url != next.base_url
         || previous.api_backend != next.api_backend
+        // A re-signed account keeps its id; its reasoning is not portable.
+        || previous.extra_headers.iter().any(|(name, value)| {
+            is_identity_anchor(name)
+                && next.extra_headers.get(name).is_some_and(|next| next != value)
+        })
         || crate::agent::account_routing::AccountRoute::read(&previous.extra_headers)
             .ok()
             .flatten()
@@ -678,6 +683,36 @@ pub(crate) async fn restore_credentials(
         "Selected account identity changed; sign in and select it again"
     );
     Ok(())
+}
+
+/// An unpinned Auto route whose stored identity no longer restores is chosen
+/// again from the Auto options; an explicit account still fails closed.
+pub(crate) async fn reresolve_or_block(
+    store: &AccountStore,
+    models: &IndexMap<String, ModelEntry>,
+    config: &mut SamplerConfig,
+    auto_allowed: bool,
+) {
+    let auto_route = auto_allowed
+        && !config.extra_headers.contains_key(PIN_HEADER)
+        && AccountRoute::read(&config.extra_headers)
+            .ok()
+            .flatten()
+            .is_some_and(|route| route.option_id.is_some() && !route.pinned);
+    if auto_route {
+        let mut fresh = config.clone();
+        fresh
+            .extra_headers
+            .retain(|name, _| !is_identity_anchor(name));
+        if let Ok(routes) = routes_for_turn(store, models, &fresh, true).await
+            && let Some(route) = routes.first()
+            && let Ok(next) = config_for_route(store, models, &fresh, route).await
+        {
+            *config = next;
+            return;
+        }
+    }
+    block_credentials(config);
 }
 
 /// Restore errors must fail closed instead of falling back to a legacy bearer.
