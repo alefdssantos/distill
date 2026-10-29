@@ -80,7 +80,8 @@ fn execution_modes_prune_tool_definitions_to_direct_work() {
                 "{mode:?} kept {name}"
             );
         }
-        for required in ["read_file", "write", "search_replace", "run_terminal_command", "browser__screenshot"] {
+        // scheduler_create: /loop expands into a scheduler_create call in every mode.
+        for required in ["read_file", "write", "search_replace", "run_terminal_command", "browser__screenshot", "scheduler_create"] {
             assert!(kept.iter().any(|name| name == required), "{mode:?}: {kept:?}");
         }
         // Both modes delegate: UltraFast to fan independent work out in parallel,
@@ -89,7 +90,7 @@ fn execution_modes_prune_tool_definitions_to_direct_work() {
             kept.iter().any(|name| name == "spawn_subagent"),
             "{mode:?}: {kept:?}"
         );
-        for dropped in ["todo_write", "workflow", "scheduler_create", "send_feedback"] {
+        for dropped in ["todo_write", "workflow", "send_feedback"] {
             assert!(
                 !kept.iter().any(|name| name == dropped),
                 "{mode:?} kept {dropped}"

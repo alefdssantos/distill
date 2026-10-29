@@ -14,6 +14,8 @@ use distill_telemetry::region::Parent;
 const CLASSIFIER_REQUEST_TOKEN_RESERVE: u64 = 16_384;
 /// Tools UltraFast and UltraSave offer: direct inspection, editing, shell access
 /// and MCP lookup. Everything else is a whole-round detour from the objective.
+/// The scheduler tools stay: `/loop` and its fires (which end the loop with
+/// `scheduler_delete`) have no other way to run.
 pub(crate) const EXECUTION_MODE_TOOLS: &[&str] = &[
     "ask_stored_output",
     "get_command_or_subagent_output",
@@ -22,6 +24,9 @@ pub(crate) const EXECUTION_MODE_TOOLS: &[&str] = &[
     "list_dir",
     "read_file",
     "run_terminal_command",
+    "scheduler_create",
+    "scheduler_delete",
+    "scheduler_list",
     "search_replace",
     "search_tool",
     "use_tool",
