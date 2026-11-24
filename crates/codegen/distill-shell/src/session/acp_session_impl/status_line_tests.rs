@@ -1,6 +1,7 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
 use super::{
-    build_context_window, emit_loop, live_turn, split_normalized_remote, strip_trailing_separator,
+    build_context_window, emit_loop, live_turn, local_replacement_meter, split_normalized_remote,
+    strip_trailing_separator,
 };
 use crate::extensions::notification::PromptUsageModel;
 use distill_acp_lib::AcpClientMessage;
@@ -13,6 +14,186 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
+
+fn attributed_call(
+    id: &str,
+    role: &str,
+    endpoint: Option<&str>,
+    status: distill_chat_state::UsageCallStatus,
+    usage: Option<(u32, u32)>,
+    usage_complete: bool,
+    final_decision: Option<&str>,
+) -> distill_chat_state::UsageAttribution {
+    distill_chat_state::UsageAttribution {
+        attempt_id: id.to_owned(),
+        task_id: None,
+        turn_id: None,
+        request_id: None,
+        role: role.to_owned(),
+        model_id: "local-model".to_owned(),
+        endpoint: endpoint.map(str::to_owned),
+        requested_effort: None,
+        applied_effort: None,
+        reason: None,
+        bytes_in: None,
+        bytes_out: None,
+        source_kind: None,
+        final_decision: final_decision.map(str::to_owned),
+        status,
+        usage: usage.map(
+            |(prompt_tokens, completion_tokens)| distill_sampling_types::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+                reasoning_tokens: 100,
+                cached_prompt_tokens: 50,
+                cache_creation_prompt_tokens: 20,
+                cache_creation_1h_prompt_tokens: 0,
+            },
+        ),
+        usage_complete,
+        api_duration_ms: None,
+        cost_usd_ticks: None,
+        cost_basis: distill_chat_state::UsageCostBasis::Unknown,
+        cache_lifetime_secs: None,
+    }
+}
+
+#[test]
+fn local_replacement_meter_counts_only_complete_loopback_jev_and_used_utility() {
+    use distill_chat_state::UsageCallStatus::{Completed, Rejected};
+
+    let attributions = vec![
+        attributed_call(
+            "jev-1",
+            "jev",
+            Some("http://localhost:8080/v1"),
+            Completed,
+            Some((10, 5)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "utility-1",
+            "utility",
+            Some("http://127.0.0.1:9000/v1"),
+            Completed,
+            Some((20, 7)),
+            true,
+            Some("used"),
+        ),
+        attributed_call(
+            "jev-ipv6",
+            "jev",
+            Some("http://[::1]:9000/v1"),
+            Completed,
+            Some((2, 3)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "utility-nothing",
+            "utility",
+            Some("http://localhost/v1"),
+            Completed,
+            Some((1, 1)),
+            true,
+            Some("nothing"),
+        ),
+        attributed_call(
+            "jev-remote",
+            "jev",
+            Some("https://api.example.com/v1"),
+            Completed,
+            Some((100, 100)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-rejected",
+            "jev",
+            Some("http://localhost/v1"),
+            Rejected,
+            Some((3, 4)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-absent",
+            "jev",
+            Some("http://localhost/v1"),
+            Completed,
+            None,
+            false,
+            None,
+        ),
+        attributed_call(
+            "jev-partial",
+            "jev",
+            Some("http://localhost/v1"),
+            Completed,
+            Some((5, 5)),
+            false,
+            None,
+        ),
+        attributed_call(
+            "main-local",
+            "main",
+            Some("http://localhost/v1"),
+            Completed,
+            Some((40, 40)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "worker-local",
+            "worker",
+            Some("http://localhost/v1"),
+            Completed,
+            Some((30, 30)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-1",
+            "jev",
+            Some("http://localhost/v1"),
+            Completed,
+            Some((1000, 0)),
+            true,
+            None,
+        ),
+    ];
+
+    let (tokens, samples) = local_replacement_meter(&attributions);
+    assert_eq!(
+        tokens, 47,
+        "prompt + completion only, duplicate attempt id folded once"
+    );
+    assert_eq!(samples, vec![15, 27, 5]);
+    assert_eq!(local_replacement_meter(&[]), (0, Vec::new()));
+}
+
+#[test]
+fn local_replacement_meter_keeps_last_eight_samples_oldest_first() {
+    let attributions = (1..=10)
+        .map(|tokens| {
+            attributed_call(
+                &format!("jev-{tokens}"),
+                "jev",
+                Some("http://localhost/v1"),
+                distill_chat_state::UsageCallStatus::Completed,
+                Some((tokens, 0)),
+                true,
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let (tokens, samples) = local_replacement_meter(&attributions);
+    assert_eq!(tokens, 55);
+    assert_eq!(samples, vec![3, 4, 5, 6, 7, 8, 9, 10]);
+}
 
 #[test]
 fn session_usage_splits_fresh_input_from_the_cache_buckets() {

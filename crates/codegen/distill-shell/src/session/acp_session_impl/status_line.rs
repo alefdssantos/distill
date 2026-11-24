@@ -280,22 +280,31 @@ impl SessionActor {
         let signals = self.signals_handle().snapshot().await.unwrap_or_default();
         let size = signals
             .active_context_window_tokens
-            .or_else(|| (signals.context_window_tokens > 0).then_some(signals.context_window_tokens))
+            .or_else(|| {
+                (signals.context_window_tokens > 0).then_some(signals.context_window_tokens)
+            })
             .or(configured_size)
             .unwrap_or(0);
         if size == 0 {
             return;
         }
         let mut update = acp::UsageUpdate::new(used, size);
-        if let Ok(ledger) = self.chat_state_handle.try_get_session_usage().await
-            && ledger.totals.input_tokens > 0
-        {
-            let mut meta = acp::Meta::new();
-            meta.insert(
-                "cacheReadTokens".into(),
-                ledger.totals.cached_read_tokens.into(),
-            );
-            meta.insert("promptTokens".into(), ledger.totals.input_tokens.into());
+        let mut meta = acp::Meta::new();
+        if let Ok(ledger) = self.chat_state_handle.try_get_session_usage().await {
+            if ledger.totals.input_tokens > 0 {
+                meta.insert(
+                    "cacheReadTokens".into(),
+                    ledger.totals.cached_read_tokens.into(),
+                );
+                meta.insert("promptTokens".into(), ledger.totals.input_tokens.into());
+            }
+            let (tokens, samples) = local_replacement_meter(&ledger.attributions);
+            if tokens > 0 {
+                meta.insert("localReplacementTokens".into(), tokens.into());
+                meta.insert("localReplacementSamples".into(), serde_json::json!(samples));
+            }
+        }
+        if !meta.is_empty() {
             update = update.meta(meta);
         }
         let notification = acp::SessionNotification::new(
@@ -372,6 +381,66 @@ where
             None => return,
         }
         wake.notified().await;
+    }
+}
+
+/// Provider-reported local workload: completed Jev/utility calls on an explicit loopback
+/// endpoint. It is not the exact cost of the remote call it replaced. Sums prompt and
+/// completion only; cache and reasoning are subsets in `TokenUsage`. Resume does not
+/// rehydrate attributions, so this counts the current process only.
+fn local_replacement_meter(
+    attributions: &[distill_chat_state::UsageAttribution],
+) -> (u64, Vec<u64>) {
+    let mut tokens = 0u64;
+    let mut samples = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for attribution in attributions {
+        if !is_local_replacement(attribution) {
+            continue;
+        }
+        if !seen.insert(attribution.attempt_id.as_str()) {
+            continue;
+        }
+        let Some(usage) = attribution.usage.as_ref() else {
+            continue;
+        };
+        let call =
+            u64::from(usage.prompt_tokens).saturating_add(u64::from(usage.completion_tokens));
+        tokens = tokens.saturating_add(call);
+        if samples.len() == 8 {
+            samples.remove(0);
+        }
+        samples.push(call);
+    }
+    (tokens, samples)
+}
+
+fn is_local_replacement(attribution: &distill_chat_state::UsageAttribution) -> bool {
+    if attribution.status != distill_chat_state::UsageCallStatus::Completed
+        || !attribution.usage_complete
+        || !explicit_loopback_endpoint(attribution.endpoint.as_deref())
+    {
+        return false;
+    }
+    match attribution.role.as_str() {
+        "jev" => true,
+        "utility" => attribution.final_decision.as_deref() == Some("used"),
+        _ => false,
+    }
+}
+
+fn explicit_loopback_endpoint(endpoint: Option<&str>) -> bool {
+    let Some(endpoint) = endpoint else {
+        return false;
+    };
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        None => false,
     }
 }
 

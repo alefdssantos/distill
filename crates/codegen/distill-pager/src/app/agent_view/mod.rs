@@ -745,6 +745,14 @@ pub(crate) struct BlockViewerResume {
     pub scroll_offset: usize,
     pub follow_mode: bool,
 }
+/// Local-replacement meter from the usage update's `_meta`: cumulative tokens saved locally and the recent
+/// per-call samples. The count estimates replaced prompt tokens; it is not the exact remote billed baseline.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalReplacementMeter {
+    pub tokens: u64,
+    pub samples: Vec<u64>,
+}
+
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
@@ -887,6 +895,8 @@ pub struct AgentView {
     pub context_state: Option<distill_shell::session::ContextInfo>,
     /// `(cached_read, prompt)` tokens of this conversation's session ledger totals, from the usage update's `_meta`.
     pub cache_rate: Option<(u64, u64)>,
+    /// Local-replacement tokens and recent per-call samples from the usage update's `_meta`.
+    pub local_replacement: Option<LocalReplacementMeter>,
     pub status_context: Option<distill_status_line::StatusLineContext>,
     /// Held across a frame that clamps the row away, so a script keeps the size
     /// it last painted at.

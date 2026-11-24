@@ -531,3 +531,62 @@ fn header_shows_cache_rate_after_context_and_hides_it_when_unset() {
     let row = header_row(&agent, &buf);
     assert!(!row.contains("cache "), "row = {row:?}");
 }
+
+/// The local-replacement meter follows Cache with the same `│` divider, showing the compact count and sparkline;
+/// it survives Cache being absent, and a narrow row omits it before the right controls lose their targets.
+#[test]
+fn header_shows_local_replacement_after_cache_and_omits_it_when_narrow() {
+    let _theme = crate::theme::cache::pin_theme();
+    let registry = ActionRegistry::defaults();
+    let mut agent = agent_at(140);
+    agent.apply_context_used(163_000, 1_000_000);
+    agent.cache_rate = Some((870, 1000));
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "localReplacementTokens".into(),
+        serde_json::json!(12_300),
+    );
+    meta.insert(
+        "localReplacementSamples".into(),
+        serde_json::json!([100, 200, 400, 800]),
+    );
+    agent.apply_local_replacement(
+        &agent_client_protocol::UsageUpdate::new(163_000, 1_000_000).meta(meta),
+    );
+    let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+    let row = header_row(&agent, &buf);
+    assert!(
+        row.contains("cache 87% │ saved ~12.3k ▁▂▄█"),
+        "row = {row:?}"
+    );
+    let cache = row.find("cache 87%").unwrap();
+    let saved = row.find("saved ~12.3k").unwrap();
+    assert!(cache < saved, "saved after cache, row = {row:?}");
+    assert!(
+        saved < row.find("[Dashboard]").unwrap(),
+        "saved before right controls, row = {row:?}"
+    );
+
+    agent.cache_rate = None;
+    let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
+    let row = header_row(&agent, &buf);
+    assert!(
+        row.contains("saved ~12.3k ▁▂▄█") && !row.contains("cache "),
+        "saved survives without cache, row = {row:?}"
+    );
+
+    let mut narrow = agent_at(56);
+    narrow.apply_context_used(163_000, 1_000_000);
+    narrow.cache_rate = Some((870, 1000));
+    narrow.local_replacement = Some(super::LocalReplacementMeter {
+        tokens: 12_300,
+        samples: vec![100, 200, 400, 800],
+    });
+    let buf = draw(&mut narrow, &registry, false, OverlayHeader::default());
+    let row = header_row(&narrow, &buf);
+    assert!(!row.contains("saved "), "narrow row = {row:?}");
+    assert!(
+        row.contains("[Dashboard]") && narrow.hit_dashboard.rect.is_some(),
+        "right controls keep their hit area, row = {row:?}"
+    );
+}

@@ -76,6 +76,41 @@ impl<'a> AgentStatusBar<'a> {
         area_width.saturating_sub(self.right_pad + self.width() + joining_sep)
     }
 
+    /// Whether one more item of `width` columns fits in a row `area_width` wide beside the current group.
+    pub fn fits_after(&self, width: u16, area_width: u16) -> bool {
+        width <= self.room_for_front(area_width)
+    }
+
+    /// Insert an item after `after` (or `fallback`) when the fully built group still fits; otherwise omit it.
+    /// Returns whether the item was inserted.
+    pub fn insert_if_fits(
+        &mut self,
+        id: &'static str,
+        line: Line<'static>,
+        after: &str,
+        fallback: &str,
+        area_width: u16,
+    ) -> bool {
+        let width = line.width() as u16;
+        if !self.fits_after(width, area_width) {
+            return false;
+        }
+        let index = self
+            .items
+            .iter()
+            .position(|entry| entry.id == after)
+            .or_else(|| self.items.iter().position(|entry| entry.id == fallback))
+            .map(|index| index + 1)
+            .or_else(|| {
+                self.items
+                    .iter()
+                    .position(|entry| matches!(entry.id, "side" | "switcher" | "dashboard"))
+            })
+            .unwrap_or(self.items.len());
+        self.items.insert(index, StatusEntry { id, line, width });
+        true
+    }
+
     /// Columns the group occupies: items plus the separators between them.
     fn width(&self) -> u16 {
         let items: u16 = self.items.iter().map(|e| e.width).sum();
@@ -198,6 +233,49 @@ pub(crate) fn format_tokens_compact(tokens: i64) -> String {
     } else {
         tokens.to_string()
     }
+}
+
+/// Normalize `samples` onto the eight one-row Unicode block levels: `▁▂▃▄▅▆▇█`.
+pub(crate) fn sparkline(samples: &[u64]) -> String {
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let Some((&min, &max)) = samples.iter().min().zip(samples.iter().max()) else {
+        return String::new();
+    };
+    let range = max - min;
+    samples
+        .iter()
+        .map(|&value| {
+            let level = if range == 0 {
+                0
+            } else {
+                ((value - min) as u128 * 7 / range as u128) as usize
+            };
+            LEVELS[level.min(LEVELS.len() - 1)]
+        })
+        .collect()
+}
+
+/// Status-bar meter for local replacement: `saved ~1.2k ▂▅█`.
+/// The token count is the local estimate of replaced prompt tokens, not the exact remote billed baseline.
+pub(crate) fn local_replacement_line(
+    tokens: u64,
+    samples: &[u64],
+    theme: &Theme,
+) -> Option<Line<'static>> {
+    if tokens == 0 {
+        return None;
+    }
+    let count = format_tokens_compact(i64::try_from(tokens).unwrap_or(i64::MAX));
+    let graph = sparkline(samples);
+    let text = if graph.is_empty() {
+        format!("saved ~{count}")
+    } else {
+        format!("saved ~{count} {graph}")
+    };
+    Some(Line::from(Span::styled(
+        text,
+        Style::default().fg(theme.gray).bg(theme.bg_base),
+    )))
 }
 
 /// Format elapsed milliseconds compactly: `5s`, `3m`, `2h`.

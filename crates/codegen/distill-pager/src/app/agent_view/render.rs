@@ -1376,6 +1376,13 @@ impl AgentView {
                 Line::from(Span::styled(format!("cache {pct}%"), bg.fg(theme.gray))),
             );
         }
+        let local_replacement = self.local_replacement.as_ref().and_then(|meter| {
+            crate::views::agent_status::local_replacement_line(
+                meter.tokens,
+                &meter.samples,
+                &theme,
+            )
+        });
         if self.side_parent.is_some() {
             let label = match self.side_parent_status {
                 super::SideParentStatus::Running => "side - parent running",
@@ -1443,6 +1450,15 @@ impl AgentView {
                     "[Dashboard]",
                     hover_or(self.hit_dashboard.hovered, bg.fg(theme.gray)),
                 )),
+            );
+        }
+        if let Some(line) = local_replacement {
+            status.insert_if_fits(
+                "local_replacement",
+                line,
+                "cache",
+                "context",
+                layout.status_bar.width,
             );
         }
         if let Some(url) = self.highlighted_link_url() {

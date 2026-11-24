@@ -3,9 +3,10 @@
 #[cfg(test)]
 use super::test_agent_view;
 use super::{
-    ActivePane, AgentRole, AgentView, ChildLink, InlineMediaHitAreas, InputMode, PaneAreas,
-    PluginCtaState, PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, ReplayRebuiltState,
-    SELF_ORIGINATED_PROMPT_CAP, SessionReload, ViewSurface,
+    ActivePane, AgentRole, AgentView, ChildLink, InlineMediaHitAreas, InputMode,
+    LocalReplacementMeter, PaneAreas, PluginCtaState, PromptInputMode, PromptMode,
+    REWOUND_PROMPT_ID_CAP, ReplayRebuiltState, SELF_ORIGINATED_PROMPT_CAP, SessionReload,
+    ViewSurface,
 };
 use crate::app::agent::{AgentSession, GoalDisplayStatus};
 use crate::app::app_view::InputOutcome;
@@ -23,6 +24,10 @@ use distill_telemetry::events::{CancellationCompleted, CancellationScope};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
+
+/// Recent per-call samples the local-replacement sparkline may show; the shell sends at most eight.
+const MAX_LOCAL_REPLACEMENT_SAMPLES: usize = 8;
+
 /// Approve/build after EndTurn is only for backends that implement ExecutePlan.
 /// Default off; `AppView` / `test_agent_view` turn it on for those backends and tests.
 fn post_turn_plan_review_default() -> bool {
@@ -195,6 +200,7 @@ impl AgentView {
             modal_hovered_key: None,
             context_state: None,
             cache_rate: None,
+            local_replacement: None,
             status_context: None,
             last_status_line_size: None,
             chat_kind: false,
@@ -1275,6 +1281,7 @@ impl AgentView {
         if self.chat_kind {
             self.context_state = None;
             self.cache_rate = None;
+            self.local_replacement = None;
             return;
         }
         let total = if total > 0 {
@@ -1314,6 +1321,36 @@ impl AgentView {
         {
             self.cache_rate = Some((cached, prompt));
         }
+    }
+    /// Store the local-replacement meter a usage update carries in `_meta`; each update is a complete snapshot,
+    /// so missing keys or a zero count hide it instead of keeping stale data.
+    /// `localReplacementTokens` is a local estimate, not the exact remote billed baseline.
+    pub fn apply_local_replacement(&mut self, usage: &agent_client_protocol::UsageUpdate) {
+        if self.chat_kind {
+            self.local_replacement = None;
+            return;
+        }
+        let Some(meta) = usage.meta.as_ref() else {
+            self.local_replacement = None;
+            return;
+        };
+        let Some((tokens, values)) = meta
+            .get("localReplacementTokens")
+            .and_then(|v| v.as_u64())
+            .zip(
+                meta.get("localReplacementSamples")
+                    .and_then(|v| v.as_array()),
+            )
+        else {
+            self.local_replacement = None;
+            return;
+        };
+        let start = values.len().saturating_sub(MAX_LOCAL_REPLACEMENT_SAMPLES);
+        let samples = values[start..]
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .collect();
+        self.local_replacement = (tokens > 0).then_some(LocalReplacementMeter { tokens, samples });
     }
     /// Apply Build coding-credit balance only for non-chat agents.
     /// Gateway/chat-kind sessions keep credits unset so bars/warnings stay off.

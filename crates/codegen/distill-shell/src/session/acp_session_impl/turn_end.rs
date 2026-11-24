@@ -454,6 +454,8 @@ impl SessionActor {
         self.report_turn_delta(&prompt_id, snapshot, elapsed_ms, turn_outcome)
             .await;
 
+        // The turn's usage is applied before this terminal; refresh the meter once.
+        self.emit_usage_update().await;
         // Cost, context occupancy and the turn timer all moved during the turn.
         self.emit_status_snapshot_detached();
     }
