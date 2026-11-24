@@ -10,6 +10,7 @@ impl SlashCommand for GeminiCommand {
         name: "gemini",
         description: "Open a Gemini session in this window",
         usage: "/gemini",
+        offered_when_session_less: true,
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
