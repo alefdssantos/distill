@@ -81,13 +81,36 @@ pub fn configured_local_decision_model() -> Option<(String, String)> {
 /// The local model the running configuration would use, for the footer.
 ///
 /// This is configuration only: it never probes the server, so a configured
-/// endpoint that is down still reads as selected.
+/// endpoint that is down still reads as selected. The display name comes from
+/// the trusted catalog entry whose endpoint and served id match exactly; a
+/// missing entry falls back to the served id.
 pub fn active_local_decision_model() -> Option<String> {
-    let cfg = resolve_config_from_disk_cached();
-    if !flags_from(cfg).enabled {
-        return None;
-    }
-    local_decision_target(cfg).ok().flatten().map(|(_, model)| model)
+    static MODEL: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
+        let cfg = resolve_config_from_disk_cached();
+        if !flags_from(cfg).enabled {
+            return None;
+        }
+        let (base_url, served) = local_decision_target(cfg).ok().flatten()?;
+        Some(local_display_name(&base_url, &served, &validated_local_entries()).unwrap_or(served))
+    });
+    MODEL.clone()
+}
+
+/// The catalog display name for `base_url` + `served_model`, ignoring a
+/// trailing slash on either URL. A same-named model on another port is a
+/// different server, so the endpoint must match too.
+fn local_display_name(
+    base_url: &str,
+    served_model: &str,
+    entries: &[(String, String, String, String)],
+) -> Option<String> {
+    let base_url = base_url.trim_end_matches('/');
+    entries
+        .iter()
+        .find(|(_, _, entry_url, entry_model)| {
+            entry_url.trim_end_matches('/') == base_url && entry_model == served_model
+        })
+        .map(|(_, display, _, _)| display.clone())
 }
 
 /// Trusted `[model.<id>]` entries that can serve local chat without a key.
@@ -2020,9 +2043,20 @@ impl JevTurnActivity {
     /// Kept short by construction: it shares one row with the running tool and
     /// the turn timer.
     pub fn label(&self) -> Option<String> {
-        if self.in_flight > 0 && self.decisions == 0 && self.route.is_none() {
-            return Some("jev…".to_owned());
+        if self.decisions == 0 && self.in_flight == 0 && self.route.is_none() {
+            return None;
         }
+        self.label_with_model(active_local_decision_model().as_deref())
+    }
+
+    /// The chip text with an explicit decision-model name: `None` keeps `jev`,
+    /// while a local decision model replaces it for pending, timed and counted
+    /// states. Route-only text stays `model`.
+    fn label_with_model(&self, decision_model: Option<&str>) -> Option<String> {
+        if self.decisions == 0 && self.in_flight == 0 && self.route.is_none() {
+            return None;
+        }
+        let name = decision_model.unwrap_or("jev");
         // The current micro-action's routing when the decision set one, else the
         // turn's own local marker.
         let suffix = match &self.route {
@@ -2032,13 +2066,13 @@ impl JevTurnActivity {
         };
         match self.decisions {
             0 if self.route.is_some() => Some(format!("model{suffix}")),
-            0 if self.in_flight > 0 => Some("jev…".to_owned()),
+            0 if self.in_flight > 0 => Some(format!("{name}…")),
             0 => None,
             1 => Some(format!(
-                "jev {:.1}s{suffix}",
+                "{name} {:.1}s{suffix}",
                 self.last_latency_ms as f64 / 1000.0
             )),
-            n => Some(format!("jev ×{n}{suffix}")),
+            n => Some(format!("{name} ×{n}{suffix}")),
         }
     }
 }
@@ -3680,17 +3714,17 @@ mod catalogue_helper_tests {
         let guard = JevInFlight::begin();
         let in_flight = turn_activity(Some(after));
         assert_eq!(in_flight.in_flight, 1);
-        assert_eq!(in_flight.label().as_deref(), Some("jev…"));
+        assert_eq!(in_flight.label_with_model(None).as_deref(), Some("jev…"));
         drop(guard);
         assert_eq!(turn_activity(Some(after)).in_flight, 0);
         note_decision("b2_micro_effort", "error", 10);
         note_decision("b2_micro_effort", "timeout", 20);
         note_decision(LOCAL_LEVER, "fallback", 30);
         let failed = turn_activity(Some(before));
-        assert_eq!(failed.label().as_deref(), Some("jev ×6 ·local"));
+        assert_eq!(failed.label_with_model(None).as_deref(), Some("jev ×6 ·local"));
         note_decision("b2_micro_effort", "keep", 40);
         assert_eq!(
-            turn_activity(Some(before)).label().as_deref(),
+            turn_activity(Some(before)).label_with_model(None).as_deref(),
             Some("jev ×7 ·local")
         );
         reset_activity_for_test();
@@ -3713,7 +3747,7 @@ mod catalogue_helper_tests {
             "every decision in the turn window is counted"
         );
         assert_eq!(
-            turn.label().as_deref(),
+            turn.label_with_model(None).as_deref(),
             Some("jev ×80"),
             "the chip names the real count, not a ring size"
         );
@@ -3729,7 +3763,7 @@ mod catalogue_helper_tests {
         note_decision("b2_micro_effort", "high", 300);
         note_route(Some("gpt-6-sol"), Some("high"));
         assert_eq!(
-            turn_activity(None).label().as_deref(),
+            turn_activity(None).label_with_model(None).as_deref(),
             Some("jev 0.3s ·gpt-6-sol high")
         );
         reset_activity_for_test();
@@ -3739,13 +3773,13 @@ mod catalogue_helper_tests {
     /// latency, repeats show a count, and preventive refusals are normal activity.
     #[test]
     fn the_chip_label_is_short_and_honest() {
-        assert_eq!(JevTurnActivity::default().label(), None);
+        assert_eq!(JevTurnActivity::default().label_with_model(None), None);
         assert_eq!(
             JevTurnActivity {
                 in_flight: 1,
                 ..Default::default()
             }
-            .label()
+            .label_with_model(None)
             .as_deref(),
             Some("jev…")
         );
@@ -3755,7 +3789,7 @@ mod catalogue_helper_tests {
                 last_latency_ms: 420,
                 ..Default::default()
             }
-            .label()
+            .label_with_model(None)
             .as_deref(),
             Some("jev 0.4s")
         );
@@ -3765,7 +3799,7 @@ mod catalogue_helper_tests {
                 last_latency_ms: 420,
                 ..Default::default()
             }
-            .label()
+            .label_with_model(None)
             .as_deref(),
             Some("jev ×4")
         );
@@ -3778,7 +3812,7 @@ mod catalogue_helper_tests {
                 local_runs: 1,
                 ..Default::default()
             }
-            .label()
+            .label_with_model(None)
             .as_deref(),
             Some("jev ×2 ·local"),
             "a refused optimization is normal activity, not a Jev outage"
@@ -3790,7 +3824,7 @@ mod catalogue_helper_tests {
                 local_runs: 2,
                 ..Default::default()
             }
-            .label()
+            .label_with_model(None)
             .as_deref(),
             Some("jev ×3 ·local")
         );
@@ -3803,7 +3837,7 @@ mod catalogue_helper_tests {
                 route: Some("local low".to_owned()),
                 ..Default::default()
             }
-            .label()
+            .label_with_model(None)
             .as_deref(),
             Some("jev ×3 ·local low")
         );
@@ -3814,9 +3848,101 @@ mod catalogue_helper_tests {
                 route: Some("medium".to_owned()),
                 ..Default::default()
             }
-            .label()
+            .label_with_model(None)
             .as_deref(),
             Some("jev 0.9s ·medium")
+        );
+    }
+
+    /// The chip names a configured local decision model instead of `jev`;
+    /// a route-only row still names `model`, and remote output is unchanged.
+    #[test]
+    fn the_chip_names_the_local_decider_and_keeps_remote_text() {
+        let local = Some("Qwen3.8 27B");
+        assert_eq!(
+            JevTurnActivity {
+                in_flight: 1,
+                ..Default::default()
+            }
+            .label_with_model(local)
+            .as_deref(),
+            Some("Qwen3.8 27B…")
+        );
+        assert_eq!(
+            JevTurnActivity {
+                decisions: 1,
+                last_latency_ms: 420,
+                ..Default::default()
+            }
+            .label_with_model(local)
+            .as_deref(),
+            Some("Qwen3.8 27B 0.4s")
+        );
+        assert_eq!(
+            JevTurnActivity {
+                decisions: 3,
+                local_runs: 1,
+                last_latency_ms: 420,
+                ..Default::default()
+            }
+            .label_with_model(local)
+            .as_deref(),
+            Some("Qwen3.8 27B ×3 ·local")
+        );
+        assert_eq!(
+            JevTurnActivity {
+                route: Some("gpt-6-sol high".to_owned()),
+                ..Default::default()
+            }
+            .label_with_model(local)
+            .as_deref(),
+            Some("model ·gpt-6-sol high"),
+            "route-only text keeps the model prefix"
+        );
+        assert_eq!(
+            JevTurnActivity {
+                decisions: 3,
+                last_latency_ms: 420,
+                ..Default::default()
+            }
+            .label_with_model(None)
+            .as_deref(),
+            Some("jev ×3")
+        );
+        assert_eq!(JevTurnActivity::default().label_with_model(local), None);
+    }
+
+    /// The catalog display name needs both the endpoint and the served id:
+    /// a same-named model on another port is a different server.
+    #[test]
+    fn local_display_matches_endpoint_and_served_id() {
+        let entries = vec![
+            (
+                "a".to_owned(),
+                "Local A".to_owned(),
+                "http://127.0.0.1:8080/v1/".to_owned(),
+                "shared-model".to_owned(),
+            ),
+            (
+                "b".to_owned(),
+                "Local B".to_owned(),
+                "http://127.0.0.1:8081/v1".to_owned(),
+                "shared-model".to_owned(),
+            ),
+        ];
+        assert_eq!(
+            local_display_name("http://127.0.0.1:8080/v1", "shared-model", &entries).as_deref(),
+            Some("Local A"),
+            "a trailing slash on either side still matches"
+        );
+        assert_eq!(
+            local_display_name("http://127.0.0.1:8082/v1", "shared-model", &entries),
+            None,
+            "the same served id on another port is not this server"
+        );
+        assert_eq!(
+            local_display_name("http://127.0.0.1:8080/v1", "other-model", &entries),
+            None
         );
     }
 

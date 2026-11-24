@@ -404,8 +404,23 @@ pub fn render_turn_status(
     // turn — `jev…` while a call is in flight, `jev 0.4s` / `jev ×3` after
     // decisions. A refused optimization is not an outage. If the layer did nothing and
     // no final route is known, the chip stays absent.
+    // The label can carry a user-configured local catalog name, so cap it before it
+    // steals the activity label or spills into the right-aligned timer and controls.
+    let min_gap = 1;
+    let base_label_width = (area.width as usize)
+        .saturating_sub(spinner_width)
+        .saturating_sub(phase_timer_width)
+        .saturating_sub(min_gap)
+        .saturating_sub(right_width)
+        .saturating_sub(2);
+    const MIN_ACTIVITY_LABEL_WIDTH: usize = 12;
+    const MIN_JEV_CHIP_WIDTH: usize = 8;
+    let jev_budget = base_label_width.saturating_sub(MIN_ACTIVITY_LABEL_WIDTH);
     let jev_str = match jev.label() {
-        Some(label) => format!(" \u{00b7} {label}"),
+        Some(label) if jev_budget >= MIN_JEV_CHIP_WIDTH => {
+            truncate_str(&format!(" \u{00b7} {label}"), jev_budget)
+        }
+        Some(_) => String::new(),
         None => String::new(),
     };
     let jev_width = jev_str.width();
@@ -425,14 +440,7 @@ pub fn render_turn_status(
 
     // Available width for activity label (only the label truncates)
     // Layout: spinner + label + phase_timer + queued_hint + gap(1) + turn_timer + cancel
-    let min_gap = 1;
-    let available_for_label = (area.width as usize)
-        .saturating_sub(spinner_width)
-        .saturating_sub(phase_timer_width)
-        .saturating_sub(jev_width)
-        .saturating_sub(min_gap)
-        .saturating_sub(right_width)
-        .saturating_sub(2);
+    let available_for_label = base_label_width.saturating_sub(jev_width);
 
     // ── Render left side: spinner + label (truncated) + phase_timer + queued_hint ──
     let mut left_spans: Vec<Span<'static>> = Vec::with_capacity(5);
@@ -1249,7 +1257,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            refused_with_fallback_route.contains("jev ×2")
+            refused_with_fallback_route.contains("×2")
                 && !refused_with_fallback_route.contains("fallback")
                 && refused_with_fallback_route.contains("gpt-6-sol high"),
             "a refusal keeps the final route visible: {refused_with_fallback_route:?}"
@@ -1261,7 +1269,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            one.contains("jev 0.4s"),
+            one.contains("0.4s"),
             "one answer shows its latency: {one:?}"
         );
 
@@ -1271,7 +1279,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            many.contains("jev ×3"),
+            many.contains("×3"),
             "repeated use shows a count: {many:?}"
         );
 
@@ -1282,7 +1290,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            veto.contains("jev 0.4s") && !veto.contains("fallback"),
+            veto.contains("0.4s") && !veto.contains("fallback"),
             "a preventive refusal is not a service failure: {veto:?}"
         );
 
@@ -1291,7 +1299,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            in_flight.contains("jev…"),
+            in_flight.contains("…"),
             "a consultation in flight is visible: {in_flight:?}"
         );
 
@@ -1303,13 +1311,62 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            local.contains("jev ×4 ·local"),
+            local.contains("×4 ·local"),
             "local runs are visible on the row: {local:?}"
         );
 
         // The chip shares the row: the running tool and the timer survive it.
         assert!(one.contains("read_file"), "the tool label stays: {one:?}");
         assert!(one.contains("19s"), "the turn timer stays: {one:?}");
+    }
+
+    /// A local catalog name can make the chip label arbitrarily long. It must not
+    /// consume the activity label or the right-aligned timer/[stop] columns.
+    #[test]
+    fn long_jev_chip_keeps_narrow_activity_timer_and_stop() {
+        let long_route = format!("local-catalog-model-{}TAIL", "x".repeat(120));
+        let render = |width: u16| {
+            let activity = Some(TurnActivity::Waiting(WaitingReason::Model));
+            let mut args = idle_args(Watchers::default());
+            args.state = &AgentState::TurnRunning;
+            args.activity = &activity;
+            args.turn_elapsed = Some(Duration::from_secs(19));
+            args.jev = distill_shell::jev::JevTurnActivity {
+                decisions: 3,
+                route: Some(long_route.clone()),
+                last_latency_ms: 420,
+                ..Default::default()
+            };
+            render_row_text(args, width)
+        };
+
+        let narrow = render(24);
+        assert!(
+            narrow.contains("Waiting"),
+            "a 24-column row keeps the primary activity readable: {narrow:?}"
+        );
+        assert!(
+            narrow.contains("19s") && narrow.trim_end().ends_with("[stop]"),
+            "a 24-column row keeps its timer and stop control: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains("jev") && !narrow.contains("catalog"),
+            "the chip is omitted when it cannot fit beside the activity: {narrow:?}"
+        );
+
+        let wide = render(100);
+        assert!(
+            wide.contains("Waiting") && wide.contains("jev"),
+            "a wide row keeps the primary activity and the chip: {wide:?}"
+        );
+        assert!(
+            !wide.contains("TAIL"),
+            "the chip is truncated instead of growing without bound: {wide:?}"
+        );
+        assert!(
+            wide.trim_end().ends_with("19s [stop]"),
+            "a wide row keeps its timer and stop control: {wide:?}"
+        );
     }
 
     #[tokio::test]
