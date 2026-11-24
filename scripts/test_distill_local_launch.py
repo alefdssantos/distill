@@ -19,6 +19,10 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("distill-local-launch.py")
+# Enough PATH for fake runtimes' /usr/bin/env python3, without ~/.local/bin.
+TEST_PATH = os.pathsep.join(
+    [str(Path(sys.executable).parent), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+)
 _spec = importlib.util.spec_from_file_location("distill_local_launch", SCRIPT)
 launch = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = launch
@@ -78,6 +82,14 @@ if os.environ.get("FAKE_APP_IGNORE_SIGNALS"):
         signal.signal(signum, lambda *_: None)
 time.sleep(float(os.environ.get("FAKE_APP_SLEEP", "0")))
 sys.exit(int(os.environ.get("FAKE_APP_EXIT", "0")))
+"""
+
+FAKE_AGY = """\
+#!/bin/sh
+printf '%s\\n' "$@" > "$FAKE_AGY_CALLS"
+printf '%s\\n' "${DISTILL_HOME:-}" > "$FAKE_AGY_HOME"
+echo "agy-stdout"
+exit "${FAKE_AGY_EXIT:-0}"
 """
 
 
@@ -414,6 +426,117 @@ class ProcessTests(unittest.TestCase):
             if unrelated.poll() is None:
                 unrelated.terminate()
                 unrelated.wait(timeout=5)
+
+
+class GeminiTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        # Deliberately bare: routing must not need lib/distill, models, or ports.
+        self.runtime = self.root / "runtime"
+        self.runtime.mkdir()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.calls = self.root / "agy.calls"
+        write_executable(self.bin / "agy", FAKE_AGY)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_gemini(self, *args: str, agy_exit: str = "0", path: str | None = None):
+        env = fixture_env(
+            self.runtime,
+            PATH=str(self.bin) if path is None else path,
+            HOME=str(self.home),
+            FAKE_AGY_CALLS=str(self.calls),
+            FAKE_AGY_HOME=str(self.root / "agy.home"),
+            FAKE_AGY_EXIT=agy_exit,
+        )
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), str(self.runtime), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+        )
+
+    def test_login_gemini_execs_agy_acp_login_and_preserves_status(self):
+        result = self.run_gemini("login", "--gemini", agy_exit="7")
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["acp", "--login"])
+        self.assertIn("agy-stdout", result.stdout)
+        self.assertEqual(
+            (self.root / "agy.home").read_text().strip(),
+            str(self.runtime / "profile"),
+        )
+        self.assertFalse((self.runtime / "serve-model.calls").exists())
+
+    def test_models_gemini_execs_agy_models(self):
+        result = self.run_gemini("models", "--gemini")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["models"])
+        self.assertFalse((self.runtime / "serve-model.calls").exists())
+
+    def test_agy_found_in_local_bin_when_path_misses_it(self):
+        empty_bin = self.root / "empty-bin"
+        empty_bin.mkdir()
+        write_executable(self.home / ".local" / "bin" / "agy", FAKE_AGY)
+        result = self.run_gemini("models", "--gemini", path=str(empty_bin))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["models"])
+
+    def test_missing_agy_reports_actionable_error(self):
+        empty_bin = self.root / "empty-bin"
+        empty_bin.mkdir()
+        result = self.run_gemini("login", "--gemini", path=str(empty_bin))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('missing Gemini CLI "agy"', result.stderr)
+        self.assertIn("~/.local/bin", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_unrelated_arguments_still_exec_runtime_cli(self):
+        runtime = make_runtime(self.root)
+        env = fixture_env(
+            runtime,
+            PATH=os.pathsep.join([str(self.bin), TEST_PATH]),
+            HOME=str(self.home),
+            FAKE_AGY_CALLS=str(self.calls),
+            FAKE_APP_EXIT="4",
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), str(runtime), "models"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertEqual((runtime / "lib" / "distill.called").read_text(), "models")
+        self.assertFalse(self.calls.exists())
+
+    def test_extra_argument_is_not_intercepted(self):
+        runtime = make_runtime(self.root)
+        env = fixture_env(
+            runtime,
+            PATH=os.pathsep.join([str(self.bin), TEST_PATH]),
+            HOME=str(self.home),
+            FAKE_AGY_CALLS=str(self.calls),
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), str(runtime), "login", "--gemini", "extra"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            (runtime / "lib" / "distill.called").read_text(),
+            "login --gemini extra",
+        )
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":

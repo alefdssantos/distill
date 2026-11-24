@@ -10,7 +10,8 @@ this script leaves the working directory and environment unchanged.
 With no DISTILL_ARG the supervisor starts only the known endpoints selected by
 the profile, runs ``RUNTIME_ROOT/lib/distill`` with inherited stdio, and stops
 only the model processes it started. Any DISTILL_ARG (``login``, ``version``,
-``-p`` ...) skips supervision and execs the CLI directly.
+``-p`` ...) skips supervision and execs the CLI directly. ``login --gemini``
+and ``models --gemini`` instead exec the installed ``agy`` CLI.
 
 The runtime contract is one ``serve-model`` process that execs one
 ``mlx_lm.server``; the supervisor signals only that direct child.
@@ -23,6 +24,7 @@ import errno
 import fcntl
 import http.client
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -54,6 +56,12 @@ class Endpoint:
 QWEN = Endpoint("qwen", 8081, "http://127.0.0.1:8081/v1", "Qwen3.5-2B-4bit")
 LFM = Endpoint("lfm", 8082, "http://127.0.0.1:8082/v1", "LFM2.5-1.2B-Instruct-MLX-4bit")
 ENDPOINTS = (QWEN, LFM)
+
+# Exact Gemini commands routed to the official CLI; other arguments stay untouched.
+GEMINI_ROUTES = {
+    ("login", "--gemini"): ("acp", "--login"),
+    ("models", "--gemini"): ("models",),
+}
 
 
 class LaunchError(Exception):
@@ -445,6 +453,21 @@ def _session_lock(runtime: Path):
         os.close(fd)
 
 
+def _exec_gemini(args: tuple[str, ...]) -> None:
+    agy = shutil.which("agy")
+    if agy is None:
+        # The installer puts agy here without adding it to every interactive PATH.
+        local = Path.home() / ".local" / "bin" / "agy"
+        if os.access(local, os.X_OK):
+            agy = str(local)
+    if agy is None:
+        raise LaunchError(
+            'missing Gemini CLI "agy"; install it and put agy on PATH '
+            "or in ~/.local/bin, then retry"
+        )
+    os.execv(agy, ["agy", *args])
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv if argv is None else argv
     if len(argv) < 2:
@@ -463,6 +486,9 @@ def main(argv: list[str] | None = None) -> int:
             raise LaunchError(f"runtime directory does not exist: {runtime}")
 
         if app_args:
+            gemini_args = GEMINI_ROUTES.get(tuple(app_args))
+            if gemini_args is not None:
+                _exec_gemini(gemini_args)
             app = runtime / "lib" / "distill"
             _require_executable(app, "runtime CLI")
             os.execv(str(app), [str(app), *app_args])
