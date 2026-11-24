@@ -60,7 +60,7 @@ fn attributed_call(
 }
 
 #[test]
-fn local_replacement_meter_counts_only_complete_loopback_jev_and_used_utility() {
+fn local_replacement_meter_counts_complete_loopback_jev_and_used_utility() {
     use distill_chat_state::UsageCallStatus::{Completed, Rejected};
 
     let attributions = vec![
@@ -167,11 +167,98 @@ fn local_replacement_meter_counts_only_complete_loopback_jev_and_used_utility() 
 
     let (tokens, samples) = local_replacement_meter(&attributions);
     assert_eq!(
-        tokens, 47,
-        "prompt + completion only, duplicate attempt id folded once"
+        tokens, 54,
+        "prompt + completion only, rejected Jev included, duplicate attempt id folded once"
     );
-    assert_eq!(samples, vec![15, 27, 5]);
+    assert_eq!(samples, vec![15, 27, 5, 7]);
     assert_eq!(local_replacement_meter(&[]), (0, Vec::new()));
+}
+
+/// A local decision that rejects the answer still spent provider tokens. The observed HUD
+/// had only these rejected Jev calls, so requiring a completed one left the meter hidden.
+#[test]
+fn rejected_local_jev_calls_with_complete_usage_light_the_meter() {
+    use distill_chat_state::UsageCallStatus::{Cancelled, Failed, Rejected};
+
+    let attributions = vec![
+        attributed_call(
+            "jev-1",
+            "jev",
+            Some("http://127.0.0.1:11434/v1"),
+            Rejected,
+            Some((3000, 15)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-2",
+            "jev",
+            Some("http://localhost:11434/v1"),
+            Rejected,
+            Some((1191, 0)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-3",
+            "jev",
+            Some("http://[::1]:11434/v1"),
+            Rejected,
+            Some((361, 0)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-remote",
+            "jev",
+            Some("https://api.example.com/v1"),
+            Rejected,
+            Some((9_999, 9_999)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-failed",
+            "jev",
+            Some("http://localhost/v1"),
+            Failed,
+            Some((500, 0)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-cancelled",
+            "jev",
+            Some("http://localhost/v1"),
+            Cancelled,
+            Some((600, 0)),
+            true,
+            None,
+        ),
+        attributed_call(
+            "jev-missing-usage",
+            "jev",
+            Some("http://localhost/v1"),
+            Rejected,
+            None,
+            false,
+            None,
+        ),
+        attributed_call(
+            "utility-rejected",
+            "utility",
+            Some("http://localhost/v1"),
+            Rejected,
+            Some((700, 0)),
+            true,
+            Some("used"),
+        ),
+    ];
+
+    assert_eq!(
+        local_replacement_meter(&attributions),
+        (4_567, vec![3_015, 1_191, 361])
+    );
 }
 
 #[test]

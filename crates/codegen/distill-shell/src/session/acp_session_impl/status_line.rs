@@ -384,9 +384,11 @@ where
     }
 }
 
-/// Provider-reported local workload: completed Jev/utility calls on an explicit loopback
-/// endpoint. It is not the exact cost of the remote call it replaced. Sums prompt and
-/// completion only; cache and reasoning are subsets in `TokenUsage`. Resume does not
+/// Provider-reported local workload: completed or rejected Jev calls and completed used
+/// utility calls on an explicit loopback endpoint. Rejected Jev calls still spent the tokens
+/// and carry the only usage a local decision makes. It is not the exact cost of the remote
+/// call it replaced. Sums prompt and completion only; cache and reasoning are subsets in
+/// `TokenUsage`. Cancelled, failed and missing-usage calls never count. Resume does not
 /// rehydrate attributions, so this counts the current process only.
 fn local_replacement_meter(
     attributions: &[distill_chat_state::UsageAttribution],
@@ -416,15 +418,21 @@ fn local_replacement_meter(
 }
 
 fn is_local_replacement(attribution: &distill_chat_state::UsageAttribution) -> bool {
-    if attribution.status != distill_chat_state::UsageCallStatus::Completed
-        || !attribution.usage_complete
+    if !attribution.usage_complete
         || !explicit_loopback_endpoint(attribution.endpoint.as_deref())
     {
         return false;
     }
     match attribution.role.as_str() {
-        "jev" => true,
-        "utility" => attribution.final_decision.as_deref() == Some("used"),
+        "jev" => matches!(
+            attribution.status,
+            distill_chat_state::UsageCallStatus::Completed
+                | distill_chat_state::UsageCallStatus::Rejected
+        ),
+        "utility" => {
+            attribution.status == distill_chat_state::UsageCallStatus::Completed
+                && attribution.final_decision.as_deref() == Some("used")
+        }
         _ => false,
     }
 }
