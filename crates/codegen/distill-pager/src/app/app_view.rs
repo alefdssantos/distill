@@ -4759,6 +4759,14 @@ impl AppView {
                 if view_area.height > 0 {
                     match *active_view {
                         ActiveView::Welcome => {
+                            // Welcome names only a configured local decision model; the remote Jev badge stays out of it.
+                            let decision_label = distill_shell::jev::active_local_decision_model()
+                                .map(|model| {
+                                    crate::views::prompt_widget::local_decision_label(
+                                        distill_shell::jev::current_status_cached(),
+                                        &model,
+                                    )
+                                });
                             let mut flags_vec: Vec<crate::views::prompt_widget::PromptFlag<'_>> =
                                 Vec::new();
                             let theme = crate::theme::Theme::current();
@@ -4792,6 +4800,13 @@ impl AppView {
                                     });
                                 }
                                 _ => {}
+                            }
+                            if let Some(label) = decision_label.as_deref() {
+                                flags_vec.push(crate::views::prompt_widget::PromptFlag {
+                                    text: label,
+                                    color: None,
+                                    bold: false,
+                                });
                             }
                             if !self.welcome_prompt.text().is_empty() {
                                 self.welcome_tip_typing_dismissed = true;

@@ -23,9 +23,10 @@ const HOME_ACCOUNTS: usize = 1;
 const HOME_MAIN: usize = 2;
 const HOME_WORKER: usize = 3;
 const HOME_UTILITY: usize = 4;
-const HOME_EXECUTION_MODE: usize = 5;
-const HOME_SAVE: usize = 6;
-const HOME_ROWS: usize = 7;
+const HOME_DECISION: usize = 5;
+const HOME_EXECUTION_MODE: usize = 6;
+const HOME_SAVE: usize = 7;
+const HOME_ROWS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
@@ -55,6 +56,7 @@ pub enum Step {
     Model(Tier),
     Effort(Tier, String),
     Utility,
+    DecisionModel,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +66,9 @@ pub enum TierEditorOutcome {
         worker: String,
         utility: String,
         execution_mode: distill_tool_types::ExecutionModeChoice,
+        /// Explicit local decision endpoint `(base_url, served model id)`.
+        /// `None` keeps Jev remote.
+        decision: Option<(String, String)>,
     },
     Cancelled,
     Changed,
@@ -83,6 +88,7 @@ impl TierEditorOutcome {
                 worker,
                 utility,
                 execution_mode,
+                decision,
             } => (
                 false,
                 Some(Action::SetTierEditor {
@@ -90,6 +96,7 @@ impl TierEditorOutcome {
                     worker,
                     utility,
                     execution_mode,
+                    decision,
                 }),
                 true,
             ),
@@ -169,6 +176,11 @@ pub struct TierEditorState {
     pub worker_effort: Option<ReasoningEffort>,
     pub utility: LineEditor,
     pub execution_mode: distill_tool_types::ExecutionModeChoice,
+    /// Explicit local decision endpoint `(base_url, served model id)`.
+    /// `None` means remote Jev.
+    pub decision: Option<(String, String)>,
+    /// Eligible local catalog entries: `(display name, base_url, served model id)`.
+    pub decision_entries: Vec<(String, String, String)>,
     pub auto: AutoSummary,
     pub auto_pending: bool,
     /// Display names of the pair Auto chose for this session.
@@ -179,6 +191,7 @@ pub struct TierEditorState {
     /// Message under the list and whether it is an error.
     pub status: Option<(String, bool)>,
     initial: Submission,
+    initial_decision: Option<(String, String)>,
     confirm_discard: bool,
     scroll: usize,
     hit_rows: Vec<(Rect, usize)>,
@@ -190,11 +203,15 @@ impl TierEditorState {
             .model
             .clone()
             .unwrap_or_default();
+        let mut utility_entries = crate::slash::commands::provider_status::openrouter_entries();
+        append_local_utility_entries(&mut utility_entries);
         Self::from_parts(
             models,
             AutoSummary::load(),
             utility,
-            crate::slash::commands::provider_status::openrouter_entries(),
+            utility_entries,
+            distill_shell::jev::local_decision_candidates(),
+            distill_shell::jev::configured_local_decision_model(),
             || {
                 distill_shell::config::load_effective_config()
                     .ok()?
@@ -214,6 +231,8 @@ impl TierEditorState {
         auto: AutoSummary,
         utility: String,
         utility_entries: Vec<(String, String)>,
+        decision_entries: Vec<(String, String, String)>,
+        configured_decision: Option<(String, String)>,
         configured_main: impl FnOnce() -> Option<String>,
     ) -> Self {
         let main = match models.current_model_id_str() {
@@ -233,6 +252,8 @@ impl TierEditorState {
             worker_effort: models.worker_effort,
             utility: LineEditor::default(),
             execution_mode: models.execution_mode_choice,
+            decision: configured_decision.clone(),
+            decision_entries,
             auto,
             auto_pending: false,
             routed: models
@@ -253,6 +274,7 @@ impl TierEditorState {
             query: LineEditor::default(),
             status: None,
             initial: Default::default(),
+            initial_decision: configured_decision,
             confirm_discard: false,
             scroll: 0,
             hit_rows: Vec::new(),
@@ -280,7 +302,7 @@ impl TierEditorState {
     }
 
     pub fn dirty(&self) -> bool {
-        self.submission() != self.initial
+        self.submission() != self.initial || self.decision != self.initial_decision
     }
 
     fn name_of(&self, id: &str) -> String {
@@ -315,6 +337,7 @@ impl TierEditorState {
             Step::Model(tier) => self.filtered().len() + usize::from(*tier == Tier::Worker),
             Step::Effort(_, id) => 1 + self.efforts_for(id).len(),
             Step::Utility => self.utility_entries.len() + 2,
+            Step::DecisionModel => self.decision_entries.len() + 1,
         }
     }
 
@@ -376,6 +399,7 @@ impl TierEditorState {
             worker,
             utility,
             execution_mode,
+            decision: self.decision.clone(),
         }
     }
 
@@ -385,6 +409,7 @@ impl TierEditorState {
             Step::Model(tier) => self.pick_model(tier),
             Step::Effort(tier, id) => self.pick_effort(tier, &id),
             Step::Utility => self.pick_utility(),
+            Step::DecisionModel => self.pick_decision_model(),
         }
     }
 
@@ -440,6 +465,19 @@ impl TierEditorState {
                         .map_or(0, |index| index + 1)
                 };
                 self.go(Step::Utility, selected);
+                TierEditorOutcome::Changed
+            }
+            HOME_DECISION => {
+                let selected = self
+                    .decision
+                    .as_ref()
+                    .and_then(|decision| {
+                        self.decision_entries
+                            .iter()
+                            .position(|(_, base, model)| base == &decision.0 && model == &decision.1)
+                    })
+                    .map_or(0, |index| index + 1);
+                self.go(Step::DecisionModel, selected);
                 TierEditorOutcome::Changed
             }
             HOME_EXECUTION_MODE => {
@@ -563,6 +601,31 @@ impl TierEditorState {
         TierEditorOutcome::Changed
     }
 
+    fn pick_decision_model(&mut self) -> TierEditorOutcome {
+        if self.selected == 0 {
+            self.decision = None;
+            self.status = Some((
+                "Decision model: Jev remoto. Press s to save; restart to apply.".to_owned(),
+                false,
+            ));
+            self.back_home(HOME_DECISION);
+            return TierEditorOutcome::Changed;
+        }
+        let Some((name, base, model)) = self.decision_entries.get(self.selected - 1).cloned()
+        else {
+            return TierEditorOutcome::Unchanged;
+        };
+        self.decision = Some((base.clone(), model.clone()));
+        self.status = Some((
+            format!(
+                "Decision model: {name} · {model} · {base}. Press s to save; restart to apply."
+            ),
+            false,
+        ));
+        self.back_home(HOME_DECISION);
+        TierEditorOutcome::Changed
+    }
+
     pub fn handle_key(&mut self, key: &KeyEvent) -> TierEditorOutcome {
         if key.kind == KeyEventKind::Release {
             return TierEditorOutcome::Unchanged;
@@ -636,6 +699,15 @@ impl TierEditorState {
                 ),
                 _ => TierEditorOutcome::Unchanged,
             },
+            Step::DecisionModel => match key.code {
+                KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => {
+                    self.back_home(HOME_DECISION);
+                    TierEditorOutcome::Changed
+                }
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => self.activate(),
+                code if self.navigate(code, shift) => TierEditorOutcome::Changed,
+                _ => TierEditorOutcome::Unchanged,
+            },
         }
     }
 
@@ -701,6 +773,25 @@ fn edit_outcome(outcome: LineEditOutcome) -> TierEditorOutcome {
         LineEditOutcome::HandledNoChange
         | LineEditOutcome::CursorChanged
         | LineEditOutcome::TextChanged => TierEditorOutcome::Changed,
+    }
+}
+
+/// Add the local utility candidates to the list, keeping the existing
+/// OpenRouter entries. The key is the catalog id; the display name is shown
+/// alongside it.
+fn append_local_utility_entries(entries: &mut Vec<(String, String)>) {
+    append_local_utility_entries_from(entries, distill_shell::jev::local_utility_candidates());
+}
+
+fn append_local_utility_entries_from(
+    entries: &mut Vec<(String, String)>,
+    candidates: Vec<(String, String)>,
+) {
+    for (catalog_id, display) in candidates {
+        if entries.iter().any(|(existing, _)| existing == &catalog_id) {
+            continue;
+        }
+        entries.push((catalog_id, display));
     }
 }
 
@@ -790,6 +881,7 @@ fn step_title(step: &Step) -> String {
         Step::Model(tier) => format!("{} model", tier.name()),
         Step::Effort(tier, _) => format!("{} effort", tier.name()),
         Step::Utility => "Utility model".to_owned(),
+        Step::DecisionModel => "Decision model".to_owned(),
     }
 }
 
@@ -925,6 +1017,17 @@ fn intro(state: &TierEditorState, theme: &Theme) -> (&'static str, Vec<Line<'sta
             )));
             "◇"
         }
+        Step::DecisionModel => {
+            lines.push(strong("Choose the Decision model".into(), theme.text_primary));
+            lines.push(Line::from(
+                "Jev remoto is the default decision service. A local catalog entry runs decisions on this machine.",
+            ));
+            lines.push(Line::from(dim(
+                "Local entries need an OpenAI chat endpoint on loopback. Changes apply after restart.",
+                theme,
+            )));
+            "◈"
+        }
     };
     (icon, lines)
 }
@@ -937,6 +1040,7 @@ fn list(state: &TierEditorState, theme: &Theme) -> (String, Vec<ListLine>) {
             HOME_MAIN => now.0 != state.initial.0,
             HOME_WORKER => now.1 != state.initial.1,
             HOME_UTILITY => now.2 != state.initial.2,
+            HOME_DECISION => state.decision != state.initial_decision,
             _ => now.3 != state.initial.3,
         };
         if differs {
@@ -1011,6 +1115,22 @@ fn list(state: &TierEditorState, theme: &Theme) -> (String, Vec<ListLine>) {
             };
             utility_value.extend(changed(HOME_UTILITY));
             lines.push(row(HOME_UTILITY, "Utility", utility_value));
+            let mut decision_value = match &state.decision {
+                None => vec![dim("Jev remoto · OpenRouter decisions", theme)],
+                Some((base, model)) => {
+                    let name = state
+                        .decision_entries
+                        .iter()
+                        .find(|(_, entry_base, entry_model)| entry_base == base && entry_model == model)
+                        .map_or(model.clone(), |(name, _, _)| name.clone());
+                    vec![
+                        Span::raw(format!("{name} · {model}")),
+                        dim(format!(" · {base}"), theme),
+                    ]
+                }
+            };
+            decision_value.extend(changed(HOME_DECISION));
+            lines.push(row(HOME_DECISION, "Decision model", decision_value));
             lines.push(heading("Mode", theme));
             let mut execution_mode = vec![Span::styled(
                 state.execution_mode.label(),
@@ -1101,6 +1221,31 @@ fn list(state: &TierEditorState, theme: &Theme) -> (String, Vec<ListLine>) {
             ));
             "Utility model".to_owned()
         }
+        Step::DecisionModel => {
+            let remote = state.decision.is_none();
+            let mut remote_value = vec![dim("OpenRouter decisions", theme)];
+            if remote {
+                remote_value.push(Span::styled(" ✓", Style::default().fg(theme.accent_success)));
+            }
+            lines.push(row(0, "Jev remoto", remote_value));
+            for (index, (name, base, model)) in state.decision_entries.iter().enumerate() {
+                let selected = state
+                    .decision
+                    .as_ref()
+                    .is_some_and(|(chosen_base, chosen_model)| {
+                        chosen_base == base && chosen_model == model
+                    });
+                let mut value = vec![
+                    Span::raw(model.clone()),
+                    dim(format!(" · {base}"), theme),
+                ];
+                if selected {
+                    value.push(Span::styled(" ✓", Style::default().fg(theme.accent_success)));
+                }
+                lines.push(row(index + 1, name.clone(), value));
+            }
+            "Decision model".to_owned()
+        }
     };
     (title, lines)
 }
@@ -1136,6 +1281,7 @@ fn footer(step: &Step, width: u16, theme: &Theme) -> Line<'static> {
             ("Enter", "Choose"),
             ("Esc", "Back"),
         ],
+        Step::DecisionModel => &[("↑↓", "Move"), ("Enter", "Choose"), ("Esc", "Back")],
     };
     if width < 50 {
         return Line::from(
@@ -1467,7 +1613,7 @@ mod tests {
     }
 
     fn editor(auto: AutoSummary) -> TierEditorState {
-        TierEditorState::from_parts(&models(), auto, String::new(), vec![], || None)
+        TierEditorState::from_parts(&models(), auto, String::new(), vec![], vec![], None, || None)
     }
 
     /// Saving without edits must not rewrite anything: the screen opens on the
@@ -1490,7 +1636,7 @@ mod tests {
     fn auto_session_edits_the_configured_main_not_the_auto_placeholder() {
         let mut models = models();
         models.current = Some(agent_client_protocol::ModelId::new("auto"));
-        let state = TierEditorState::from_parts(&models, routes(true, 1), String::new(), vec![], || {
+        let state = TierEditorState::from_parts(&models, routes(true, 1), String::new(), vec![], vec![], None, || {
             Some("claude/claude-opus-5-5".to_owned())
         });
         assert_eq!(state.main.as_deref(), Some("claude/claude-opus-5-5"));
@@ -1525,6 +1671,7 @@ mod tests {
                 worker: "chatgpt/gpt-6-luna medium".into(),
                 utility: String::new(),
                 execution_mode: distill_tool_types::ExecutionModeChoice::Auto,
+                decision: None,
             }
         );
     }
@@ -1630,7 +1777,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::render_tier_editor_overlay(&mut buf, area, &mut window, &mut state, false, &theme);
         let text: String = buf.content().iter().map(|cell| cell.symbol()).collect();
-        for expected in ["Auto routing is on", "Accounts & routes", "+2 more", "Execution", "Auto"] {
+        for expected in [
+            "Auto routing is on",
+            "Accounts & routes",
+            "+2 more",
+            "Decision model",
+            "Execution",
+            "Auto",
+        ] {
             assert!(text.contains(expected), "missing {expected}");
         }
         assert_eq!(state.hit_rows.len(), super::HOME_ROWS);
@@ -1645,5 +1799,94 @@ mod tests {
         let mut buf = Buffer::empty(small);
         super::render_tier_editor_overlay(&mut buf, small, &mut window, &mut state, false, &theme);
         assert!(state.hit_rows.is_empty());
+    }
+
+    fn local_decision_state(configured: Option<(String, String)>) -> TierEditorState {
+        TierEditorState::from_parts(
+            &models(),
+            AutoSummary::default(),
+            String::new(),
+            vec![],
+            vec![(
+                "Qwen Local".to_owned(),
+                "http://127.0.0.1:8080/v1".to_owned(),
+                "qwen3-local".to_owned(),
+            )],
+            configured,
+            || None,
+        )
+    }
+
+    /// The decision row starts on remote Jev and saves an explicit local
+    /// endpoint `(base_url, served model id)` without touching Main or Worker.
+    #[test]
+    fn decision_defaults_to_remote_and_saves_a_local_candidate() {
+        let mut state = local_decision_state(None);
+        assert_eq!(state.decision, None);
+        state.activate_home(super::HOME_DECISION);
+        assert_eq!(state.step, Step::DecisionModel);
+        assert_eq!(state.selected, 0, "remote Jev is the default row");
+        state.handle_key(&key(KeyCode::Down));
+        assert_eq!(state.handle_key(&key(KeyCode::Enter)), TierEditorOutcome::Changed);
+        assert_eq!(state.step, Step::Home);
+        assert_eq!(
+            state.decision,
+            Some(("http://127.0.0.1:8080/v1".to_owned(), "qwen3-local".to_owned()))
+        );
+        assert!(state.dirty());
+        let outcome = state.handle_key(&key(KeyCode::Char('s')));
+        assert!(matches!(
+            outcome,
+            TierEditorOutcome::Submitted {
+                decision: Some((base, model)),
+                ..
+            } if base == "http://127.0.0.1:8080/v1" && model == "qwen3-local"
+        ));
+    }
+
+    /// A saved decision override opens on its candidate and is not dirty until
+    /// the user changes it. Selecting remote clears the override.
+    #[test]
+    fn configured_decision_opens_selected_and_remote_clears_it() {
+        let configured = Some((
+            "http://127.0.0.1:8080/v1".to_owned(),
+            "qwen3-local".to_owned(),
+        ));
+        let mut state = local_decision_state(configured);
+        assert!(!state.dirty());
+        state.activate_home(super::HOME_DECISION);
+        assert_eq!(state.selected, 1, "opens on the configured local candidate");
+        state.handle_key(&key(KeyCode::Home));
+        assert_eq!(state.handle_key(&key(KeyCode::Enter)), TierEditorOutcome::Changed);
+        assert_eq!(state.decision, None);
+        assert!(state.dirty());
+        assert!(matches!(
+            state.handle_key(&key(KeyCode::Char('s'))),
+            TierEditorOutcome::Submitted { decision: None, .. }
+        ));
+    }
+
+    /// Local utility candidates extend the list by catalog id; existing
+    /// OpenRouter entries stay. Two entries may share a display label while
+    /// their ids differ, so the id is what dedupes and what gets saved.
+    #[test]
+    fn local_utility_entries_keep_openrouter_and_dedupe_by_catalog_id() {
+        let mut entries = vec![("openrouter-qwen".to_owned(), "qwen/qwen3".to_owned())];
+        super::append_local_utility_entries_from(
+            &mut entries,
+            vec![
+                ("local-qwen".to_owned(), "Qwen Local".to_owned()),
+                ("local-qwen-alt".to_owned(), "Qwen Local".to_owned()),
+                ("local-qwen".to_owned(), "Qwen Local".to_owned()),
+            ],
+        );
+        assert_eq!(entries[0].0, "openrouter-qwen", "old entry kept");
+        assert!(entries.iter().any(|(id, _)| id == "local-qwen"));
+        assert!(entries.iter().any(|(id, _)| id == "local-qwen-alt"));
+        assert_eq!(
+            entries.iter().filter(|(id, _)| id == "local-qwen").count(),
+            1,
+            "duplicate catalog id is ignored"
+        );
     }
 }

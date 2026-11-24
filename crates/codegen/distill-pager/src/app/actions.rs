@@ -715,6 +715,9 @@ pub enum Action {
         worker: String,
         utility: String,
         execution_mode: distill_tool_types::ExecutionModeChoice,
+        /// Explicit local decision endpoint `(base_url, served model id)`.
+        /// `None` keeps Jev remote.
+        decision: Option<(String, String)>,
     },
     /// Rename the current session's title/summary.
     RenameSession {
@@ -1800,6 +1803,11 @@ pub enum Effect {
         model: String,
         effort: Option<ReasoningEffort>,
         is_catalog_model: bool,
+    },
+    /// Persist the decision model override `(base_url, served model id)`.
+    /// `None` restores remote Jev.
+    PersistDecisionModel {
+        value: Option<(String, String)>,
     },
     /// Persist a typed setting; roll back the cache if the write fails.
     PersistSetting {
@@ -3456,6 +3464,8 @@ pub enum TaskResult {
         model: String,
         warning: Option<String>,
     },
+    /// Decision model override persisted. Applies after restart.
+    DecisionModelPersisted,
     /// Setting persisted successfully. No reconciliation needed today.
     SettingPersisted {
         key: crate::settings::SettingKey,

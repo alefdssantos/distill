@@ -19,7 +19,7 @@ use super::provider::{
     parse_response_metadata,
 };
 use super::types::{
-    AttemptGuard, AttemptObserver, AttemptStatus, JevAnswerSet, Json, Question, QuestionId,
+    Answer, AttemptGuard, AttemptObserver, AttemptStatus, JevAnswerSet, Json, Question, QuestionId,
     SystemOneRequest, SystemOneResponse, Usage,
 };
 
@@ -149,6 +149,81 @@ fn env_key_resolver() -> ApiKeyResolver {
     Arc::new(|name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
 }
 
+/// Validates a local chat base URL: an explicit IPv4/IPv6 loopback address over
+/// HTTP(S), with no userinfo, query, or fragment. Names such as `localhost` are
+/// rejected because only the literal loopback addresses are unambiguous.
+pub fn validate_local_base_url(base_url: &str) -> Result<(), JevError> {
+    let url = url::Url::parse(base_url.trim())
+        .map_err(|_| JevError::invalid("local chat URL must be an absolute http(s) URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(JevError::invalid("local chat URL must use http or https"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(JevError::invalid("local chat URL must not carry userinfo"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(JevError::invalid(
+            "local chat URL must not carry a query or fragment",
+        ));
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) if ip.is_loopback() => Ok(()),
+        Some(url::Host::Ipv6(ip)) if ip.is_loopback() => Ok(()),
+        _ => Err(JevError::invalid(
+            "local chat URL must name an explicit IPv4 or IPv6 loopback address",
+        )),
+    }
+}
+
+fn build_http_client(local: bool) -> Result<reqwest::Client, JevError> {
+    distill_extra_ca::build_reqwest_client(|builder| {
+        let builder = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .user_agent("grok-jev-client");
+        if local { builder.no_proxy() } else { builder }
+    })
+    .map_err(|e| JevError::transport(format!("http client build failed: {e}")))
+}
+
+fn strip_self_rated(
+    answers: &mut BTreeMap<QuestionId, Answer>,
+    questions: &BTreeMap<QuestionId, Question>,
+) {
+    for (id, answer) in answers.iter_mut() {
+        match answer {
+            Answer::Noul { .. } => {}
+            Answer::Choice {
+                confidence,
+                probabilities,
+                ..
+            } => {
+                *confidence = None;
+                probabilities.clear();
+            }
+            Answer::Score {
+                legend,
+                confidence,
+                probabilities,
+                ..
+            } => {
+                if let Some(Question::Score { criteria, .. }) = questions.get(id) {
+                    legend.clear();
+                    legend.extend(
+                        criteria
+                            .iter()
+                            .enumerate()
+                            .map(|(level, value)| (level.to_string(), value.clone())),
+                    );
+                }
+                *confidence = None;
+                probabilities.clear();
+            }
+        }
+    }
+}
+
 impl JevClient {
     /// Builds a client through the workspace-sanctioned TLS policy builder.
     pub fn new(config: JevClientConfig) -> Result<Self, JevError> {
@@ -158,36 +233,40 @@ impl JevClient {
     /// Test seam: injects the credential resolver instead of reading the process
     /// environment (keeps tests hermetic and free of global env mutation).
     pub fn with_key_resolver(
-        config: JevClientConfig,
+        mut config: JevClientConfig,
         key_resolver: ApiKeyResolver,
     ) -> Result<Self, JevError> {
-        if config.provider != JevProvider::OpenRouterDecisions {
-            return Err(JevError::invalid("Jev requires the OpenRouter Decisions provider"));
+        let local = config.provider == JevProvider::LocalChat;
+        if local {
+            validate_local_base_url(&config.base_url)?;
+            config.base_url = config.base_url.trim().to_owned();
+            config.model = config.model.trim().to_owned();
+            if config.model.is_empty() {
+                return Err(JevError::invalid("local chat model must not be empty"));
+            }
+            config.reasoning_shape = ReasoningShape::None;
+        } else {
+            if config.provider != JevProvider::OpenRouterDecisions {
+                return Err(JevError::invalid("Jev requires the OpenRouter Decisions provider"));
+            }
+            if config.api_key_env != DEFAULT_API_KEY_ENV {
+                return Err(JevError::invalid("Jev requires OPENROUTER_API_KEY"));
+            }
+            if !is_decision_model(&config.model) {
+                return Err(JevError::invalid(
+                    "decision model must be a typesafe/jev or liquid/d1.2 model",
+                ));
+            }
+            let production_url = config.base_url.trim_end_matches('/') == DEFAULT_BASE_URL;
+            #[cfg(test)]
+            let test_url = config.base_url.starts_with("http://127.0.0.1:") || config.base_url.starts_with("http://localhost:");
+            #[cfg(not(test))]
+            let test_url = false;
+            if !production_url && !test_url {
+                return Err(JevError::invalid("Jev endpoint must use https://openrouter.ai/api"));
+            }
         }
-        if config.api_key_env != DEFAULT_API_KEY_ENV {
-            return Err(JevError::invalid("Jev requires OPENROUTER_API_KEY"));
-        }
-        if !is_decision_model(&config.model) {
-            return Err(JevError::invalid(
-                "decision model must be a typesafe/jev or liquid/d1.2 model",
-            ));
-        }
-        let production_url = config.base_url.trim_end_matches('/') == DEFAULT_BASE_URL;
-        #[cfg(test)]
-        let test_url = config.base_url.starts_with("http://127.0.0.1:") || config.base_url.starts_with("http://localhost:");
-        #[cfg(not(test))]
-        let test_url = false;
-        if !production_url && !test_url {
-            return Err(JevError::invalid("Jev endpoint must use https://openrouter.ai/api"));
-        }
-        let http = distill_extra_ca::build_reqwest_client(|builder| {
-            builder
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(5))
-                .pool_idle_timeout(Duration::from_secs(30))
-                .user_agent("grok-jev-client")
-        })
-        .map_err(|e| JevError::transport(format!("http client build failed: {e}")))?;
+        let http = build_http_client(local)?;
         Ok(Self {
             http,
             config,
@@ -201,6 +280,11 @@ impl JevClient {
 
     #[cfg(test)]
     pub fn with_test_base_url(mut config: JevClientConfig, base_url: String, key_resolver: ApiKeyResolver) -> Result<Self, JevError> {
+        if config.provider == JevProvider::LocalChat {
+            validate_local_base_url(&base_url)?;
+            config.base_url = base_url;
+            return Self::with_key_resolver(config, key_resolver);
+        }
         if !base_url.starts_with("http://127.0.0.1:") && !base_url.starts_with("http://localhost:") {
             return Err(JevError::invalid("test Jev endpoint must be localhost"));
         }
@@ -228,9 +312,11 @@ impl JevClient {
         &self.config
     }
 
-    /// Whether the configured credential is currently resolvable (never leaks it).
+    /// Whether the configured credential is currently resolvable (never leaks
+    /// it). A local chat endpoint needs no credential, so it is always ready.
     pub fn credential_present(&self) -> bool {
-        (self.key_resolver)(&self.config.api_key_env).is_some()
+        self.config.provider == JevProvider::LocalChat
+            || (self.key_resolver)(&self.config.api_key_env).is_some()
     }
 
     /// Reuses a recent successful decision for the same session and exact
@@ -316,6 +402,11 @@ impl JevClient {
                 .validate()
                 .map_err(|e| JevError::invalid(format!("question `{id}`: {}", e.detail())))?;
         }
+        if long_context && self.config.provider == JevProvider::LocalChat {
+            return Err(JevError::invalid(
+                "local chat has no long-context protocol; defer this request",
+            ));
+        }
 
         let state_bytes = serde_json::to_vec(state)
             .map_err(|e| JevError::invalid(format!("state serialization failed: {e}")))?
@@ -345,12 +436,16 @@ impl JevClient {
             )));
         }
 
-        let secret = (self.key_resolver)(&self.config.api_key_env).ok_or_else(|| {
-            JevError::invalid(format!(
-                "credential env `{}` is unset or empty",
-                self.config.api_key_env
-            ))
-        })?;
+        let secret = if self.config.provider == JevProvider::LocalChat {
+            String::new()
+        } else {
+            (self.key_resolver)(&self.config.api_key_env).ok_or_else(|| {
+                JevError::invalid(format!(
+                    "credential env `{}` is unset or empty",
+                    self.config.api_key_env
+                ))
+            })?
+        };
 
         let started = Instant::now();
         let deadline = if long_context {
@@ -375,8 +470,9 @@ impl JevClient {
             ));
         }
 
+        let credential = (!secret.is_empty()).then_some(secret.as_str());
         let (status, request_id, retry_after_ms, bytes) =
-            match post_within(&http, &url, &secret, body, deadline, long_context).await {
+            match post_within(&http, &url, credential, body, deadline, long_context).await {
                 Err(_) => {
                     return Err(JevError::timeout(format!(
                         "no complete response within {} ms",
@@ -446,6 +542,11 @@ impl JevClient {
             EXTRACTIONS_PATH, ExtractionRequest, MAX_EXTRACTION_STATE_BYTES, MAX_FIELDS,
             read_reply, validate_field_id,
         };
+        if self.config.provider == JevProvider::LocalChat {
+            return Err(JevError::invalid(
+                "field extraction is not supported by the local chat protocol; defer",
+            ));
+        }
         if !is_liquid_d12(&self.config.model) {
             return Err(JevError::invalid(
                 "field extraction is served by liquid/d1.2 models only",
@@ -495,7 +596,7 @@ impl JevClient {
         let started = Instant::now();
         let deadline = self.config.timeout;
         let (status, request_id, retry_after_ms, bytes) =
-            match post_within(&self.http, &url, &secret, body, deadline, false).await {
+            match post_within(&self.http, &url, Some(&secret), body, deadline, false).await {
                 Err(_) => {
                     return Err(JevError::timeout(format!(
                         "no complete response within {} ms",
@@ -562,6 +663,7 @@ impl JevClient {
             })
             .map_err(|e| JevError::invalid(format!("request serialization failed: {e}")));
         }
+        let local = self.config.provider == JevProvider::LocalChat;
         let body = chat_request_body(
             state,
             questions,
@@ -570,7 +672,11 @@ impl JevClient {
             &self.config.reasoning_effort,
             self.config.max_completion_tokens,
         )
-        .and_then(|body| {
+        .and_then(|mut body| {
+            if local && let Some(body) = body.as_object_mut() {
+                body.remove("models");
+                body.insert("model".into(), Json::String(self.config.model.clone()));
+            }
             serde_json::to_vec(&body)
                 .map_err(|e| JevError::invalid(format!("request serialization failed: {e}")))
         })?;
@@ -602,7 +708,10 @@ impl JevClient {
                     "answer was cut at the completion ceiling, so it cannot be read",
                 ));
             }
-            let answers = super::provider::parse_decision_answers(&content, questions)?;
+            let mut answers = super::provider::parse_decision_answers(&content, questions)?;
+            if self.config.provider == JevProvider::LocalChat {
+                strip_self_rated(&mut answers, questions);
+            }
             return Ok(JevAnswerSet {
                 model: model.unwrap_or_else(|| self.config.model.clone()),
                 answers,
@@ -661,7 +770,7 @@ pub(super) type PostParts = (reqwest::StatusCode, Option<String>, Option<u64>, V
 pub(super) async fn post_within(
     http: &reqwest::Client,
     url: &str,
-    secret: &str,
+    secret: Option<&str>,
     body: Vec<u8>,
     deadline: Duration,
     long_context: bool,
@@ -669,8 +778,10 @@ pub(super) async fn post_within(
     let attempt = async {
         let mut request = http
             .post(url)
-            .bearer_auth(secret)
             .header(reqwest::header::CONTENT_TYPE, "application/json");
+        if let Some(secret) = secret {
+            request = request.bearer_auth(secret);
+        }
         if long_context {
             request = request.header("TypeSafe-Danger-Zone-Long-Context", "true");
         }
@@ -872,6 +983,136 @@ mod tests {
         };
         let resolver: ApiKeyResolver = Arc::new(|_| Some(TEST_KEY.to_owned()));
         JevClient::with_test_base_url(config, base_url, resolver).expect("client builds")
+    }
+
+    #[test]
+    fn local_url_validator_accepts_explicit_loopback_only() {
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8080/v1",
+            "https://127.0.0.1",
+            "http://[::1]:8080/v1",
+        ] {
+            validate_local_base_url(url).unwrap_or_else(|error| panic!("{url}: {error}"));
+        }
+        for url in [
+            "",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080?token=x",
+            "http://127.0.0.1:8080#fragment",
+            "http://user@127.0.0.1:8080",
+            "http://127.0.0.1:9@evil.com",
+            "http://192.168.1.2:8080",
+            "https://api.example.com/v1",
+            "ftp://127.0.0.1:8080",
+        ] {
+            let error = validate_local_base_url(url).expect_err(url);
+            assert!(error.detail().contains("local chat"), "{url}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn local_chat_request_uses_no_auth_and_strips_calibration() {
+        let content = serde_json::json!({
+            "answers": {
+                "escapes": {"answer": true},
+                "risk": {"choice": "routine_build", "confidence": 0.99,
+                          "probabilities": {"routine_build": 1.0, "mutating_local": 0.0, "destructive": 0.0}},
+                "severity": {"score": 2, "confidence": 0.9,
+                              "probabilities": {"0": 0.05, "1": 0.05, "2": 0.9}}
+            }
+        })
+        .to_string();
+        let reply = serde_json::json!({
+            "model": "local-model",
+            "id": "local-1",
+            "choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}]
+        })
+        .to_string();
+        let stub = Stub::new(StubReply::Json(200, reply));
+        let base = spawn_stub(stub.clone()).await;
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resolver: ApiKeyResolver = {
+            let called = called.clone();
+            Arc::new(move |_| {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(TEST_KEY.to_owned())
+            })
+        };
+        let config = JevClientConfig {
+            base_url: base.clone(),
+            model: "  local-model, fallback-model  ".to_owned(),
+            provider: JevProvider::LocalChat,
+            ..JevClientConfig::default()
+        };
+        let client = JevClient::with_test_base_url(config, format!(" {base}/ "), resolver)
+            .expect("local client builds");
+        assert_eq!(client.config().base_url, format!("{base}/"));
+        assert_eq!(client.config().model, "local-model, fallback-model");
+        assert!(client.credential_present());
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst), "local readiness must not resolve a key");
+
+        let answers = client
+            .ask(&serde_json::json!({"a": 1}), &sample_questions())
+            .await
+            .expect("local chat answers");
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst), "local ask must not resolve a key");
+        assert_eq!(answers.noul("escapes"), Some(1.0));
+        assert_eq!(answers.choice("risk"), Some("routine_build"));
+        assert_eq!(answers.confidence("risk"), None);
+        assert_eq!(answers.probability("risk", "routine_build"), None);
+        match &answers.answers["severity"] {
+            Answer::Score { score, legend, confidence, probabilities, .. } => {
+                assert_eq!(*score, 2.0);
+                assert_eq!(legend.len(), 3);
+                assert_eq!(*confidence, None);
+                assert!(probabilities.is_empty());
+            }
+            other => panic!("expected score, got {other:?}"),
+        }
+        assert_eq!(answers.score_normalized("severity"), Some(1.0));
+
+        let sent: Json = serde_json::from_str(&stub.last_body()).expect("local body is JSON");
+        assert_eq!(sent["model"], "local-model, fallback-model");
+        assert!(sent["messages"].is_array(), "local uses the shared chat rendering");
+        assert!(sent.get("models").is_none(), "local sends one literal model, no fallbacks");
+        assert!(sent.get("reasoning").is_none(), "local reasoning shape is none");
+        assert!(sent.get("questions").is_none(), "local is not a typed-envelope host");
+        assert!(stub.last_auth().is_empty(), "local mode sends no Authorization");
+        assert_eq!(stub.long_context_headers(), vec![false]);
+        assert_eq!(stub.hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn local_chat_rejects_unsupported_paths_before_io() {
+        let stub = Stub::new(StubReply::Json(200, ok_body()));
+        let base = spawn_stub(stub.clone()).await;
+        let resolver: ApiKeyResolver = Arc::new(|_| Some(TEST_KEY.to_owned()));
+        let local = JevClientConfig {
+            base_url: base.clone(),
+            model: "liquid/d1.2".to_owned(),
+            provider: JevProvider::LocalChat,
+            ..JevClientConfig::default()
+        };
+        let client = JevClient::with_test_base_url(local.clone(), base.clone(), resolver.clone())
+            .expect("local client builds");
+
+        let error = client
+            .ask_long(&serde_json::json!({"a": 1}), &sample_questions())
+            .await
+            .expect_err("local has no long-context header");
+        assert_eq!(error.kind(), JevErrorKind::Invalid);
+        let no_fields = BTreeMap::new();
+        assert!(client
+            .extract("text", &no_fields)
+            .await
+            .expect_err("local has no extraction route")
+            .detail()
+            .contains("local chat"));
+        assert_eq!(stub.hits(), 0, "unsupported local paths fail before network");
+
+        let empty_model = JevClientConfig { model: "  ".to_owned(), ..local };
+        assert!(JevClient::with_test_base_url(empty_model, base, resolver).is_err());
     }
 
     fn ok_body() -> String {

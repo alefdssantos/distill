@@ -32,6 +32,9 @@ pub enum JevProvider {
     OpenRouterDecisions,
     /// OpenAI-compatible chat completions (any chat model).
     OpenRouter,
+    /// An OpenAI-compatible chat endpoint on this machine. Text-only, no auth,
+    /// no proxy, and no calibrated confidence: its answers are not calibrated.
+    LocalChat,
 }
 
 impl JevProvider {
@@ -43,6 +46,7 @@ impl JevProvider {
                 Some(Self::OpenRouterDecisions)
             }
             "openrouter" | "open-router" | "chat_completions" => Some(Self::OpenRouter),
+            "local_chat" | "local-chat" | "local" => Some(Self::LocalChat),
             _ => None,
         }
     }
@@ -52,6 +56,7 @@ impl JevProvider {
             Self::Typesafe => "typesafe",
             Self::OpenRouterDecisions => "openrouter_decisions",
             Self::OpenRouter => "openrouter",
+            Self::LocalChat => "local_chat",
         }
     }
 
@@ -60,7 +65,7 @@ impl JevProvider {
         match self {
             Self::Typesafe => "/v1/systemone",
             Self::OpenRouterDecisions => "/alpha/decisions",
-            Self::OpenRouter => "/chat/completions",
+            Self::OpenRouter | Self::LocalChat => "/chat/completions",
         }
     }
 
@@ -73,14 +78,14 @@ impl JevProvider {
     pub const fn speaks_typed_envelope(self) -> bool {
         match self {
             Self::Typesafe | Self::OpenRouterDecisions => true,
-            Self::OpenRouter => false,
+            Self::OpenRouter | Self::LocalChat => false,
         }
     }
 
     /// Whether the backend answers by generating text token by token.
     pub const fn generates_text(self) -> bool {
         match self {
-            Self::OpenRouter => true,
+            Self::OpenRouter | Self::LocalChat => true,
             Self::Typesafe | Self::OpenRouterDecisions => false,
         }
     }
@@ -1375,14 +1380,17 @@ mod tests {
         assert_eq!(JevProvider::Typesafe.path(), "/v1/systemone");
         assert_eq!(JevProvider::OpenRouterDecisions.path(), "/alpha/decisions");
         assert_eq!(JevProvider::OpenRouter.path(), "/chat/completions");
+        assert_eq!(JevProvider::LocalChat.path(), "/chat/completions");
 
         assert!(JevProvider::Typesafe.speaks_typed_envelope());
         assert!(JevProvider::OpenRouterDecisions.speaks_typed_envelope());
         assert!(!JevProvider::OpenRouter.speaks_typed_envelope());
+        assert!(!JevProvider::LocalChat.speaks_typed_envelope());
 
         assert!(!JevProvider::Typesafe.generates_text());
         assert!(!JevProvider::OpenRouterDecisions.generates_text());
         assert!(JevProvider::OpenRouter.generates_text());
+        assert!(JevProvider::LocalChat.generates_text());
 
         // The names an owner may write in `[jev]`.
         assert_eq!(
@@ -1400,6 +1408,14 @@ mod tests {
         assert_eq!(
             JevProvider::from_name("openrouter"),
             Some(JevProvider::OpenRouter)
+        );
+        assert_eq!(
+            JevProvider::from_name("local_chat"),
+            Some(JevProvider::LocalChat)
+        );
+        assert_eq!(
+            JevProvider::from_name("local-chat"),
+            Some(JevProvider::LocalChat)
         );
         assert_eq!(JevProvider::from_name("nonsense"), None);
     }

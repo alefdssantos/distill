@@ -76,6 +76,101 @@ async fn set_jev_local_model_writes_the_pick_and_leaves_the_lane_alone() {
     );
 }
 
+/// The decision picker writes only `[jev.local_decision]`, and clearing it
+/// removes that table so the previous `[jev]` remote settings apply again.
+#[tokio::test]
+#[serial_test::serial(GROK_HOME)]
+async fn set_jev_decision_model_writes_and_clears_only_the_table() {
+    let home = tempfile::tempdir().expect("home");
+    let _guard = distill_test_support::env::EnvGuard::set("GROK_HOME", home.path());
+    let path = crate::util::config::user_config_path();
+    std::fs::write(
+        &path,
+        "[jev]\nprovider = \"openrouter_decisions\"\nbase_url = \"https://openrouter.ai/api\"\nmodel = \"~typesafe/jev-latest\"\n\n\
+         [jev.ladder]\ne_retention = true\n",
+    )
+    .expect("seed remote config");
+
+    set_jev_decision_model(Some((
+        "http://127.0.0.1:8080/v1".to_owned(),
+        "qwen3.5-2b".to_owned(),
+    )))
+    .await
+    .expect("persist the local decision pick");
+
+    let written: TomlValue =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("parse");
+    let jev = written["jev"].as_table().expect("[jev] survives");
+    assert_eq!(jev["provider"].as_str(), Some("openrouter_decisions"));
+    assert_eq!(
+        jev["local_decision"]["base_url"].as_str(),
+        Some("http://127.0.0.1:8080/v1")
+    );
+    assert_eq!(jev["local_decision"]["model"].as_str(), Some("qwen3.5-2b"));
+    assert_eq!(
+        crate::jev::resolve_config_from_disk().local_decision,
+        Some(crate::agent::config::JevLocalDecisionConfig {
+            base_url: Some("http://127.0.0.1:8080/v1".to_owned()),
+            model: Some("qwen3.5-2b".to_owned()),
+        }),
+        "a pick the resolver cannot see is a silent no-op"
+    );
+
+    set_jev_decision_model(None).await.expect("clear the pick");
+    let written: TomlValue =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("parse");
+    let jev = written["jev"].as_table().expect("[jev] survives");
+    assert!(!jev.contains_key("local_decision"), "the table is removed");
+    assert_eq!(jev["provider"].as_str(), Some("openrouter_decisions"));
+    assert_eq!(jev["ladder"]["e_retention"].as_bool(), Some(true));
+    assert!(
+        crate::jev::resolve_config_from_disk()
+            .local_decision
+            .is_none()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(GROK_HOME)]
+async fn clearing_the_picker_removes_explicit_user_local_transport() {
+    let home = tempfile::tempdir().expect("home");
+    let _guard = distill_test_support::env::EnvGuard::set("GROK_HOME", home.path());
+    let path = crate::util::config::user_config_path();
+    std::fs::write(
+        &path,
+        "[jev]\nprovider = \"local_chat\"\nbase_url = \"http://127.0.0.1:8080/v1\"\nmodel = \"qwen3.5-2b\"\n\n\
+         [jev.local_decision]\nbase_url = \"http://127.0.0.1:8080/v1\"\nmodel = \"qwen3.5-2b\"\n\n\
+         [jev.ladder]\ne_retention = true\n",
+    )
+    .expect("seed explicit local config");
+
+    set_jev_decision_model(None).await.expect("clear the picker");
+
+    let written: TomlValue =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read back")).expect("parse");
+    let jev = written["jev"].as_table().expect("[jev] survives");
+    assert!(!jev.contains_key("local_decision"));
+    assert!(!jev.contains_key("provider"));
+    assert!(!jev.contains_key("base_url"));
+    assert!(!jev.contains_key("model"));
+    assert_eq!(jev["ladder"]["e_retention"].as_bool(), Some(true));
+    assert!(crate::jev::configured_local_decision_model().is_none());
+}
+
+#[tokio::test]
+#[serial_test::serial(GROK_HOME)]
+async fn set_jev_decision_model_rejects_a_non_loopback_url() {
+    let home = tempfile::tempdir().expect("home");
+    let _guard = distill_test_support::env::EnvGuard::set("GROK_HOME", home.path());
+    let error = set_jev_decision_model(Some((
+        "https://example.com/v1".to_owned(),
+        "qwen3.5-2b".to_owned(),
+    )))
+    .await
+    .expect_err("remote endpoint must be refused");
+    assert!(format!("{error}").contains("loopback"));
+}
+
 /// Clearing the pick writes an empty `model`, which the lane reads as "no cheap
 /// lane". It cannot delete the key — the merge only ever inserts — so the empty
 /// value is the contract, and the resolver must treat it as unset.

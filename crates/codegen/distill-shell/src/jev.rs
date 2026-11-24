@@ -10,12 +10,150 @@
 use std::future::Future;
 use std::sync::OnceLock;
 
-use distill_workspace::jev::client::{JevClientConfig, credential_in_env};
+use distill_workspace::jev::client::{JevClientConfig, validate_local_base_url};
 use distill_workspace::jev::flags::{JevFlags, JevLadderOverlay};
+use distill_workspace::jev::provider::JevProvider;
 
 pub use distill_workspace::jev::flags::JevStatus;
 
 use crate::agent::config::{JevConfig, JevLocalConfig};
+
+/// The trusted base `[jev]` table (no project overlay, no `GROK_CONFIG`).
+fn trusted_base_config() -> toml::Value {
+    crate::config::ConfigLayers::load()
+        .map(|layers| layers.effective_config_base_without_overlay())
+        .unwrap_or_else(|_| toml::Value::Table(Default::default()))
+}
+
+/// Whether `[jev] provider` explicitly selects the local chat transport.
+fn local_provider_requested(cfg: &JevConfig) -> bool {
+    cfg.provider.as_deref().and_then(JevProvider::from_name) == Some(JevProvider::LocalChat)
+}
+
+/// The validated local decision target: the trusted picker table first, then
+/// an explicit `[jev] provider = "local_chat"`.
+///
+/// A present but incomplete table is an error, not a silent fall back to the
+/// remote provider: the picker clears by deleting the table.
+fn local_decision_target(
+    cfg: &JevConfig,
+) -> Result<Option<(String, String)>, distill_workspace::jev::JevError> {
+    if let Some(local) = &cfg.local_decision {
+        let base_url = local.base_url.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let model = local.model.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let (Some(base_url), Some(model)) = (base_url, model) else {
+            return Err(distill_workspace::jev::JevError::invalid(
+                "[jev.local_decision] requires base_url and model",
+            ));
+        };
+        validate_local_base_url(base_url)?;
+        return Ok(Some((base_url.to_owned(), model.to_owned())));
+    }
+    if local_provider_requested(cfg) {
+        let base_url = cfg
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                distill_workspace::jev::JevError::invalid("local_chat provider requires base_url")
+            })?;
+        let model = cfg
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                distill_workspace::jev::JevError::invalid("local_chat provider requires model")
+            })?;
+        validate_local_base_url(base_url)?;
+        return Ok(Some((base_url.to_owned(), model.to_owned())));
+    }
+    Ok(None)
+}
+
+/// The picker override read from the trusted base config, without validating
+/// reachability (the server may not be running yet).
+pub fn configured_local_decision_model() -> Option<(String, String)> {
+    local_decision_target(&resolve_config_from_disk()).ok().flatten()
+}
+
+/// The local model the running configuration would use, for the footer.
+///
+/// This is configuration only: it never probes the server, so a configured
+/// endpoint that is down still reads as selected.
+pub fn active_local_decision_model() -> Option<String> {
+    let cfg = resolve_config_from_disk_cached();
+    if !flags_from(cfg).enabled {
+        return None;
+    }
+    local_decision_target(cfg).ok().flatten().map(|(_, model)| model)
+}
+
+/// Trusted `[model.<id>]` entries that can serve local chat without a key.
+///
+/// Returns `(catalog id, full display name, base_url, served model id)` for
+/// entries that explicitly use `chat_completions`, carry no credential of
+/// their own, and have a valid loopback endpoint.
+fn validated_local_entries() -> Vec<(String, String, String, String)> {
+    let base = trusted_base_config();
+    let Some(models) = base.get("model").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|(id, value)| {
+            let entry = value.as_table()?;
+            if entry.get("api_backend").and_then(toml::Value::as_str) != Some("chat_completions") {
+                return None;
+            }
+            if entry
+                .get("api_key")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|key| !key.trim().is_empty())
+                || entry.contains_key("env_key")
+                || entry.contains_key("auth_provider")
+            {
+                return None;
+            }
+            let base_url = entry.get("base_url").and_then(toml::Value::as_str)?.trim();
+            validate_local_base_url(base_url).ok()?;
+            let model = entry
+                .get("model")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(id)
+                .to_owned();
+            let display = entry
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(id)
+                .to_owned();
+            Some((id.clone(), display, base_url.to_owned(), model))
+        })
+        .collect()
+}
+
+/// Local decision servers offered by the picker.
+///
+/// Returns `(full display name, base_url, served model id)`.
+pub fn local_decision_candidates() -> Vec<(String, String, String)> {
+    validated_local_entries()
+        .into_iter()
+        .map(|(_, display, base_url, model)| (display, base_url, model))
+        .collect()
+}
+
+/// Local utility models offered by the tier editor.
+///
+/// Returns `(catalog id, full display name)`; the catalog id is the key the
+/// editor persists, never a guessed served model id.
+pub fn local_utility_candidates() -> Vec<(String, String)> {
+    validated_local_entries()
+        .into_iter()
+        .map(|(id, display, _, _)| (id, display))
+        .collect()
+}
 
 /// Reads `[jev]` from the merged, overlay-free config layers.
 pub fn resolve_config_from_disk() -> JevConfig {
@@ -104,8 +242,22 @@ pub fn flags_from_tiers(cfg: &JevConfig, env_enabled: Option<bool>) -> JevFlags 
 
 /// Validates `[jev]` transport settings and applies safe defaults.
 pub fn client_config_from(cfg: &JevConfig) -> Result<JevClientConfig, distill_workspace::jev::JevError> {
-    use distill_workspace::jev::provider::{JevProvider, ReasoningShape};
+    use distill_workspace::jev::provider::ReasoningShape;
     let defaults = JevClientConfig::default();
+    if let Some((base_url, model)) = local_decision_target(cfg)? {
+        return Ok(JevClientConfig {
+            base_url,
+            model,
+            timeout: cfg.timeout_ms.map(core::time::Duration::from_millis).unwrap_or(defaults.timeout),
+            api_key_env: String::new(),
+            max_state_bytes: cfg.max_state_bytes.unwrap_or(defaults.max_state_bytes),
+            provider: JevProvider::LocalChat,
+            reasoning_shape: ReasoningShape::None,
+            reasoning_effort: "none".to_owned(),
+            max_completion_tokens: cfg.max_completion_tokens.unwrap_or(defaults.max_completion_tokens),
+            item_budget: cfg.item_budget_ms.map(core::time::Duration::from_millis).unwrap_or(defaults.item_budget),
+        });
+    }
     let provider = match cfg.provider.as_deref() {
         None => JevProvider::OpenRouterDecisions,
         Some(name) => JevProvider::from_name(name)
@@ -145,7 +297,11 @@ pub fn client_config_from(cfg: &JevConfig) -> Result<JevClientConfig, distill_wo
 /// credential is resolvable under the configured environment variable.
 pub fn status_from(cfg: &JevConfig) -> JevStatus {
     let flags = flags_from(cfg);
-    flags.status(client_config_from(cfg).ok().is_some_and(|config| credential_in_env(&config.api_key_env)))
+    let ready = client_config_from(cfg)
+        .ok()
+        .and_then(|config| distill_workspace::jev::JevClient::new(config).ok())
+        .is_some_and(|client| client.credential_present());
+    flags.status(ready)
 }
 
 /// The status the TUI badge renders, resolved once per process.
@@ -155,7 +311,7 @@ pub fn status_from(cfg: &JevConfig) -> JevStatus {
 /// also resolves once, at session start).
 pub fn current_status_cached() -> JevStatus {
     static STATUS: OnceLock<JevStatus> = OnceLock::new();
-    *STATUS.get_or_init(|| status_from(&resolve_config_from_disk()))
+    *STATUS.get_or_init(|| status_from(resolve_config_from_disk_cached()))
 }
 
 #[cfg(test)]
@@ -442,6 +598,117 @@ c7_change_type = true"#,
         assert_eq!(config.model, "~typesafe/jev-latest");
         assert_eq!(config.api_key_env, "OPENROUTER_API_KEY");
         assert_eq!(config.endpoint(), "https://openrouter.ai/api/alpha/decisions");
+    }
+
+    #[test]
+    fn local_picker_overrides_remote_provider_and_all_lever_models() {
+        let cfg = JevConfig {
+            provider: Some("openrouter_decisions".to_owned()),
+            base_url: Some("https://openrouter.ai/api".to_owned()),
+            model: Some("~typesafe/jev-latest".to_owned()),
+            local_decision: Some(crate::agent::config::JevLocalDecisionConfig {
+                base_url: Some("http://127.0.0.1:8080/v1".to_owned()),
+                model: Some("qwen3.5-2b".to_owned()),
+            }),
+            ..JevConfig::default()
+        };
+        let config = client_config_from(&cfg).expect("valid local decision config");
+        assert_eq!(config.provider, JevProvider::LocalChat);
+        assert_eq!(config.base_url, "http://127.0.0.1:8080/v1");
+        assert_eq!(config.model, "qwen3.5-2b");
+        assert_eq!(config.api_key_env, "");
+        assert_eq!(config.reasoning_shape, distill_workspace::jev::provider::ReasoningShape::None);
+        assert_eq!(config.reasoning_effort, "none");
+        assert!(status_from(&cfg).active(), "local needs no credential");
+        for key in ["b2_step_battery", "stored_output_search", "c4_diff_risk"] {
+            assert_eq!(decision_model_for(&cfg, key), "qwen3.5-2b");
+        }
+    }
+
+    #[test]
+    fn explicit_local_chat_requires_a_loopback_url_and_model() {
+        let missing_url = JevConfig {
+            provider: Some("local_chat".to_owned()),
+            model: Some("qwen3.5-2b".to_owned()),
+            ..JevConfig::default()
+        };
+        assert!(client_config_from(&missing_url).is_err());
+        let missing_model = JevConfig {
+            provider: Some("local_chat".to_owned()),
+            base_url: Some("http://127.0.0.1:8080/v1".to_owned()),
+            ..JevConfig::default()
+        };
+        assert!(client_config_from(&missing_model).is_err());
+        let remote_url = JevConfig {
+            provider: Some("local_chat".to_owned()),
+            base_url: Some("https://example.com/v1".to_owned()),
+            model: Some("qwen3.5-2b".to_owned()),
+            ..JevConfig::default()
+        };
+        assert!(client_config_from(&remote_url).is_err());
+    }
+
+    #[test]
+    fn an_incomplete_picker_table_never_falls_back_to_remote() {
+        let cfg = JevConfig {
+            local_decision: Some(crate::agent::config::JevLocalDecisionConfig {
+                base_url: Some("http://127.0.0.1:8080/v1".to_owned()),
+                model: None,
+            }),
+            ..JevConfig::default()
+        };
+        assert!(client_config_from(&cfg).is_err());
+        assert_eq!(decision_model_for(&cfg, "c4_diff_risk"), "");
+    }
+
+    #[test]
+    fn remote_defaults_are_unchanged_without_a_local_pick() {
+        let cfg = JevConfig::default();
+        let config = client_config_from(&cfg).expect("remote defaults stay valid");
+        assert_eq!(config.provider, JevProvider::OpenRouterDecisions);
+        assert_eq!(config.base_url, "https://openrouter.ai/api");
+        assert_eq!(config.api_key_env, "OPENROUTER_API_KEY");
+        assert_eq!(decision_model_for(&cfg, "c4_diff_risk"), distill_workspace::jev::client::DEFAULT_MODEL);
+    }
+
+    /// The picker table is read from the trusted base layers; the `GROK_CONFIG`
+    /// overlay cannot select or repoint a local decision server.
+    #[test]
+    #[serial_test::serial(GROK_HOME)]
+    fn local_decision_setting_is_trusted_base_only() {
+        let home = tempfile::tempdir().expect("home");
+        let _home = distill_test_support::env::EnvGuard::set("GROK_HOME", home.path());
+        let path = crate::util::config::user_config_path();
+        std::fs::create_dir_all(path.parent().expect("config parent")).expect("config dir");
+        std::fs::write(
+            &path,
+            "[jev.local_decision]\nbase_url = \"http://127.0.0.1:8080/v1\"\nmodel = \"trusted\"\n\n\
+             [model.local]\nname = \"Qwen Local\"\nmodel = \"qwen3.5-2b\"\nbase_url = \"http://127.0.0.1:8080/v1\"\napi_backend = \"chat_completions\"\n\n\
+             [model.keyed]\nmodel = \"keyed\"\nbase_url = \"http://127.0.0.1:8081/v1\"\napi_backend = \"chat_completions\"\napi_key = \"secret\"\n",
+        )
+        .expect("seed trusted config");
+        let _overlay = distill_test_support::env::EnvGuard::set(
+            "GROK_CONFIG",
+            "[jev.local_decision]\nbase_url = \"http://127.0.0.1:9999/v1\"\nmodel = \"overlay\"\n",
+        );
+        let cfg = resolve_config_from_disk();
+        let local = cfg.local_decision.expect("trusted picker survives");
+        assert_eq!(local.base_url.as_deref(), Some("http://127.0.0.1:8080/v1"));
+        assert_eq!(local.model.as_deref(), Some("trusted"));
+        assert_eq!(
+            local_decision_candidates(),
+            vec![(
+                "Qwen Local".to_owned(),
+                "http://127.0.0.1:8080/v1".to_owned(),
+                "qwen3.5-2b".to_owned()
+            )],
+            "only keyless chat_completions loopback entries are offered"
+        );
+        assert_eq!(
+            local_utility_candidates(),
+            vec![("local".to_owned(), "Qwen Local".to_owned())],
+            "the utility picker keys by catalog id, not a guessed served id"
+        );
     }
 
     #[test]
@@ -3021,6 +3288,13 @@ const LEVER_MODEL_DEFAULTS: &[(&str, &str)] = &[
 /// The decision model for `key` (a lever name, or `stored_output_search`):
 /// `[jev.models]`, else the lever's shipped model, else `[jev] model`.
 pub(crate) fn decision_model_for(cfg: &JevConfig, key: &str) -> String {
+    if cfg.local_decision.is_some() || local_provider_requested(cfg) {
+        return local_decision_target(cfg)
+            .ok()
+            .flatten()
+            .map(|(_, model)| model)
+            .unwrap_or_default();
+    }
     if let Some(model) = cfg.models.get(key) {
         if distill_workspace::jev::client::is_decision_model(model) {
             return model.clone();
@@ -3099,8 +3373,8 @@ pub(crate) fn client_cached() -> Option<&'static distill_workspace::jev::JevClie
     static CLIENT: OnceLock<Option<distill_workspace::jev::JevClient>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            let cfg = resolve_config_from_disk();
-            let config = match client_config_from(&cfg) {
+            let cfg = resolve_config_from_disk_cached();
+            let config = match client_config_from(cfg) {
                 Ok(config) => config,
                 Err(error) => {
                     tracing::warn!(%error, "jev configuration invalid; decisions are off");
@@ -3109,11 +3383,11 @@ pub(crate) fn client_cached() -> Option<&'static distill_workspace::jev::JevClie
             };
             match distill_workspace::jev::JevClient::new(config) {
                 Ok(client) if client.credential_present() => Some(client),
-                Ok(_) => {
+                Ok(client) => {
                     if flags_from(&cfg).enabled {
                         tracing::warn!(
                             "Jev is enabled but environment variable `{}` is not set; Jev decisions are off",
-                            "OPENROUTER_API_KEY"
+                            client.config().api_key_env
                         );
                     }
                     None

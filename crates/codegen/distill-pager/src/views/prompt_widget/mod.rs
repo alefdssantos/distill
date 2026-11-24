@@ -426,6 +426,19 @@ pub fn jev_flag(
     })
 }
 
+/// The local decision badge's text: the configured model name, plus the Jev status marker while shadow or uncredentialed.
+///
+/// Reachability is unknown here, so callers render it neutral rather than as a proven live path.
+pub fn local_decision_label(status: distill_shell::jev::JevStatus, model: &str) -> String {
+    if !status.credential_present {
+        format!("{model}:no-key")
+    } else if status.shadow {
+        format!("{model}\u{00b7}shadow")
+    } else {
+        model.to_owned()
+    }
+}
+
 /// Optional info line rendered below the prompt text.
 ///
 /// The default is blank: a caller that wants the bottom border without any info text passes it, and [`Self::is_blank`] then skips the text pass.
@@ -450,24 +463,125 @@ pub struct PromptInfo<'a> {
 pub struct PromptModelTiers {
     pub main: String,
     pub worker: Option<String>,
+    /// The local utility model (`[jev.local] model`), shown after the worker.
+    pub utility: Option<String>,
     pub execution_mode: distill_tool_types::ExecutionMode,
     pub execution_mode_choice: distill_tool_types::ExecutionModeChoice,
 }
 
+/// Provider names the model catalog appends to a display name, e.g. `GPT-6 (ChatGPT)`.
+const PROVIDER_SUFFIXES: [&str; 5] = [
+    " (ChatGPT)",
+    " (Claude)",
+    " (Grok)",
+    " (OpenRouter)",
+    " (OpenGateway)",
+];
+
+/// A model name as the footer shows it: the catalog's provider suffix removed, every other parenthesis kept.
+fn footer_model_name(name: &str) -> &str {
+    let trimmed = name.trim();
+    PROVIDER_SUFFIXES
+        .iter()
+        .find_map(|suffix| trimmed.strip_suffix(suffix))
+        .filter(|base| !base.is_empty())
+        .unwrap_or(trimmed)
+}
+
+/// `Name (auto)` only while effort is auto; a pinned effort stays off the footer.
+fn footer_effort_label(models: &crate::acp::ModelState, name: &str) -> String {
+    let base = footer_model_name(name);
+    if models.effort_auto {
+        format!("{base} (auto)")
+    } else {
+        base.to_owned()
+    }
+}
+
+/// The configured utility model's display name, when the selection names one trusted local candidate.
+///
+/// A remote fallback chain is not a local model and stays off the footer. The trusted table is
+/// loaded only on a cache miss: the footer re-resolves when the selected id changes.
+fn local_utility_model() -> Option<String> {
+    let selected = distill_shell::jev::local_config_cached().model?;
+    let selected = selected.trim().to_owned();
+    if selected.is_empty() {
+        return None;
+    }
+    UTILITY_LABEL_CACHE.with(|cache| {
+        if let Some((key, value)) = cache.borrow().as_ref()
+            && key == &selected
+        {
+            return value.clone();
+        }
+        let name = distill_shell::jev::local_utility_candidates()
+            .into_iter()
+            .find(|(id, _)| id == &selected)
+            .map(|(_, name)| footer_model_name(&name).to_owned());
+        *cache.borrow_mut() = Some((selected, name.clone()));
+        name
+    })
+}
+
+thread_local! {
+    /// Last `(selected id, display name)` pair so rendering does not reload the trusted model table per frame.
+    static UTILITY_LABEL_CACHE: std::cell::RefCell<Option<(String, Option<String>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clamp footer text to `max` columns, ending in `…` when the text is cut.
+fn truncate_footer(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if max == 0 {
+        return String::new();
+    }
+    if text.width() <= max {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let char_w = ch.width().unwrap_or(0);
+        if width + char_w + 1 > max {
+            break;
+        }
+        out.push(ch);
+        width += char_w;
+    }
+    out.push('\u{2026}');
+    out
+}
+
 impl PromptModelTiers {
     pub fn from_model_state(models: &crate::acp::ModelState) -> Option<Self> {
+        let utility = local_utility_model();
         if let Some((main, worker)) = &models.auto_route {
             return Some(Self {
-                main: format!("Auto → {}", models.effort_label(&models.display_name(main))),
-                worker: Some(format!("Auto → {} (auto)", models.display_name(worker))),
+                main: format!(
+                    "Auto → {}",
+                    footer_effort_label(models, &models.display_name(main))
+                ),
+                worker: Some(format!(
+                    "Auto → {} (auto)",
+                    footer_model_name(&models.display_name(worker))
+                )),
+                utility,
                 execution_mode: models.execution_mode,
                 execution_mode_choice: models.execution_mode_choice,
             });
         }
         let main = models.current_model_name()?;
+        let worker = models.worker_model_name().map(|worker| {
+            let base = footer_model_name(&worker);
+            match models.worker_effort {
+                Some(_) => base.to_owned(),
+                None => format!("{base} (auto)"),
+            }
+        });
         Some(Self {
-            main: models.effort_label(&main),
-            worker: models.worker_label(),
+            main: footer_effort_label(models, &main),
+            worker,
+            utility,
             execution_mode: models.execution_mode,
             execution_mode_choice: models.execution_mode_choice,
         })
@@ -3621,16 +3735,9 @@ impl PromptWidget {
         let mut change_start = None;
         let mut change_end = None;
         if let Some(tiers) = info.model_tiers {
+            use unicode_width::UnicodeWidthStr;
             let primary_style = Style::default().fg(theme.accent_skill).bg(bg);
             let worker_style = Style::default().fg(theme.accent_success).bg(bg);
-            left_spans.push(Span::styled("Main: ", primary_style));
-            left_spans.push(Span::styled(tiers.main.as_str(), primary_style));
-            if let Some(worker) = &tiers.worker {
-                left_spans.push(Span::styled(" | ", sep_style));
-                left_spans.push(Span::styled("Worker: ", worker_style));
-                left_spans.push(Span::styled(worker.as_str(), worker_style));
-            }
-            left_spans.push(Span::styled(" | ", sep_style));
             let auto_choice = tiers.execution_mode_choice.fixed().is_none();
             let execution_mode_style = if auto_choice
                 || tiers.execution_mode != distill_tool_types::ExecutionMode::Normal
@@ -3644,6 +3751,41 @@ impl PromptWidget {
             } else {
                 tiers.execution_mode_choice.label().to_owned()
             };
+            // Budget the model text against the fixed tail so `change` keeps its columns.
+            let sep_w = 3;
+            let mode_w = sep_w + "Mode: ".len() + mode_label.width();
+            let change_w = sep_w + "change".len();
+            let right_w = if info.multiline { "multiline".len() + 2 } else { 0 };
+            let available = (area.width as usize).saturating_sub(right_w + 1);
+            let name_budget = available.saturating_sub(
+                Line::from(left_spans.clone()).width() + mode_w + change_w + "Main: ".len(),
+            );
+            let worker_prefix = sep_w + "Worker: ".len();
+            let worker = tiers.worker.as_deref().filter(|_| name_budget > worker_prefix + 1);
+            let worker_budget = worker.map_or(0, |name| {
+                let budget = name_budget - worker_prefix;
+                name.width().min(budget.saturating_sub(tiers.main.width().min(budget / 2)))
+            });
+            let main_budget = name_budget.saturating_sub(if worker.is_some() {
+                worker_prefix + worker_budget
+            } else {
+                0
+            });
+            left_spans.push(Span::styled("Main: ", primary_style));
+            left_spans.push(Span::styled(truncate_footer(&tiers.main, main_budget), primary_style));
+            if let Some(worker) = worker {
+                left_spans.push(Span::styled(" | ", sep_style));
+                left_spans.push(Span::styled("Worker: ", worker_style));
+                left_spans.push(Span::styled(truncate_footer(worker, worker_budget), worker_style));
+            }
+            let used = Line::from(left_spans.clone()).width();
+            if let Some(utility) = &tiers.utility
+                && used + sep_w + utility.width() + mode_w + change_w <= available
+            {
+                left_spans.push(Span::styled(" | ", sep_style));
+                left_spans.push(Span::styled(utility.as_str(), flag_style));
+            }
+            left_spans.push(Span::styled(" | ", sep_style));
             left_spans.push(Span::styled(format!("Mode: {mode_label}"), execution_mode_style));
             left_spans.push(Span::styled(" | ", sep_style));
             change_start = Some(Line::from(left_spans.clone()).width() as u16);

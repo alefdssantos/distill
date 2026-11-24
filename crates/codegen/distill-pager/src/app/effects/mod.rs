@@ -2569,6 +2569,17 @@ pub(crate) fn execute(
                 }
             });
         }
+        Effect::PersistDecisionModel { value } => {
+            tasks.spawn(async move {
+                match distill_shell::util::config::set_jev_decision_model(value).await {
+                    Ok(()) => TaskResult::DecisionModelPersisted,
+                    Err(error) => TaskResult::SettingPersistFailedBestEffort {
+                        key: "decision_model",
+                        error: error.to_string(),
+                    },
+                }
+            });
+        }
         Effect::PersistSetting { key, value, rollback_value } => {
             tasks
                 .spawn(async move {

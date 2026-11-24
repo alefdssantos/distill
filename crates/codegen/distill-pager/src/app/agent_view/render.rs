@@ -589,7 +589,7 @@ impl AgentView {
         Option<crate::terminal::overlay::PostFlush>,
     ) {
         let AppRenderParams {
-            chatgpt_usage,
+            chatgpt_usage: _chatgpt_usage,
             voice_available,
             voice_listening,
             voice_interim,
@@ -2447,23 +2447,36 @@ impl AgentView {
         } else {
             self.published_mode_label()
         };
+        // A configured local decision model takes the badge slot with a neutral name; reachability is unknown.
+        let decision_label = distill_shell::jev::active_local_decision_model().map(|model| {
+            crate::views::prompt_widget::local_decision_label(
+                distill_shell::jev::current_status_cached(),
+                &model,
+            )
+        });
         let mut flags: Vec<PromptFlag> =
             mode_flags(plan_label, self.session.permission_label(), &theme);
-        // Jev availability does not depend on the permission mode.
-        if let Some(jev) = crate::views::prompt_widget::jev_flag(
+        if let Some(label) = decision_label.as_deref() {
+            flags.push(PromptFlag {
+                text: label,
+                color: None,
+                bold: false,
+            });
+        } else if let Some(jev) = crate::views::prompt_widget::jev_flag(
             distill_shell::jev::current_status_cached(),
             &theme,
         ) {
             flags.push(jev);
         }
         let multiline = self.multiline_mode;
+        // ChatGPT usage data stays in the usage view; only its weekly input-bar notice is gone.
         let warning = crate::views::credit_bar::provider_usage_warning(
             Some(&self.session.models),
             self.credit_balance.as_ref(),
             self.auto_topup.as_ref(),
             self.billing_surface_visible,
             self.chat_kind,
-            chatgpt_usage,
+            None,
         );
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
@@ -5283,7 +5296,8 @@ mod side_mode_render_tests {
                 .join("\n")
         };
         let text = render(&mut agent);
-        assert!(text.contains("ChatGPT weekly limit left: 4%"), "{text}");
+        assert!(!text.contains("ChatGPT weekly"), "{text}");
+        assert!(!text.contains("limit left"), "{text}");
         assert!(!text.contains("Weekly limit left: 8%"), "{text}");
         agent.session.models.current = Some(agent_client_protocol::ModelId::new("grok"));
         let text = render(&mut agent);

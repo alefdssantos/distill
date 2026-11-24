@@ -637,6 +637,7 @@ fn tier_editor_saves_main_and_worker_efforts() {
             worker: "worker-test-luna auto".into(),
             utility: String::new(),
             execution_mode: distill_tool_types::ExecutionModeChoice::Normal,
+            decision: None,
         },
         &mut app,
     );
@@ -688,6 +689,7 @@ fn tier_editor_execution_mode_requires_a_session_and_keeps_the_draft() {
         worker: String::new(),
         utility: String::new(),
         execution_mode: distill_tool_types::ExecutionModeChoice::Ultrafast,
+        decision: None,
     }, &mut app);
 
     assert!(effects.is_empty(), "invalid session mode must not partially save other fields");
@@ -814,6 +816,67 @@ fn clear_worker_with_disabled_default_still_targets_active_session() {
             .worker_model
             .is_none()
     );
+}
+
+#[test]
+fn decision_only_save_keeps_the_configured_worker_when_the_session_has_none() {
+    let mut app = test_app_with_agent();
+    let agent_id = AgentId(0);
+    let previous_worker = crate::acp::ModelState::configured_worker_model();
+    let previous_effort = crate::acp::ModelState::configured_worker_effort();
+    let worker = acp::ModelId::new("configured-worker");
+    crate::acp::ModelState::set_instance_worker(Some(worker.clone()), None);
+    let main = acp::ModelId::new("tier-main");
+    let execution_mode = {
+        let models = &mut app.agents.get_mut(&agent_id).unwrap().session.models;
+        models
+            .available
+            .insert(main.clone(), effort_capable(&main, "Tier Main"));
+        models.set_current(main, None);
+        models.worker_model = None;
+        models.effort_auto = true;
+        models.execution_mode_choice
+    };
+    let effects = dispatch(
+        Action::SetTierEditor {
+            main: "tier-main auto".into(),
+            worker: String::new(),
+            utility: String::new(),
+            execution_mode,
+            decision: None,
+        },
+        &mut app,
+    );
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SetSessionWorker { .. }
+            | Effect::PersistSetting {
+                key: "worker_model",
+                ..
+            }
+    )));
+    assert_eq!(
+        crate::acp::ModelState::configured_worker_model(),
+        Some(worker)
+    );
+    assert!(expect_agent(&app, agent_id).session.models.worker_model.is_none());
+    app.agents.get_mut(&agent_id).unwrap().session.models.worker_model =
+        Some(acp::ModelId::new("session-worker"));
+    let effects = dispatch(
+        Action::SetTierEditor {
+            main: "tier-main auto".into(),
+            worker: String::new(),
+            utility: String::new(),
+            execution_mode,
+            decision: None,
+        },
+        &mut app,
+    );
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::SetSessionWorker { model_id, .. } if model_id.is_empty()
+    )), "explicitly clearing the displayed worker still clears it");
+    crate::acp::ModelState::set_instance_worker(previous_worker, previous_effort);
 }
 
 #[test]

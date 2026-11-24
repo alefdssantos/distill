@@ -2526,6 +2526,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::DecisionModelPersisted => {
+            app.show_toast("\u{2713} Decision model saved. Restart to apply.");
+            vec![]
+        }
         TaskResult::SettingPersisted { key, value } => {
             tracing::trace!(target: "settings", ?key, ?value, "setting persisted");
             if key == "onboarding_completed" {

@@ -3873,6 +3873,7 @@
         let tiers = PromptModelTiers {
             main: "gpt-6-sol (auto)".to_owned(),
             worker: Some("gpt-6-luna".to_owned()),
+            utility: None,
             execution_mode: distill_tool_types::ExecutionMode::Ultracode,
             execution_mode_choice: distill_tool_types::ExecutionModeChoice::Ultracode,
         };
@@ -3922,11 +3923,11 @@
         let worker = agent_client_protocol::ModelId::new("chatgpt/gpt-6-luna");
         models.available.insert(
             main.clone(),
-            agent_client_protocol::ModelInfo::new(main.clone(), "GPT-6-Sol"),
+            agent_client_protocol::ModelInfo::new(main.clone(), "GPT-6-Sol (ChatGPT)"),
         );
         models.available.insert(
             worker.clone(),
-            agent_client_protocol::ModelInfo::new(worker.clone(), "GPT-6-Luna"),
+            agent_client_protocol::ModelInfo::new(worker.clone(), "GPT-6-Luna (OpenGateway)"),
         );
         models.current = Some(main);
         models.worker_model = Some(worker);
@@ -3939,7 +3940,93 @@
         // A pinned worker effort is shown instead of `auto`.
         models.worker_effort = Some(distill_shell::sampling::types::ReasoningEffort::Medium);
         let summary = PromptModelTiers::from_model_state(&models).expect("main model");
-        assert_eq!(summary.worker.as_deref(), Some("GPT-6-Luna (medium)"));
+        assert_eq!(summary.worker.as_deref(), Some("GPT-6-Luna"));
+    }
+
+    #[test]
+    fn footer_strips_only_known_provider_suffixes() {
+        assert_eq!(footer_model_name("GPT-6.2-Sol (ChatGPT)"), "GPT-6.2-Sol");
+        assert_eq!(footer_model_name("Qwen3.7 (OpenGateway)"), "Qwen3.7");
+        assert_eq!(footer_model_name("GPT-6 (Preview) (Claude)"), "GPT-6 (Preview)");
+        assert_eq!(footer_model_name("GPT-6 (Preview)"), "GPT-6 (Preview)");
+        assert_eq!(footer_model_name("  GPT-6  "), "GPT-6");
+    }
+
+    #[test]
+    fn footer_shows_the_utility_model_after_the_worker() {
+        let _guard = crate::theme::cache::pin_theme();
+        let area = Rect::new(0, 0, 120, 3);
+        let tiers = PromptModelTiers {
+            main: "GPT-6.2-Sol (auto)".to_owned(),
+            worker: Some("GPT-6-Luna (auto)".to_owned()),
+            utility: Some("qwen3.7-flash".to_owned()),
+            execution_mode: distill_tool_types::ExecutionMode::Normal,
+            execution_mode_choice: distill_tool_types::ExecutionModeChoice::Normal,
+        };
+        let info = PromptInfo {
+            model_tiers: Some(&tiers),
+            ..Default::default()
+        };
+        let style = PromptStyle {
+            focused: true,
+            ..Default::default()
+        };
+        let mut buf = Buffer::empty(area);
+        let result = PromptWidget::new().draw(&mut buf, area, None, &style, Some(&info), None);
+        let row = (0..area.height)
+            .map(|y| buf_text_at(&buf, 0, area.width, y))
+            .find(|line| line.contains("Worker:"))
+            .expect("model tier footer row");
+        assert!(
+            row.contains("Main: GPT-6.2-Sol (auto) | Worker: GPT-6-Luna (auto) | qwen3.7-flash | Mode: Normal | change"),
+            "{row}"
+        );
+        let change_rect = result.change_rect.expect("change hit area");
+        assert_eq!(
+            buf_text_at(&buf, change_rect.x, change_rect.right(), change_rect.y),
+            "change"
+        );
+
+        // Narrow: the tail keeps `change` and the utility name is the first segment to go.
+        let narrow = Rect::new(0, 0, 60, 3);
+        let mut buf = Buffer::empty(narrow);
+        let result = PromptWidget::new().draw(&mut buf, narrow, None, &style, Some(&info), None);
+        let narrow_row = (0..narrow.height)
+            .map(|y| buf_text_at(&buf, 0, narrow.width, y))
+            .find(|line| line.contains("Main:"))
+            .expect("narrow model tier footer row");
+        assert!(narrow_row.contains("Worker:"), "{narrow_row}");
+        assert!(!narrow_row.contains("qwen3.7-flash"), "{narrow_row}");
+        let hit = result.change_rect.expect("narrow change hit area");
+        assert_eq!(buf_text_at(&buf, hit.x, hit.right(), hit.y), "change");
+    }
+
+    #[test]
+    fn decision_model_label_names_the_model_and_keeps_shadow_and_missing_key() {
+        let active = distill_shell::jev::JevStatus {
+            enabled: true,
+            shadow: false,
+            credential_present: true,
+        };
+        assert_eq!(local_decision_label(active, "qwen3.7-flash"), "qwen3.7-flash");
+
+        let shadow = distill_shell::jev::JevStatus {
+            shadow: true,
+            ..active
+        };
+        assert_eq!(
+            local_decision_label(shadow, "qwen3.7-flash"),
+            "qwen3.7-flash\u{00b7}shadow"
+        );
+
+        let no_key = distill_shell::jev::JevStatus {
+            credential_present: false,
+            ..active
+        };
+        assert_eq!(
+            local_decision_label(no_key, "qwen3.7-flash"),
+            "qwen3.7-flash:no-key"
+        );
     }
 
     /// The status line names the exclusive execution mode after the worker segment, and `from_model_state` carries it from the session.
@@ -3964,7 +4051,9 @@
         ] {
             models.execution_mode = mode;
             models.execution_mode_choice = choice;
-            let tiers = PromptModelTiers::from_model_state(&models).expect("main model");
+            let mut tiers = PromptModelTiers::from_model_state(&models).expect("main model");
+            // The local utility model is machine config, not part of this assertion.
+            tiers.utility = None;
             let info = PromptInfo {
                 model_tiers: Some(&tiers),
                 ..Default::default()
@@ -3990,6 +4079,7 @@
         let tiers = PromptModelTiers {
             main: "gpt-6-astra (auto)".to_owned(),
             worker: None,
+            utility: None,
             execution_mode: distill_tool_types::ExecutionMode::Normal,
             execution_mode_choice: distill_tool_types::ExecutionModeChoice::Normal,
         };

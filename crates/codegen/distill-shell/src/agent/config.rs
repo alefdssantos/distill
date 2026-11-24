@@ -1381,6 +1381,11 @@ pub struct JevConfig {
     /// Optional local model the decision layer may route a model call to.
     #[serde(default)]
     pub local: JevLocalConfig,
+    /// Trusted picker override for the local decision transport. Written by the
+    /// tier editor's "Modelo local" choice; absent means the remote decision
+    /// provider from `[jev]` is used.
+    #[serde(default)]
+    pub local_decision: Option<JevLocalDecisionConfig>,
 }
 
 /// `[jev.local]`: a model that runs on this machine (oMLX, Ollama, any
@@ -1414,6 +1419,17 @@ pub struct JevLocalConfig {
     /// before the call runs locally. Defaults to
     /// [`distill_workspace::jev::catalog::routing::LOCAL_CAPABLE_FLOOR`].
     pub min_capability: Option<f64>,
+}
+
+/// `[jev.local_decision]`: the trusted editor pick for the local decision
+/// transport. Both fields are required when the table is present.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct JevLocalDecisionConfig {
+    /// OpenAI-compatible server root, for example `http://127.0.0.1:8080/v1`.
+    pub base_url: Option<String>,
+    /// Model id served by that endpoint.
+    pub model: Option<String>,
 }
 
 /// Tokens reserved in the local model's window when the config does not say.

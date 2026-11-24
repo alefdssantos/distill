@@ -815,7 +815,7 @@ pub fn render_welcome(
                 usage_warning_critical: false,
                 model_tiers: params.model_tiers,
             };
-            let (menu_rects, post_flush_escapes) = render_welcome_blocked(
+            let (menu_rects, post_flush_escapes, model_tier_change_rect) = render_welcome_blocked(
                 content_area,
                 buf,
                 msg,
@@ -829,6 +829,7 @@ pub fn render_welcome(
                 cursor_pos: None,
                 post_flush_escapes,
                 menu_rects,
+                model_tier_change_rect,
                 ..Default::default()
             }
         }
@@ -854,7 +855,7 @@ pub fn render_welcome(
         }
         AuthState::Done if params.is_zdr_blocked => {
             let menu = [("l", "Switch account"), ("q", "Quit")];
-            let (menu_rects, post_flush_escapes) = render_welcome_blocked(
+            let (menu_rects, post_flush_escapes, _) = render_welcome_blocked(
                 content_area,
                 buf,
                 Some((
@@ -939,7 +940,11 @@ fn render_welcome_blocked(
     prompt: Option<(&mut PromptWidget, &PromptInfo<'_>)>,
     h_margin: u16,
     compact: bool,
-) -> (Vec<Rect>, Option<crate::terminal::overlay::PostFlush>) {
+) -> (
+    Vec<Rect>,
+    Option<crate::terminal::overlay::PostFlush>,
+    Option<Rect>,
+) {
     let theme = Theme::current();
 
     let msg_height = if message.is_some() { 2u16 } else { 0u16 };
@@ -986,7 +991,7 @@ fn render_welcome_blocked(
         Alignment::Center,
     );
 
-    let post_flush_escapes = if let Some((prompt_widget, info)) = prompt {
+    let (post_flush_escapes, change_rect) = if let Some((prompt_widget, info)) = prompt {
         let [_, prompt_centered, _] = Layout::horizontal([
             Constraint::Min(0),
             Constraint::Length(content_area.width),
@@ -994,17 +999,17 @@ fn render_welcome_blocked(
         ])
         .flex(Flex::Center)
         .areas(layout.prompt);
-        prompt::render_prompt(
+        let (_, post_flush_escapes, change_rect) = prompt::render_prompt(
             prompt_centered,
             buf,
             WelcomePromptFocus::Unfocused,
             prompt_widget,
             info,
             compact,
-        )
-        .1
+        );
+        (post_flush_escapes, change_rect)
     } else {
-        None
+        (None, None)
     };
 
     render_version_badge(
@@ -1019,7 +1024,7 @@ fn render_welcome_blocked(
         },
         Alignment::Right,
     );
-    (menu_rects, post_flush_escapes)
+    (menu_rects, post_flush_escapes, change_rect)
 }
 
 /// The y/N answer is handled by the welcome input interceptor, so this only paints; `menu_rects`
@@ -3904,6 +3909,42 @@ mod tests {
         for token in ["alpha-one", "bravo-two", "charlie-three"] {
             assert!(text.contains(token), "{token} missing:\n{text}");
         }
+    }
+
+    /// The login screen paints the draft, so a footer `change` must stay clickable instead of only looking clickable.
+    #[test]
+    fn login_screen_keeps_the_model_tier_change_hit_area() {
+        let tiers = PromptModelTiers {
+            main: "GPT-6.2-Sol (auto)".to_owned(),
+            worker: None,
+            utility: None,
+            execution_mode: distill_tool_types::ExecutionMode::Normal,
+            execution_mode_choice: distill_tool_types::ExecutionModeChoice::Normal,
+        };
+        let auth = AuthState::Pending { error: None };
+        let trust = TrustState::Done;
+        let mut params = render_params(&auth, &trust, None);
+        params.model_tiers = Some(&tiers);
+        let area = Rect::new(0, 0, 100, 40);
+        let mut picker = PickerState::default();
+        let mut prompt = PromptWidget::new();
+        let mut buf = Buffer::empty(area);
+        let result = render_welcome(area, &mut buf, &params, &mut prompt, &mut picker);
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("change"),
+            "footer draws the change action:\n{text}"
+        );
+        let rect = result.model_tier_change_rect.expect("change hit area");
+        assert!(rect.width >= "change".len() as u16);
+        assert_eq!(rect.height, 1);
+
+        // Without tiers the footer draws no `change`, so no hit area may linger.
+        params.model_tiers = None;
+        let mut buf = Buffer::empty(area);
+        let result = render_welcome(area, &mut buf, &params, &mut prompt, &mut picker);
+        assert!(result.model_tier_change_rect.is_none());
     }
 
     /// Rows of the painted buffer that hold braille logo art.

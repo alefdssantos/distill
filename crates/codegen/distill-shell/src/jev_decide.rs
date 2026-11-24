@@ -243,7 +243,7 @@ impl ShellJevDecider {
         let built = build_extraction_text(context, sources);
         let client = crate::jev::client_for("jev_decide_fields")
             .filter(|client| client.credential_present())
-            .ok_or_else(|| distill_tool_runtime::ToolError::custom("jev_unavailable", "extraction client or OpenRouter credential unavailable"))?;
+            .ok_or_else(|| distill_tool_runtime::ToolError::custom("jev_unavailable", "extraction client unavailable"))?;
         let observed = crate::jev::observed_client(client, "jev_decide_fields");
         let client = observed.as_ref().unwrap_or(client);
         tracing::debug!(session_id = %self.session_id, fields = fields.len(), "jev_decide extraction");
@@ -352,7 +352,7 @@ impl distill_tools::types::resources::JevDecider for ShellJevDecider {
         })?.len();
         let use_long = long_context || serialized_len > STANDARD_STATE_BUDGET;
         let client = crate::jev::client_cached().filter(|client| client.credential_present())
-            .ok_or_else(|| distill_tool_runtime::ToolError::custom("jev_unavailable", "Jev client or OpenRouter credential unavailable"))?;
+            .ok_or_else(|| distill_tool_runtime::ToolError::custom("jev_unavailable", "Jev client unavailable"))?;
         let observed = crate::jev::observed_client(client, "jev_decide");
         let client = observed.as_ref().unwrap_or(client);
         tracing::debug!(session_id = %self.session_id, long_context = use_long, "jev_decide request");

@@ -2148,9 +2148,10 @@ pub(in crate::app::dispatch) fn set_cheap_model(
     }]
 }
 
-/// Validate and save the three fields submitted by the tier editor: the
-/// required main model and the optional worker model, each as `model [effort]`
-/// (no effort, or `auto`, lets Jev choose it per call), and the utility model.
+/// Validate and save the fields submitted by the tier editor: the required main
+/// model and the optional worker model, each as `model [effort]` (no effort, or
+/// `auto`, lets Jev choose it per call), the utility model, the execution mode,
+/// and the optional local decision model override.
 /// The main model and its effort switch the session the way `/model` does and
 /// are also saved for new sessions.
 pub(in crate::app::dispatch) fn set_tier_editor(
@@ -2159,6 +2160,7 @@ pub(in crate::app::dispatch) fn set_tier_editor(
     worker: String,
     utility: String,
     execution_mode: distill_tool_types::ExecutionModeChoice,
+    decision: Option<(String, String)>,
 ) -> Vec<Effect> {
     use crate::slash::commands::model::parse_tier_selection;
     let models = match app.active_view {
@@ -2212,18 +2214,31 @@ pub(in crate::app::dispatch) fn set_tier_editor(
             }
         }
     };
+    let utility_is_local_catalog = || {
+        distill_shell::jev::local_utility_candidates()
+            .iter()
+            .any(|(catalog_id, _)| catalog_id == utility.as_str())
+    };
     if !utility.is_empty()
         && !(crate::slash::commands::cheap_model::standalone_chain(&utility)
             || crate::slash::commands::provider_status::openrouter_entries()
                 .iter()
-                .any(|(key, _)| key == &utility))
+                .any(|(key, _)| key == &utility)
+            || utility_is_local_catalog())
     {
         app.show_toast(
-            "Utility model must be an OpenRouter entry or a comma-separated model chain.",
+            "Utility model must be an OpenRouter entry, a local catalog entry, or a comma-separated model chain.",
         );
         return vec![];
     }
 
+    let initial_worker = models.worker_model.as_ref().map_or_else(String::new, |id| {
+        format!(
+            "{id} {}",
+            crate::acp::model_state::effort_setting_label(models.worker_effort)
+        )
+    });
+    let worker_changed = worker.trim() != initial_worker;
     let mut effects = Vec::new();
     let main_changed = current_main.as_ref() != Some(&main_id);
     if main_changed || current_main_effort != main_effort {
@@ -2265,27 +2280,32 @@ pub(in crate::app::dispatch) fn set_tier_editor(
     };
     let default_worker = crate::acp::ModelState::configured_worker_model();
     let default_effort = crate::acp::ModelState::configured_worker_effort();
-    effects.extend(match worker_pick {
-        Some((id, effort))
-            if default_worker.as_ref() != Some(&id)
-                || default_effort != effort
-                || session_worker.is_some_and(|models| {
-                    models.worker_model.as_ref() != Some(&id) || models.worker_effort != effort
-                }) =>
-        {
-            super::super::router::dispatch(
-                crate::app::actions::Action::SetWorkerModel(id, effort),
-                app,
-            )
-        }
-        None if default_worker.is_some()
-            || session_worker.is_some_and(|models| models.worker_model.is_some()) =>
-        {
-            clear_worker_model(app)
-        }
-        _ => vec![],
-    });
+    if worker_changed {
+        effects.extend(match worker_pick {
+            Some((id, effort))
+                if default_worker.as_ref() != Some(&id)
+                    || default_effort != effort
+                    || session_worker.is_some_and(|models| {
+                        models.worker_model.as_ref() != Some(&id) || models.worker_effort != effort
+                    }) =>
+            {
+                super::super::router::dispatch(
+                    crate::app::actions::Action::SetWorkerModel(id, effort),
+                    app,
+                )
+            }
+            None if default_worker.is_some()
+                || session_worker.is_some_and(|models| models.worker_model.is_some()) =>
+            {
+                clear_worker_model(app)
+            }
+            _ => vec![],
+        });
+    }
     effects.extend(set_cheap_model(app, utility, None));
+    if decision != distill_shell::jev::configured_local_decision_model() {
+        effects.push(Effect::PersistDecisionModel { value: decision });
+    }
     if execution_mode_changed {
         effects.extend(super::super::router::dispatch(
             crate::app::actions::Action::SetExecutionMode {

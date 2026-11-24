@@ -1,8 +1,12 @@
 // Modified for Distill by Samuel Fajreldines, 2026.
-use super::persist::update_config;
+use super::persist::{
+    atomic_write_follow_bound, lock_config_writes, parse_existing_config_toml, read_follow_bound,
+    update_config,
+};
 use anyhow::Result;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
+use toml::Value as TomlValue;
 
 // --------------------------------------------------------------------------- Settings helpers: typed disk-write wrappers for each setting
 // All route through `update_config`, then `merge_section`, then `save_config` ---------------------------------------------------------------------------
@@ -270,6 +274,78 @@ pub async fn set_jev_local_model(value: String) -> Result<()> {
         });
     })
     .await
+}
+
+/// Persist or clear the local decision picker (`[jev.local_decision]`).
+///
+/// `Some((base_url, model))` validates the loopback endpoint and writes only
+/// that table. `None` removes the table, so the explicit trusted `[jev]`
+/// provider settings (or the shipped remote defaults) apply again. Other
+/// settings are preserved. The running session keeps its cached client until
+/// restart.
+pub async fn set_jev_decision_model(value: Option<(String, String)>) -> Result<()> {
+    if let Some((base_url, model)) = &value {
+        distill_workspace::jev::client::validate_local_base_url(base_url.trim())?;
+        if model.trim().is_empty() {
+            anyhow::bail!("local decision model id must not be empty");
+        }
+        if model.len() > MAX_DEFAULT_MODEL_LEN {
+            anyhow::bail!(
+                "local decision model name too long ({} > {} bytes)",
+                model.len(),
+                MAX_DEFAULT_MODEL_LEN
+            );
+        }
+    }
+    let guard = lock_config_writes().await?;
+    let path = super::user_config_path();
+    let (dest, content) = read_follow_bound(&path)?;
+    let mut root: TomlValue = parse_existing_config_toml(&content)?;
+    let table = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("user config root must be a table"))?;
+    let jev = table
+        .entry("jev")
+        .or_insert_with(|| TomlValue::Table(Default::default()));
+    let jev = jev
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[jev] must be a table"))?;
+    match value {
+        Some((base_url, model)) => {
+            let mut local = toml::map::Map::new();
+            local.insert(
+                "base_url".to_owned(),
+                TomlValue::String(base_url.trim().to_owned()),
+            );
+            local.insert(
+                "model".to_owned(),
+                TomlValue::String(model.trim().to_owned()),
+            );
+            jev.insert("local_decision".to_owned(), TomlValue::Table(local));
+        }
+        None => {
+            jev.remove("local_decision");
+            // A picker choice must beat an explicit user-owned local transport.
+            // Managed files are read-only here, so a managed local_chat cannot
+            // be overridden from the picker.
+            let direct_local = jev
+                .get("provider")
+                .and_then(TomlValue::as_str)
+                .and_then(distill_workspace::jev::provider::JevProvider::from_name)
+                == Some(distill_workspace::jev::provider::JevProvider::LocalChat);
+            if direct_local {
+                jev.remove("provider");
+                jev.remove("base_url");
+                jev.remove("model");
+            }
+        }
+    }
+    let written = toml::to_string_pretty(&root)?;
+    guard
+        .run_blocking(move || atomic_write_follow_bound(&path, &dest, &written))
+        .await
+        .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))??;
+    Ok(())
 }
 
 /// Persist `[models].worker`: the optional model that runs the work the main
