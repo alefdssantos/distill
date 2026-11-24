@@ -1351,6 +1351,7 @@ fn dispatch_action(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::Login => dispatch_login(app),
         Action::LoginProvider(provider) => super::auth::dispatch_provider_login(app, provider),
         Action::LoginGemini => super::external_editor::dispatch_login_gemini(app),
+        Action::OpenGeminiSession => super::external_editor::dispatch_open_gemini_session(app),
         Action::LogoutProvider(provider) => super::auth::dispatch_provider_logout(app, provider),
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::CancelOnboardingLogin => dispatch_cancel_onboarding_login(app),

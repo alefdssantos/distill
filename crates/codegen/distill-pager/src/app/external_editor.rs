@@ -30,12 +30,15 @@ const PROMPT_EDITOR_STALE: &str =
     "The draft changed while the external editor was open; the newer draft was kept.";
 const GEMINI_LOGIN_UNAVAILABLE: &str =
     "Could not start the official Gemini CLI (`agy acp --login`); install the official CLI and retry /login-gemini.";
+const GEMINI_SESSION_UNAVAILABLE: &str =
+    "Could not start the Gemini session in this window. Run /gemini again after updating the Distill binary.";
+const GEMINI_SESSION_CLOSED: &str = "Gemini session closed. This Distill session is still open.";
 pub(crate) const GEMINI_LOGIN_SUCCESS: &str =
-    "Logged in to Gemini. Open `distill-local --gemini` to use Gemini.";
+    "Logged in to Gemini. Run /gemini to open a Gemini session in this window.";
 const GEMINI_LOGIN_CANCELLED: &str =
-    "Gemini login was cancelled or did not complete. Open `distill-local --gemini` after signing in.";
+    "Gemini login was cancelled or did not complete. Retry /login-gemini, then run /gemini.";
 const GEMINI_LOGIN_FAILED: &str =
-    "Gemini login did not complete. Retry /login-gemini, then open `distill-local --gemini`.";
+    "Gemini login did not complete. Retry /login-gemini, then run /gemini.";
 
 #[derive(Clone, Debug)]
 pub(crate) enum PendingEditorRequest {
@@ -51,6 +54,8 @@ pub(crate) enum PendingEditorRequest {
     },
     /// Run the official Gemini CLI's interactive login. Carries no editor file or draft.
     GeminiLogin,
+    /// Open a Gemini session in this terminal, then return to this session.
+    GeminiSession,
 }
 
 pub(crate) struct EditorLaunch {
@@ -72,11 +77,15 @@ pub(crate) enum PreparedEditorRequest {
     GeminiLogin {
         command: std::process::Command,
     },
+    GeminiSession {
+        command: std::process::Command,
+    },
 }
 
 pub(crate) enum SuspendLaunch<'a> {
     Editor(&'a EditorLaunch),
     GeminiLogin(&'a mut std::process::Command),
+    GeminiSession(&'a mut std::process::Command),
 }
 
 impl PreparedEditorRequest {
@@ -86,6 +95,7 @@ impl PreparedEditorRequest {
                 SuspendLaunch::Editor(&*launch)
             }
             Self::GeminiLogin { command } => SuspendLaunch::GeminiLogin(command),
+            Self::GeminiSession { command } => SuspendLaunch::GeminiSession(command),
         }
     }
 }
@@ -165,7 +175,9 @@ fn editor_argv() -> Result<Vec<String>, String> {
 fn revalidate(app: &mut AppView, request: PendingEditorRequest) -> Option<PendingEditorRequest> {
     let agent_id = match &request {
         PendingEditorRequest::PromptDraft { agent_id, .. } => *agent_id,
-        PendingEditorRequest::ConfigFile { .. } | PendingEditorRequest::GeminiLogin => {
+        PendingEditorRequest::ConfigFile { .. }
+        | PendingEditorRequest::GeminiLogin
+        | PendingEditorRequest::GeminiSession => {
             return Some(request);
         }
     };
@@ -207,7 +219,10 @@ pub(crate) fn prepare(
     let Some(request) = revalidate(app, request) else {
         return Ok(None);
     };
-    let argv = if matches!(request, PendingEditorRequest::GeminiLogin) {
+    let argv = if matches!(
+        request,
+        PendingEditorRequest::GeminiLogin | PendingEditorRequest::GeminiSession
+    ) {
         Vec::new()
     } else {
         match editor_argv() {
@@ -232,6 +247,20 @@ pub(crate) fn prepare(
                     })
                 }
             }
+        }
+        PendingEditorRequest::GeminiSession => {
+            let mut command = match gemini_session_command(app) {
+                Ok(command) => command,
+                Err(error) => {
+                    tracing::warn!(%error, "gemini session: could not prepare the terminal child");
+                    return Err(PrepareError {
+                        request: PendingEditorRequest::GeminiSession,
+                        message: GEMINI_SESSION_UNAVAILABLE.to_owned(),
+                    });
+                }
+            };
+            command.env("DISTILL_GEMINI_SESSION", "1");
+            Ok(Some(PreparedEditorRequest::GeminiSession { command }))
         }
         PendingEditorRequest::ConfigFile {
             path,
@@ -267,6 +296,15 @@ pub(crate) fn prepare(
     }
 }
 
+/// The same binary, opened as a Gemini session in this terminal. The parent
+/// UI is suspended by the caller and resumes when the child exits.
+fn gemini_session_command(app: &AppView) -> std::io::Result<std::process::Command> {
+    let executable = std::env::current_exe()?;
+    let mut command = std::process::Command::new(executable);
+    command.arg("--gemini").arg("--cwd").arg(&app.cwd);
+    Ok(command)
+}
+
 #[derive(Debug)]
 pub(crate) struct PrepareError {
     request: PendingEditorRequest,
@@ -279,7 +317,9 @@ pub(crate) fn finish_prepare_error(app: &mut AppView, error: PrepareError) {
         PendingEditorRequest::PromptDraft { agent_id, .. } => {
             report_prompt_failure(app, agent_id, &error.message);
         }
-        PendingEditorRequest::ConfigFile { .. } | PendingEditorRequest::GeminiLogin => {
+        PendingEditorRequest::ConfigFile { .. }
+        | PendingEditorRequest::GeminiLogin
+        | PendingEditorRequest::GeminiSession => {
             report_config_failure(app, &error.message);
         }
     }
@@ -310,6 +350,14 @@ pub(crate) fn finish(
 ) {
     match prepared {
         PreparedEditorRequest::GeminiLogin { .. } => report_gemini_login(app, editor_result),
+        PreparedEditorRequest::GeminiSession { .. } => match editor_result {
+            Ok(status) if status.success() => report_config_failure(app, GEMINI_SESSION_CLOSED),
+            Ok(_) => report_config_failure(app, GEMINI_SESSION_CLOSED),
+            Err(error) => {
+                tracing::warn!(%error, "gemini session: child failed");
+                report_config_failure(app, GEMINI_SESSION_UNAVAILABLE);
+            }
+        },
         PreparedEditorRequest::ConfigFile {
             refresh_agents_modal,
             ..

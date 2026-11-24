@@ -886,6 +886,9 @@ fn run_pending_suspends(
                             crate::app::external_editor::SuspendLaunch::GeminiLogin(command) => {
                                 command.status()
                             }
+                            crate::app::external_editor::SuspendLaunch::GeminiSession(command) => {
+                                command.status()
+                            }
                         };
                     },
                 ) {

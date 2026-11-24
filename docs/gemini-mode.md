@@ -1,20 +1,18 @@
 # Gemini through the official CLI
 
-`distill-local --gemini` opens the Distill terminal UI against the installed
-official Antigravity CLI (`agy acp --stdio --sandbox --disable-telemetry`).
+Run `/gemini` inside a normal `distill-local` session to open a Gemini session in
+the same terminal, against the installed official Antigravity CLI
+(`agy acp --stdio --sandbox --disable-telemetry`). The normal session is kept and
+resumes when the Gemini session closes. `distill-local --gemini` remains an
+explicit direct entry point.
 Gemini runs in its own ACP session and keeps its own sign-in and permission
 prompts. This mode never joins a Distill leader and never forces an xAI login.
 
 ## Sign in
 
-Use either form:
-
-```sh
-distill-local login --gemini
-```
-
-or, inside Distill, run `/login-gemini`. Both suspend the terminal UI and run
-`agy acp --login`. Install the official CLI first; Distill does not collect or
+Inside Distill, run `/login-gemini`. It suspends the terminal UI and runs
+`agy acp --login`, then returns to the same session. The terminal command
+`distill-local login --gemini` remains available. Install the official CLI first; Distill does not collect or
 store Gemini credentials.
 
 ## Models
