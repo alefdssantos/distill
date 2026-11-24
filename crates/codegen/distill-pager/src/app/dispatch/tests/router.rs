@@ -326,6 +326,32 @@ fn config_editor_action_still_uses_typed_request() {
         }) if queued == &path
     ));
 }
+#[test]
+fn login_gemini_arms_pending_request_and_owns_it() {
+    let mut app = test_app();
+    let effects = dispatch(Action::LoginGemini, &mut app);
+    assert!(effects.is_empty());
+    assert!(matches!(
+        app.pending_editor,
+        Some(crate::app::external_editor::PendingEditorRequest::GeminiLogin)
+    ));
+
+    let path = std::path::PathBuf::from("/tmp/agent-config.md");
+    app.pending_editor = Some(crate::app::external_editor::PendingEditorRequest::ConfigFile {
+        path: path.clone(),
+        refresh_agents_modal: None,
+    });
+    let effects = dispatch(Action::LoginGemini, &mut app);
+    assert!(effects.is_empty());
+    assert!(matches!(
+        app.pending_editor,
+        Some(crate::app::external_editor::PendingEditorRequest::ConfigFile {
+            path: ref queued,
+            refresh_agents_modal: None,
+        }) if queued == &path
+    ));
+}
+
 fn seed_foreign_resume_hint(app: &mut AppView, tool: distill_foreign_sessions::ForeignSessionTool) {
     app.foreign_session_compat = distill_foreign_sessions::EnabledForeignSessionSources {
         claude: true,

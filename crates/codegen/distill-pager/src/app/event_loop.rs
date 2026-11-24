@@ -856,8 +856,7 @@ fn run_pending_suspends(
     if let Some(request) = app.pending_editor.take() {
         let retry_request = request.clone();
         match crate::app::external_editor::prepare(app, request) {
-            Ok(Some(prepared)) => {
-                let launch = prepared.launch();
+            Ok(Some(mut prepared)) => {
                 let mut editor_result = Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "invalid editor command",
@@ -869,15 +868,24 @@ fn run_pending_suspends(
                     reader_parked,
                     input_rx,
                     || {
-                        editor_result = match launch.argv.split_first() {
-                            Some((program, args)) => std::process::Command::new(program)
-                                .args(args)
-                                .arg(&launch.path)
-                                .status(),
-                            None => Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "invalid editor command",
-                            )),
+                        editor_result = match prepared.launch() {
+                            crate::app::external_editor::SuspendLaunch::Editor(launch) => {
+                                match launch.argv.split_first() {
+                                    Some((program, args)) => {
+                                        std::process::Command::new(program)
+                                            .args(args)
+                                            .arg(&launch.path)
+                                            .status()
+                                    }
+                                    None => Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidInput,
+                                        "invalid editor command",
+                                    )),
+                                }
+                            }
+                            crate::app::external_editor::SuspendLaunch::GeminiLogin(command) => {
+                                command.status()
+                            }
                         };
                     },
                 ) {
@@ -1841,6 +1849,8 @@ pub(crate) async fn run(
                 new_session_id: new_session_id.clone(),
             })
         }
+        // Gemini needs a live session before any prompt or `/model`; `NewAuto` alone would leave the welcome view.
+        MaterializedStartup::NewAuto if args.gemini => Some(Action::NewSession),
         MaterializedStartup::NewAuto if args.worktree.is_some() => {
             Some(Action::NewWorktreeSession {
                 load_session_id: None,

@@ -1346,6 +1346,27 @@ pub(super) fn supersede_open_reload_window(
 
 // TaskResult handlers.
 
+/// One compact line for the turn usage an agent reported on its `PromptResponse`.
+/// Shows the reported figures only: no cost, no quota, no derived totals.
+fn push_reported_usage_line(agent: &mut AgentView, usage: &acp::Usage) {
+    use crate::views::turn_distribution::format_tokens;
+
+    if usage.total_tokens == 0 {
+        return;
+    }
+    let mut parts = vec![
+        format!("{} in", format_tokens(usage.input_tokens)),
+        format!("{} out", format_tokens(usage.output_tokens)),
+    ];
+    if let Some(cached) = usage.cached_read_tokens.filter(|tokens| *tokens > 0) {
+        parts.push(format!("{} cached", format_tokens(cached)));
+    }
+    parts.push(format!("{} total", format_tokens(usage.total_tokens)));
+    agent
+        .scrollback
+        .push_block(RenderBlock::system(format!("Tokens: {}", parts.join(" · "))));
+}
+
 pub(super) fn handle_prompt_response(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1615,6 +1636,17 @@ pub(super) fn handle_prompt_response(
             }
         };
         crate::app::turn_completion::push_turn_terminal_marker(agent, event);
+
+        // Reported ACP usage (official gemini `agy` sets it). The Distill shell
+        // reports its own per-turn figures through `_meta`/`TurnCompleted`, so
+        // this line never doubles those.
+        if !was_cancelling
+            && let Ok(pr) = &result
+            && matches!(pr.stop_reason, acp::StopReason::EndTurn | acp::StopReason::MaxTokens)
+            && let Some(usage) = pr.usage.as_ref()
+        {
+            push_reported_usage_line(agent, usage);
+        }
 
         let notification = match (&result, was_cancelling) {
             (Ok(_), false) if !agent.bash_turn => {

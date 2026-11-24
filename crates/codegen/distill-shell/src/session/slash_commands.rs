@@ -532,6 +532,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "login",
     "login-claude",
     "login-codex",
+    "login-gemini",
     "login-openrouter",
     "logout",
     "log",

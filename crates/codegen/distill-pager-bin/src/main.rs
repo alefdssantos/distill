@@ -2092,6 +2092,9 @@ fn main() {
 }
 #[tracing::instrument(level = "debug", skip_all)]
 async fn async_main(mut args: PagerArgs) -> Result<()> {
+    if let Some(message) = args.gemini_mode_error() {
+        anyhow::bail!("{message}");
+    }
     distill_extra_ca::ensure_default_crypto_provider();
     if let Some(Command::Completions { shell }) = &args.command {
         distill_pager::completions_cmd::run(*shell);

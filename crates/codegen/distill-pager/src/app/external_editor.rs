@@ -28,6 +28,14 @@ const PROMPT_EDITOR_TOO_LARGE: &str =
     "External prompt editor saved a draft larger than 4 MiB; the original draft was kept.";
 const PROMPT_EDITOR_STALE: &str =
     "The draft changed while the external editor was open; the newer draft was kept.";
+const GEMINI_LOGIN_UNAVAILABLE: &str =
+    "Could not start the official Gemini CLI (`agy acp --login`); install the official CLI and retry /login-gemini.";
+pub(crate) const GEMINI_LOGIN_SUCCESS: &str =
+    "Logged in to Gemini. Open `distill-local --gemini` to use Gemini.";
+const GEMINI_LOGIN_CANCELLED: &str =
+    "Gemini login was cancelled or did not complete. Open `distill-local --gemini` after signing in.";
+const GEMINI_LOGIN_FAILED: &str =
+    "Gemini login did not complete. Retry /login-gemini, then open `distill-local --gemini`.";
 
 #[derive(Clone, Debug)]
 pub(crate) enum PendingEditorRequest {
@@ -41,6 +49,8 @@ pub(crate) enum PendingEditorRequest {
         agent_id: AgentId,
         original_text: String,
     },
+    /// Run the official Gemini CLI's interactive login. Carries no editor file or draft.
+    GeminiLogin,
 }
 
 pub(crate) struct EditorLaunch {
@@ -59,12 +69,23 @@ pub(crate) enum PreparedEditorRequest {
         original_text: String,
         file: PromptEditorFile,
     },
+    GeminiLogin {
+        command: std::process::Command,
+    },
+}
+
+pub(crate) enum SuspendLaunch<'a> {
+    Editor(&'a EditorLaunch),
+    GeminiLogin(&'a mut std::process::Command),
 }
 
 impl PreparedEditorRequest {
-    pub(crate) fn launch(&self) -> &EditorLaunch {
+    pub(crate) fn launch(&mut self) -> SuspendLaunch<'_> {
         match self {
-            Self::ConfigFile { launch, .. } | Self::PromptDraft { launch, .. } => launch,
+            Self::ConfigFile { launch, .. } | Self::PromptDraft { launch, .. } => {
+                SuspendLaunch::Editor(&*launch)
+            }
+            Self::GeminiLogin { command } => SuspendLaunch::GeminiLogin(command),
         }
     }
 }
@@ -144,7 +165,9 @@ fn editor_argv() -> Result<Vec<String>, String> {
 fn revalidate(app: &mut AppView, request: PendingEditorRequest) -> Option<PendingEditorRequest> {
     let agent_id = match &request {
         PendingEditorRequest::PromptDraft { agent_id, .. } => *agent_id,
-        PendingEditorRequest::ConfigFile { .. } => return Some(request),
+        PendingEditorRequest::ConfigFile { .. } | PendingEditorRequest::GeminiLogin => {
+            return Some(request);
+        }
     };
     let access = app
         .agents
@@ -184,13 +207,32 @@ pub(crate) fn prepare(
     let Some(request) = revalidate(app, request) else {
         return Ok(None);
     };
-    let argv = match editor_argv() {
-        Ok(argv) => argv,
-        Err(message) => {
-            return Err(PrepareError { request, message });
+    let argv = if matches!(request, PendingEditorRequest::GeminiLogin) {
+        Vec::new()
+    } else {
+        match editor_argv() {
+            Ok(argv) => argv,
+            Err(message) => {
+                return Err(PrepareError { request, message });
+            }
         }
     };
     match request {
+        PendingEditorRequest::GeminiLogin => {
+            match crate::acp::external::antigravity_login_command() {
+                Ok(mut command) => {
+                    command.args(["acp", "--login"]);
+                    Ok(Some(PreparedEditorRequest::GeminiLogin { command }))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "gemini login: could not prepare agy");
+                    Err(PrepareError {
+                        request: PendingEditorRequest::GeminiLogin,
+                        message: GEMINI_LOGIN_UNAVAILABLE.to_owned(),
+                    })
+                }
+            }
+        }
         PendingEditorRequest::ConfigFile {
             path,
             refresh_agents_modal,
@@ -237,7 +279,9 @@ pub(crate) fn finish_prepare_error(app: &mut AppView, error: PrepareError) {
         PendingEditorRequest::PromptDraft { agent_id, .. } => {
             report_prompt_failure(app, agent_id, &error.message);
         }
-        PendingEditorRequest::ConfigFile { .. } => report_config_failure(app, &error.message),
+        PendingEditorRequest::ConfigFile { .. } | PendingEditorRequest::GeminiLogin => {
+            report_config_failure(app, &error.message);
+        }
     }
 }
 
@@ -265,6 +309,7 @@ pub(crate) fn finish(
     editor_result: Result<std::process::ExitStatus, std::io::Error>,
 ) {
     match prepared {
+        PreparedEditorRequest::GeminiLogin { .. } => report_gemini_login(app, editor_result),
         PreparedEditorRequest::ConfigFile {
             refresh_agents_modal,
             ..
@@ -308,6 +353,21 @@ pub(crate) fn finish(
             apply_prompt_outcome(app, agent_id, original_text, outcome);
         }
     }
+}
+
+fn report_gemini_login(
+    app: &mut AppView,
+    result: Result<std::process::ExitStatus, std::io::Error>,
+) {
+    let message = match result {
+        Ok(status) if status.success() => GEMINI_LOGIN_SUCCESS,
+        Ok(_) => GEMINI_LOGIN_CANCELLED,
+        Err(error) => {
+            tracing::warn!(%error, "gemini login: child failed");
+            GEMINI_LOGIN_FAILED
+        }
+    };
+    report_config_failure(app, message);
 }
 
 fn apply_prompt_outcome(
@@ -438,7 +498,10 @@ mod tests {
             original_text: "cancelled draft".to_owned(),
             file,
         };
-        let path = prepared.launch().path.clone();
+        let path = match &prepared {
+            PreparedEditorRequest::PromptDraft { launch, .. } => launch.path.clone(),
+            _ => unreachable!("test built a prompt draft"),
+        };
         assert!(path.exists());
         drop(prepared);
         assert!(!path.exists());

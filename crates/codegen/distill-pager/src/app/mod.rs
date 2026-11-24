@@ -700,8 +700,9 @@ pub async fn run(
                 )
             }
         };
-    if let distill_login::PreTuiLoginOutcome::SignedIn(auth) =
-        distill_login::maybe_run_pre_tui_external_login(
+    if !args.gemini
+        && let distill_login::PreTuiLoginOutcome::SignedIn(auth) =
+            distill_login::maybe_run_pre_tui_external_login(
             &grok_com_config,
             proxy_base_url.clone(),
             args.force_login,
@@ -713,18 +714,22 @@ pub async fn run(
         args.force_login = false;
     }
     distill_tty_utils::redirect_native_stderr();
-    let refreshed_auth = tokio::time::timeout(
-        distill_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        distill_login::try_ensure_fresh_auth(&grok_com_config, proxy_base_url),
-    )
-    .await
-    .unwrap_or(None);
+    let refreshed_auth = if args.gemini {
+        None
+    } else {
+        tokio::time::timeout(
+            distill_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+            distill_login::try_ensure_fresh_auth(&grok_com_config, proxy_base_url),
+        )
+        .await
+        .unwrap_or(None)
+    };
     let settings_query = distill_shell::agent::remote_config::settings_get::SettingsQuery::resolve(
         refreshed_auth,
         Some(grok_com_config.clone()),
     );
-    let had_prefetch =
-        distill_shell::agent::remote_config::settings_get::is_eligible(&settings_query);
+    let had_prefetch = !args.gemini
+        && distill_shell::agent::remote_config::settings_get::is_eligible(&settings_query);
     if had_prefetch {
         distill_shell::agent::remote_config::settings_get::warm_startup_settings(
             settings_query.clone(),
@@ -781,7 +786,7 @@ pub async fn run(
         disabled_by_confinement,
     } = resolve_leader_mode(
         args.leader,
-        args.no_leader,
+        args.no_leader || args.gemini,
         &raw_config,
         remote_settings.as_ref(),
         true,
@@ -940,6 +945,14 @@ pub async fn run(
         default_auto_mode: launch_auto && !launch_yolo.yolo,
         status_line: false,
     };
+    if args.gemini {
+        // Gemini keeps its own permission prompts: never forward Distill's always-approve/auto defaults to the external agent.
+        connect_flags.default_yolo_mode = false;
+        connect_flags.default_auto_mode = false;
+        connect_flags.fs_read = false;
+        connect_flags.fs_write = false;
+        connect_flags.terminal = false;
+    }
     let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
     let alt_screen_config_mode = config_watcher.current().alt_screen;
     let term_ctx = crate::terminal::terminal_context();
@@ -1040,11 +1053,13 @@ pub async fn run(
             })),
         );
     }
-    let fallback_flags = use_leader.then(|| connect_flags.clone());
-    let primary_target = if use_leader {
-        crate::acp::AgentKind::Leader
-    } else {
-        crate::acp::AgentKind::Embedded
+    let route = args.tui_connect_target(use_leader);
+    let fallback_flags = (route == cli::TuiConnectTarget::Leader).then(|| connect_flags.clone());
+    let primary_target = match route {
+        cli::TuiConnectTarget::Leader => crate::acp::AgentKind::Leader,
+        cli::TuiConnectTarget::Embedded | cli::TuiConnectTarget::Antigravity => {
+            crate::acp::AgentKind::Embedded
+        }
     };
     distill_telemetry::external::init(distill_shell::agent::config::resolve_external_otel_config(
         distill_telemetry::external::config::ExternalClientInfo {
@@ -1065,12 +1080,15 @@ pub async fn run(
         startup_failure::ConnectAttempt::First,
         &timer,
         async {
-            match primary_target {
-                crate::acp::AgentKind::Leader => {
+            match route {
+                cli::TuiConnectTarget::Leader => {
                     crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await
                 }
-                crate::acp::AgentKind::Embedded => {
+                cli::TuiConnectTarget::Embedded => {
                     crate::acp::connect(&cancel, connect_flags).await
+                }
+                cli::TuiConnectTarget::Antigravity => {
+                    crate::acp::external::connect_antigravity(&cancel, connect_flags).await
                 }
             }
         },

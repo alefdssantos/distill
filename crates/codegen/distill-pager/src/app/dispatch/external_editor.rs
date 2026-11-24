@@ -5,6 +5,15 @@ use crate::app::external_editor::{
     ATTACHMENT_MESSAGE, PASTE_MESSAGE, PendingEditorRequest, VOICE_MESSAGE, report_prompt_failure,
 };
 
+pub(super) fn dispatch_login_gemini(app: &mut AppView) -> Vec<Effect> {
+    if app.pending_editor.is_some() {
+        app.show_toast("Another external program is already waiting to run.");
+        return vec![];
+    }
+    app.pending_editor = Some(PendingEditorRequest::GeminiLogin);
+    vec![]
+}
+
 pub(super) fn dispatch_edit_prompt_external(app: &mut AppView) -> Vec<Effect> {
     if app.pending_editor.is_some() {
         return vec![];

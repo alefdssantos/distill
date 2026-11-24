@@ -37,6 +37,7 @@ pub mod jump;
 pub mod login;
 pub mod login_claude;
 pub mod login_codex;
+pub mod login_gemini;
 pub mod login_openrouter;
 pub mod logout;
 pub mod loop_cmd;
@@ -168,6 +169,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(login::LoginCommand),
         Arc::new(login_claude::LoginClaudeCommand),
         Arc::new(login_codex::LoginCodexCommand),
+        Arc::new(login_gemini::LoginGeminiCommand),
         Arc::new(login_openrouter::LoginOpenrouterCommand),
         Arc::new(cheap_model::CheapModelCommand),
         Arc::new(worker_model::WorkerModelCommand),
@@ -276,6 +278,20 @@ mod tests {
         ]));
         assert!(reg.get("loop").is_some());
     }
+    #[test]
+    fn login_gemini_reserves_its_slot_beside_provider_logins() {
+        let reg = CommandRegistry::new(builtin_commands());
+        for name in [
+            "login-gemini",
+            "login-claude",
+            "login-codex",
+            "login-openrouter",
+        ] {
+            assert!(reg.get(name).is_some(), "/{name} should be registered");
+        }
+        assert_eq!(reg.get("login-gemini").unwrap().name(), "login-gemini");
+    }
+
     #[test]
     fn builtin_registry_lookup_by_alias() {
         let reg = CommandRegistry::new(builtin_commands());

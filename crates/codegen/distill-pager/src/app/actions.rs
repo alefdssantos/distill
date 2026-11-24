@@ -675,6 +675,8 @@ pub enum Action {
     /// User pressed login on the welcome screen.
     Login,
     LoginProvider(LoginProvider),
+    /// `/login-gemini`: suspend the TUI and run the official `agy acp --login`.
+    LoginGemini,
     LogoutProvider(LoginProvider),
     /// Cancel an in-progress login that was started from inside a session (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit the app or lose the open session.

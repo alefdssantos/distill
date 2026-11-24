@@ -831,6 +831,10 @@ pub struct PagerArgs {
     /// Use OAuth when the welcome screen starts authentication.
     #[arg(long = "oauth")]
     pub oauth: bool,
+    /// Connect to Gemini through the Antigravity ACP bridge instead of the Distill agent.
+    /// Experimental and interactive only: it starts its own session, never uses a shared leader, and never falls back to the Distill agent.
+    #[arg(long = "gemini")]
+    pub gemini: bool,
     /// Connect to a shared leader process.
     #[arg(long, conflicts_with = "no_leader", hide = true)]
     pub leader: bool,
@@ -1106,6 +1110,71 @@ impl PagerArgs {
             .map(str::trim)
             .filter(|s| !s.is_empty())
     }
+    /// Why a `--gemini` launch cannot start, if it cannot.
+    /// Gemini mode is interactive only, starts its own session, never joins the Distill leader, and never falls back to the Distill agent.
+    pub fn gemini_mode_error(&self) -> Option<&'static str> {
+        if !self.gemini {
+            return None;
+        }
+        if self.command.is_some() {
+            return Some("--gemini starts the terminal UI only; subcommands are not supported");
+        }
+        if self.single.is_some()
+            || self.prompt_json.is_some()
+            || self.prompt_file.is_some()
+            || self.memory_flush
+        {
+            return Some(
+                "--gemini is interactive only; headless prompts (-p, --prompt-json, --prompt-file, --memory-flush) are not supported",
+            );
+        }
+        if self.resume_session.is_some()
+            || self.load_session.is_some()
+            || self.continue_last_session
+            || self.fork_session
+            || self.restore_code
+        {
+            return Some("--gemini cannot resume Distill sessions; start a new Gemini session");
+        }
+        if self.leader {
+            return Some("--gemini never uses a Distill leader; drop --leader");
+        }
+        if self.force_login {
+            return Some("use distill-local login --gemini to sign in to Gemini");
+        }
+        if self.worktree.is_some() || self.worktree_ref.is_some() || self.session_id.is_some() {
+            return Some("--gemini starts a new Antigravity session; open it from the intended working directory");
+        }
+        if !self.allow_rules.is_empty() || !self.deny_rules.is_empty() {
+            return Some("--gemini uses Antigravity tool permissions; Distill --allow and --deny rules are not supported");
+        }
+        if self.yolo || self.permission_mode_flag.as_deref() == Some("bypassPermissions") {
+            return Some(
+                "--gemini keeps Gemini's own permission prompts; --always-approve and --permission-mode bypassPermissions are not forwarded",
+            );
+        }
+        None
+    }
+    /// Agent the interactive terminal connects to. `--gemini` wins over leader mode.
+    pub fn tui_connect_target(&self, use_leader: bool) -> TuiConnectTarget {
+        if self.gemini {
+            TuiConnectTarget::Antigravity
+        } else if use_leader {
+            TuiConnectTarget::Leader
+        } else {
+            TuiConnectTarget::Embedded
+        }
+    }
+}
+/// Agent a terminal-UI launch connects to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiConnectTarget {
+    /// Connect through the shared leader process.
+    Leader,
+    /// Spawn the Distill agent in this process.
+    Embedded,
+    /// Connect to Gemini through the Antigravity ACP bridge.
+    Antigravity,
 }
 #[cfg(test)]
 mod tests {
@@ -1673,5 +1742,93 @@ mod tests {
             ])
             .is_err()
         );
+    }
+    #[test]
+    fn gemini_flag_parses_and_selects_antigravity_over_leader() {
+        let args = PagerArgs::try_parse_from(["distill", "--gemini"]).expect("--gemini parses");
+        assert!(args.gemini);
+        assert_eq!(
+            args.tui_connect_target(true),
+            TuiConnectTarget::Antigravity,
+            "--gemini must never select the Distill leader"
+        );
+        assert!(args.gemini_mode_error().is_none());
+    }
+    #[test]
+    fn connect_target_without_gemini_follows_leader_mode() {
+        let args = PagerArgs::try_parse_from(["distill"]).expect("bare launch parses");
+        assert!(!args.gemini);
+        assert_eq!(args.tui_connect_target(false), TuiConnectTarget::Embedded);
+        assert_eq!(args.tui_connect_target(true), TuiConnectTarget::Leader);
+    }
+    #[test]
+    fn gemini_mode_rejects_headless_subcommands_and_resume() {
+        let headless =
+            PagerArgs::try_parse_from(["distill", "--gemini", "-p", "hi"]).expect("parses");
+        assert!(
+            headless
+                .gemini_mode_error()
+                .expect("headless prompt must be rejected")
+                .contains("interactive only")
+        );
+        let subcommand = PagerArgs::try_parse_from(["distill", "--gemini", "agent", "stdio"])
+            .expect("parses");
+        assert!(
+            subcommand
+                .gemini_mode_error()
+                .expect("subcommands must be rejected")
+                .contains("subcommands")
+        );
+        for argv in [
+            vec!["distill", "--gemini", "--resume"],
+            vec!["distill", "--gemini", "--continue"],
+            vec!["distill", "--gemini", "--load", "sess-1"],
+        ] {
+            let args = PagerArgs::try_parse_from(argv).expect("parses");
+            assert!(
+                args.gemini_mode_error()
+                    .expect("resume must be rejected")
+                    .contains("cannot resume")
+            );
+        }
+    }
+    #[test]
+    fn gemini_mode_rejects_leader_and_always_approve() {
+        let leader = PagerArgs::try_parse_from(["distill", "--gemini", "--leader"]).expect("parses");
+        assert!(
+            leader
+                .gemini_mode_error()
+                .expect("--leader must be rejected")
+                .contains("leader")
+        );
+        for argv in [
+            vec!["distill", "--gemini", "--yolo"],
+            vec!["distill", "--gemini", "--always-approve"],
+            vec![
+                "distill",
+                "--gemini",
+                "--permission-mode",
+                "bypassPermissions",
+            ],
+        ] {
+            let args = PagerArgs::try_parse_from(argv).expect("parses");
+            assert!(
+                args.gemini_mode_error()
+                    .expect("bypass must be rejected")
+                    .contains("permission prompts")
+            );
+        }
+    }
+    #[test]
+    fn launches_without_gemini_keep_working() {
+        for argv in [
+            vec!["distill"],
+            vec!["distill", "-p", "task"],
+            vec!["distill", "--yolo"],
+            vec!["distill", "--resume", "sess-1"],
+        ] {
+            let args = PagerArgs::try_parse_from(argv).expect("parses");
+            assert!(args.gemini_mode_error().is_none());
+        }
     }
 }

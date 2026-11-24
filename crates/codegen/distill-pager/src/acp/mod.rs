@@ -4,6 +4,7 @@
 //! This module spawns the agent process, initializes the protocol, authenticates, and provides the channel for communication.
 /// Shared plan-file size cap for the pager keep.
 pub(crate) const MAX_PLAN_FILE_BYTES: usize = 256 * 1024;
+pub mod external;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
@@ -229,6 +230,18 @@ pub(in crate::acp) async fn initialize_connection(
     flags: &ConnectFlags,
     auth_manager: std::sync::Arc<distill_login::AuthManager>,
 ) -> Result<AcpConnection> {
+    initialize_connection_with_eager_auth(endpoint, flags, auth_manager, true).await
+}
+
+/// Same as [`initialize_connection`], with eager authentication under caller control.
+/// External agents whose login belongs to their own CLI (Antigravity) must not send
+/// Distill's `authenticate` request at startup.
+pub(in crate::acp) async fn initialize_connection_with_eager_auth(
+    endpoint: AgentEndpoint,
+    flags: &ConnectFlags,
+    auth_manager: std::sync::Arc<distill_login::AuthManager>,
+    run_eager_auth: bool,
+) -> Result<AcpConnection> {
     let AgentEndpoint {
         tx,
         rx,
@@ -243,18 +256,28 @@ pub(in crate::acp) async fn initialize_connection(
     let agent = initialize(&tx, flags).await?;
     let (needs_login, login_label, login_method_id, auth_start_mode) =
         startup_auth_metadata(&agent.auth_methods);
-    startup::enter(StartupPhase::EagerAuth);
     let (needs_login, login_label, login_method_id, auth_start_mode, auth_meta) =
-        bounded_eager_auth(
-            &tx,
-            &agent.auth_methods,
-            agent.default_auth_method_id.as_ref(),
-            needs_login,
-            login_label,
-            login_method_id,
-            auth_start_mode,
-        )
-        .await;
+        if run_eager_auth {
+            startup::enter(StartupPhase::EagerAuth);
+            bounded_eager_auth(
+                &tx,
+                &agent.auth_methods,
+                agent.default_auth_method_id.as_ref(),
+                needs_login,
+                login_label,
+                login_method_id,
+                auth_start_mode,
+            )
+            .await
+        } else {
+            (
+                needs_login,
+                login_label,
+                login_method_id,
+                auth_start_mode,
+                None,
+            )
+        };
     Ok(AcpConnection {
         tx,
         rx,
