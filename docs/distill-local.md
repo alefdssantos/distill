@@ -77,3 +77,26 @@ Interpretation limits:
   this branch.
 - Results are from one machine and three runs. They are not a general
   performance claim for other Apple Silicon models.
+
+## Cost and economy
+
+Local chat and local decision calls have no API charge: the model runs on the
+user's Mac. The local token meter reports workload, not savings, because local
+tokens are not billable tokens.
+
+This branch has no new task-cost campaign. It does not claim that replacing the
+decision layer with a 2B local model keeps task quality or lowers end-to-end
+cost. Hardware, electricity, latency, and weaker answers are real costs that the
+token meter does not show.
+
+For reference only, the upstream harness campaign reports these remote-model
+savings against native baselines (Distill 2.0.9, not this branch):
+
+| Family | Normal Δ cost | Auto Δ cost |
+|---|---:|---:|
+| Astra | −61.6% | −81.1% |
+| Sol | −63.1% | −82.1% |
+| Opus | −87.7% | −94.9% |
+
+Source: [BENCHMARKS.md](../BENCHMARKS.md). Those runs used remote models and
+external Jev; they did not use the local Qwen server.
