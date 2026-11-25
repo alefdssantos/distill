@@ -833,7 +833,7 @@ pub struct PagerArgs {
     pub oauth: bool,
     /// Connect to Gemini through the Antigravity ACP bridge instead of the Distill agent.
     /// Experimental and interactive only: it starts its own session, never uses a shared leader, and never falls back to the Distill agent.
-    #[arg(long = "gemini")]
+    #[arg(long = "gemini", hide = true)]
     pub gemini: bool,
     /// Connect to a shared leader process.
     #[arg(long, conflicts_with = "no_leader", hide = true)]
@@ -1116,6 +1116,7 @@ impl PagerArgs {
         if !self.gemini {
             return None;
         }
+        return Some("--gemini is temporarily disabled; Gemini is not available in /model.");
         if self.command.is_some() {
             return Some("--gemini starts the terminal UI only; subcommands are not supported");
         }
