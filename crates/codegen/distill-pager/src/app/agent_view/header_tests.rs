@@ -556,23 +556,23 @@ fn header_shows_local_replacement_after_cache_and_omits_it_when_narrow() {
     let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
     let row = header_row(&agent, &buf);
     assert!(
-        row.contains("cache 87% │ saved ~12.3k ▁▂▄█"),
+        row.contains("cache 87% │ local ~12.3k ▁▂▄█"),
         "row = {row:?}"
     );
     let cache = row.find("cache 87%").unwrap();
-    let saved = row.find("saved ~12.3k").unwrap();
-    assert!(cache < saved, "saved after cache, row = {row:?}");
+    let local = row.find("local ~12.3k").unwrap();
+    assert!(cache < local, "local after cache, row = {row:?}");
     assert!(
-        saved < row.find("[Dashboard]").unwrap(),
-        "saved before right controls, row = {row:?}"
+        local < row.find("[Dashboard]").unwrap(),
+        "local meter before right controls, row = {row:?}"
     );
 
     agent.cache_rate = None;
     let buf = draw(&mut agent, &registry, false, OverlayHeader::default());
     let row = header_row(&agent, &buf);
     assert!(
-        row.contains("saved ~12.3k ▁▂▄█") && !row.contains("cache "),
-        "saved survives without cache, row = {row:?}"
+        row.contains("local ~12.3k ▁▂▄█") && !row.contains("cache "),
+        "local meter survives without cache, row = {row:?}"
     );
 
     let mut narrow = agent_at(56);
@@ -584,7 +584,7 @@ fn header_shows_local_replacement_after_cache_and_omits_it_when_narrow() {
     });
     let buf = draw(&mut narrow, &registry, false, OverlayHeader::default());
     let row = header_row(&narrow, &buf);
-    assert!(!row.contains("saved "), "narrow row = {row:?}");
+    assert!(!row.contains("local "), "narrow row = {row:?}");
     assert!(
         row.contains("[Dashboard]") && narrow.hit_dashboard.rect.is_some(),
         "right controls keep their hit area, row = {row:?}"

@@ -745,7 +745,7 @@ pub(crate) struct BlockViewerResume {
     pub scroll_offset: usize,
     pub follow_mode: bool,
 }
-/// Local-replacement meter from the usage update's `_meta`: cumulative tokens saved locally and the recent
+/// Local-workload meter from the usage update's `_meta`: cumulative tokens processed locally and the recent
 /// per-call samples. The count estimates replaced prompt tokens; it is not the exact remote billed baseline.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalReplacementMeter {

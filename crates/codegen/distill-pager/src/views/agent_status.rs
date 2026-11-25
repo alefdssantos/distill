@@ -255,7 +255,7 @@ pub(crate) fn sparkline(samples: &[u64]) -> String {
         .collect()
 }
 
-/// Status-bar meter for local replacement: `saved ~1.2k ▂▅█`.
+/// Status-bar meter for local workload: `local ~1.2k ▂▅█`.
 /// The token count is the local estimate of replaced prompt tokens, not the exact remote billed baseline.
 pub(crate) fn local_replacement_line(
     tokens: u64,
@@ -268,9 +268,9 @@ pub(crate) fn local_replacement_line(
     let count = format_tokens_compact(i64::try_from(tokens).unwrap_or(i64::MAX));
     let graph = sparkline(samples);
     let text = if graph.is_empty() {
-        format!("saved ~{count}")
+        format!("local ~{count}")
     } else {
-        format!("saved ~{count} {graph}")
+        format!("local ~{count} {graph}")
     };
     Some(Line::from(Span::styled(
         text,
