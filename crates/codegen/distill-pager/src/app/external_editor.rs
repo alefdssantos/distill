@@ -302,6 +302,19 @@ fn gemini_session_command(app: &AppView) -> std::io::Result<std::process::Comman
     let executable = std::env::current_exe()?;
     let mut command = std::process::Command::new(executable);
     command.arg("--gemini").arg("--cwd").arg(&app.cwd);
+    // The parent's stdio may be a leader pipe, so attach the child to the
+    // controlling terminal directly instead of inheriting those descriptors.
+    #[cfg(unix)]
+    {
+        let tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")?;
+        command
+            .stdin(std::process::Stdio::from(tty.try_clone()?))
+            .stdout(std::process::Stdio::from(tty.try_clone()?))
+            .stderr(std::process::Stdio::from(tty));
+    }
     Ok(command)
 }
 
